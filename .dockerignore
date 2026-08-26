@@ -1,0 +1,7 @@
+# Build context is tiny on purpose: only the two JARs, jattach and the entrypoint.
+.git
+.gitattributes
+.gitignore
+README.md
+railway.json
+*.md

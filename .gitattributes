@@ -1,0 +1,10 @@
+# entrypoint.sh must stay LF: CRLF makes the container fail with
+# "/usr/local/bin/entrypoint.sh: not found" (shebang parsed as "/bin/bash\r").
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+
+# Binary artifacts: never touched by EOL conversion, never diffed.
+*.jar binary
+vendor/tools/jattach binary
