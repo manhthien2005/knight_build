@@ -59,24 +59,40 @@ declare -A PIDS=()
 
 start_acc() {
     local acc="$1"
-    mkdir -p "$ROOT/$acc/home" "$ROOT/$acc/tmp"
+    local home="$ROOT/$acc/home"
+    mkdir -p "$home" "$ROOT/$acc/tmp"
+    # 0700: the agent later keeps its private key and seeded RMS credentials under this
+    # tree (RUNTIME-SPEC §3.3). Nothing else in the container has a reason to read it.
+    chmod 0700 "$home"
+    # -cp + explicit org.microemu.app.Main is load-bearing, not stylistic. With -jar the game jar
+    # is NOT on the classpath, so MIDletClassLoader cannot resolve com.silverknight.TemMidlet and
+    # Main falls into its "user picks a jar" launcher: the MIDlet never starts and no snapshot is
+    # ever written. Measured all three forms — see RUNTIME-SPEC §3.1. --quit makes the JVM exit
+    # when the MIDlet is destroyed, so the supervisor below sees a dead tab instead of a live but
+    # empty JVM. Never revert this line to -jar.
     java \
-        -Duser.home="$ROOT/$acc/home" \
+        -Duser.home="$home" \
         -Djava.io.tmpdir="$ROOT/$acc/tmp" \
+        -Dzeus.player.out="$home/zeus-player.txt" \
+        -Dzeus.ctl.in="$home/zeus-control.txt" \
+        -Dpotato.ctl="$home/potato.ctl" \
         -Xms8m \
         -Xmx"${HEAP_MAX:-320m}" \
         -Xss512k \
         -XX:+UseSerialGC \
+        -XX:-UsePerfData \
         -XX:ReservedCodeCacheSize=32m \
         -XX:MaxMetaspaceSize=96m \
-        -XX:-UsePerfData \
         -XX:MinHeapFreeRatio="${MIN_HEAP_FREE:-10}" \
         -XX:MaxHeapFreeRatio="${MAX_HEAP_FREE:-25}" \
-        -jar /opt/microemulator-2.0.4/microemulator.jar \
-        --id "$acc" \
-        --rms file \
+        -XX:ErrorFile="$ROOT/$acc/tmp/hs_err_%p.log" \
+        -cp "/opt/microemulator-2.0.4/microemulator.jar:/opt/knight/game/Zeus_Knight.jar" \
+        org.microemu.app.Main \
         --resizableDevice "${DEVICE_WIDTH:-360}" "${DEVICE_HEIGHT:-480}" \
-        /opt/knight/game/KnightOnline_402.jar \
+        --rms file \
+        --id "$acc" \
+        --quiet --quit \
+        com.silverknight.TemMidlet \
         >>"$LOGS/$acc.log" 2>&1 &
     PIDS["$acc"]=$!
     log "$acc pid ${PIDS[$acc]}"
