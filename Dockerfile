@@ -54,16 +54,29 @@ ENV JAVA_HOME=/opt/java \
     PATH=/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 COPY vendor/microemulator-2.0.4/microemulator.jar /opt/microemulator-2.0.4/microemulator.jar
-COPY vendor/game/KnightOnline_402.jar /opt/knight/game/KnightOnline_402.jar
+COPY vendor/game/Zeus_Knight.jar /opt/knight/game/Zeus_Knight.jar
+# Build manifest (docs/full_spec/tool/WIRE-CONTRACT.md §2.4). The agent reads this at boot to
+# report devices.jar_ctl_version / jar_snapshot_version instead of parsing bytecode, so it must
+# ship beside the jar it describes. Not sha-pinned below: it is derived data whose own
+# jar_sha256 field names the jar, and a malformed copy fails closed when the agent parses it.
+COPY vendor/game/zeus-jar.json /opt/knight/game/zeus-jar.json
 # jattach: 63 KB static binary. A jlink runtime has no jcmd, and this is the
 # only way to force a full GC from outside the JVM so the RAM trim can uncommit.
 COPY vendor/tools/jattach /usr/local/bin/jattach
 
 # Fail the build on a corrupted/substituted artifact instead of failing at runtime.
-RUN printf '%s  %s\n' \
+# The fourth line is the same check run through the manifest: zeus-jar.json declares the
+# sha256 of the jar it describes, so re-pinning it here means a jar swapped without its
+# manifest (or a manifest copied from a different build) fails the build instead of
+# silently feeding the agent a wrong jar_ctl_version. grep returning nothing makes the
+# line malformed, so a corrupt manifest fails too.
+RUN set -eu; \
+    jar_sha="$(grep -oP '"jar_sha256":\s*"\K[0-9a-f]{64}' /opt/knight/game/zeus-jar.json)"; \
+    printf '%s  %s\n' \
         dbd5f3eb8365d3e839d6a203149e0e3776fc1a0585e16ac1fc23f76c9fcae1c6 /opt/microemulator-2.0.4/microemulator.jar \
-        6608bb0c77f03749e46165f711e9566dca4e172ce232256497b35faafe74c259 /opt/knight/game/KnightOnline_402.jar \
+        03ac4fa97bee0388edbb05287a91bc2bd1b5a8149d958ce64bbc2014f2b471ee /opt/knight/game/Zeus_Knight.jar \
         a08cb795a1e8d11ea6c2dd6adf8c9edead9a7c3bbca07681dad79cc3eaec0ef4 /usr/local/bin/jattach \
+        "$jar_sha" /opt/knight/game/Zeus_Knight.jar \
     | sha256sum -c - \
  && chmod +x /usr/local/bin/jattach
 
