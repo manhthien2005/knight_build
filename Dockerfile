@@ -63,6 +63,11 @@ COPY vendor/game/zeus-jar.json /opt/knight/game/zeus-jar.json
 # jattach: 63 KB static binary. A jlink runtime has no jcmd, and this is the
 # only way to force a full GC from outside the JVM so the RAM trim can uncommit.
 COPY vendor/tools/jattach /usr/local/bin/jattach
+# zeus-agent: PID 1. Pre-built as a static x86_64-unknown-linux-musl binary
+# (RUSTUP_TOOLCHAIN=stable cargo build --release --target x86_64-unknown-linux-musl -p zeus-agent).
+# Build locally with: Tool/tool/scripts/build-agent-linux.sh
+# then copy the output to vendor/tools/zeus-agent before `docker build`.
+COPY vendor/tools/zeus-agent /usr/local/bin/zeus-agent
 
 # Fail the build on a corrupted/substituted artifact instead of failing at runtime.
 # The fourth line is the same check run through the manifest: zeus-jar.json declares the
@@ -76,16 +81,21 @@ RUN set -eu; \
         dbd5f3eb8365d3e839d6a203149e0e3776fc1a0585e16ac1fc23f76c9fcae1c6 /opt/microemulator-2.0.4/microemulator.jar \
         03ac4fa97bee0388edbb05287a91bc2bd1b5a8149d958ce64bbc2014f2b471ee /opt/knight/game/Zeus_Knight.jar \
         a08cb795a1e8d11ea6c2dd6adf8c9edead9a7c3bbca07681dad79cc3eaec0ef4 /usr/local/bin/jattach \
+        ccf64b10cb4d29c4eb39956c24908a1d4852a1bbc3773a20a4ee13d2b67be4b2 /usr/local/bin/zeus-agent \
         "$jar_sha" /opt/knight/game/Zeus_Knight.jar \
     | sha256sum -c - \
- && chmod +x /usr/local/bin/jattach
+ && chmod +x /usr/local/bin/jattach \
+ && chmod +x /usr/local/bin/zeus-agent
 
 COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh && mkdir -p /opt/knight/logs
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+ && mkdir -p /opt/knight/logs /opt/knight/state
 
 # 320 MiB heaps: 2x320 worst case still leaves ~250 MiB for X/websockify/OS on
 # 1 GiB, and MaxHeapFreeRatio=25 means a tab only holds that much while it is
 # genuinely busy. Capping glibc arenas keeps native RSS from drifting upward.
+# ACCOUNTS is a fallback for the pre-pair bootstrap phase only (Task 9 will
+# remove it from the main code path once Supabase pairing is implemented).
 ENV MALLOC_ARENA_MAX=2 \
     HOME=/root \
     ACCOUNTS="acc1 acc2" \
@@ -101,4 +111,6 @@ ENV MALLOC_ARENA_MAX=2 \
     PORT=6080
 
 EXPOSE 6080
+# entrypoint.sh sets up X + noVNC, then exec's zeus-agent as PID 1.
+# See RUNTIME-SPEC §6 (A5) for the rationale.
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

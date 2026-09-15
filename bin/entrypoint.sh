@@ -1,19 +1,28 @@
 #!/bin/bash
-# PID 1 for the container: X server -> WM -> noVNC bridge -> N emulator tabs,
-# then supervise the tabs until the container is stopped.
+# PID 1 bootstrap for the container (RUNTIME-SPEC §6, A5).
+#
+# Responsibility split after Task 15:
+#   entrypoint.sh  — infrastructure only: X server, WM, noVNC bridge
+#   zeus-agent     — everything else: account lifecycle, supervision, Supabase,
+#                    SIGTERM handling, zombie reaping, RAM trim via jattach
+#
+# The final `exec zeus-agent` replaces this shell process, making zeus-agent
+# the true PID 1. From that point on:
+#   - SIGTERM from `docker stop` lands directly on zeus-agent
+#   - zeus-agent must call waitpid(-1, WNOHANG) to reap JVM zombies
+#   - All process management (start, stop, restart, trim) belongs to the agent
+#
+# Infrastructure processes (Xvnc, openbox, websockify) are started in the
+# background. If they die before exec, we fail fast. After exec, zeus-agent
+# is expected to monitor them and exit (triggering Railway's restart policy)
+# if a critical one dies.
 set -uo pipefail
 
 DISPLAY_NUM="${DISPLAY_NUM:-1}"
 export DISPLAY=":${DISPLAY_NUM}.0"
 LOGS=/opt/knight/logs
-ROOT=/opt/knight/accounts
 PORT="${PORT:-6080}"
 VNC_PORT=$((5900 + DISPLAY_NUM))
-MAX_LOG_BYTES="${MAX_LOG_BYTES:-5242880}"
-# Trim cadence: full GC every TRIM_INTERVAL seconds, but only on tabs whose RSS
-# already exceeds TRIM_RSS_KB. 0 disables trimming entirely.
-TRIM_INTERVAL="${TRIM_INTERVAL:-900}"
-TRIM_RSS_KB="${TRIM_RSS_KB:-180000}"
 
 log() { printf '[boot] %s\n' "$*"; }
 
@@ -36,139 +45,33 @@ for _ in $(seq 50); do
     xdotool getdisplaygeometry >/dev/null 2>&1 && break
     sleep 0.2
 done
-xdotool getdisplaygeometry >/dev/null 2>&1 || { log "Xvnc failed"; cat "$LOGS/xvnc.log"; exit 1; }
+xdotool getdisplaygeometry >/dev/null 2>&1 || {
+    log "Xvnc failed to start"
+    cat "$LOGS/xvnc.log"
+    exit 1
+}
 log "Xvnc up on :${DISPLAY_NUM} (${VNC_GEOMETRY:-800x600}x${VNC_DEPTH:-16})"
 
 # --- window manager ------------------------------------------------------
 # openbox only: gives focus handling and movable/decorated frames so both
 # emulator tabs can be seen and clicked. No panel, no compositor, no desktop.
 openbox >"$LOGS/openbox.log" 2>&1 &
-OPENBOX_PID=$!
+log "openbox started"
 
 # --- noVNC bridge --------------------------------------------------------
 # No TLS here on purpose: Railway terminates HTTPS at its edge, so the
 # browser still gets wss:// while this stays a plain local hop.
 websockify --web=/usr/share/novnc/ "0.0.0.0:${PORT}" "localhost:${VNC_PORT}" \
     >"$LOGS/websockify.log" 2>&1 &
-WS_PID=$!
 log "noVNC on :${PORT} -> localhost:${VNC_PORT}"
 
-# --- emulator tabs -------------------------------------------------------
-read -r -a ACCS <<<"${ACCOUNTS:-acc1 acc2}"
-declare -A PIDS=()
+# Brief settle: give websockify a moment to bind the port before the agent
+# tries to read it. 1 s is conservative — websockify typically binds in <100 ms.
+sleep 1
 
-start_acc() {
-    local acc="$1"
-    local home="$ROOT/$acc/home"
-    mkdir -p "$home" "$ROOT/$acc/tmp"
-    # 0700: the agent later keeps its private key and seeded RMS credentials under this
-    # tree (RUNTIME-SPEC §3.3). Nothing else in the container has a reason to read it.
-    chmod 0700 "$home"
-    # -cp + explicit org.microemu.app.Main is load-bearing, not stylistic. With -jar the game jar
-    # is NOT on the classpath, so MIDletClassLoader cannot resolve com.silverknight.TemMidlet and
-    # Main falls into its "user picks a jar" launcher: the MIDlet never starts and no snapshot is
-    # ever written. Measured all three forms — see RUNTIME-SPEC §3.1. --quit makes the JVM exit
-    # when the MIDlet is destroyed, so the supervisor below sees a dead tab instead of a live but
-    # empty JVM. Never revert this line to -jar.
-    java \
-        -Duser.home="$home" \
-        -Djava.io.tmpdir="$ROOT/$acc/tmp" \
-        -Dzeus.player.out="$home/zeus-player.txt" \
-        -Dzeus.ctl.in="$home/zeus-control.txt" \
-        -Dpotato.ctl="$home/potato.ctl" \
-        -Xms8m \
-        -Xmx"${HEAP_MAX:-320m}" \
-        -Xss512k \
-        -XX:+UseSerialGC \
-        -XX:-UsePerfData \
-        -XX:ReservedCodeCacheSize=32m \
-        -XX:MaxMetaspaceSize=96m \
-        -XX:MinHeapFreeRatio="${MIN_HEAP_FREE:-10}" \
-        -XX:MaxHeapFreeRatio="${MAX_HEAP_FREE:-25}" \
-        -XX:ErrorFile="$ROOT/$acc/tmp/hs_err_%p.log" \
-        -cp "/opt/microemulator-2.0.4/microemulator.jar:/opt/knight/game/Zeus_Knight.jar" \
-        org.microemu.app.Main \
-        --resizableDevice "${DEVICE_WIDTH:-360}" "${DEVICE_HEIGHT:-480}" \
-        --rms file \
-        --id "$acc" \
-        --quiet --quit \
-        com.silverknight.TemMidlet \
-        >>"$LOGS/$acc.log" 2>&1 &
-    PIDS["$acc"]=$!
-    log "$acc pid ${PIDS[$acc]}"
-}
-
-# Tile tabs left-to-right as their windows appear, so a fresh container is
-# usable over noVNC without dragging windows apart by hand.
-place_new_window() {
-    local before="$1" col="$2" wid
-    for _ in $(seq 100); do
-        wid="$(comm -13 <(printf '%s\n' "$before") \
-                        <(xdotool search --name MicroEmulator 2>/dev/null | sort) | head -n1)"
-        [ -n "$wid" ] && break
-        sleep 0.3
-    done
-    [ -n "$wid" ] || return 0
-    xdotool windowmove "$wid" $((col * (DEVICE_WIDTH + 16))) 0 2>/dev/null
-}
-
-col=0
-for acc in "${ACCS[@]}"; do
-    before="$(xdotool search --name MicroEmulator 2>/dev/null | sort)"
-    start_acc "$acc"
-    place_new_window "$before" "$col"
-    col=$((col + 1))
-done
-
-# --- shutdown / supervision ---------------------------------------------
-shutdown() {
-    trap - TERM INT
-    log "stopping"
-    for acc in "${ACCS[@]}"; do kill "${PIDS[$acc]}" 2>/dev/null; done
-    kill "$WS_PID" "$OPENBOX_PID" "$XVNC_PID" 2>/dev/null
-    wait
-    exit 0
-}
-trap shutdown TERM INT
-
-# Periodic RAM trim. A SerialGC full GC combined with
-# MinHeapFreeRatio/MaxHeapFreeRatio makes the JVM *uncommit* the pages it no
-# longer needs, so RSS actually drops instead of only heap "used" dropping.
-# Measured on this image: 254 MB RSS -> 194 MB after the garbage was collected.
-# Only trimmed above TRIM_RSS_KB so a quiet tab is never paused for nothing.
-trim_ram() {
-    local acc pid rss
-    for acc in "${ACCS[@]}"; do
-        pid="${PIDS[$acc]}"
-        kill -0 "$pid" 2>/dev/null || continue
-        rss="$(awk '/VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null || echo 0)"
-        [ "${rss:-0}" -gt "$TRIM_RSS_KB" ] || continue
-        jattach "$pid" jcmd GC.run >/dev/null 2>&1
-        sleep 1
-        log "trim $acc ${rss}kB -> $(awk '/VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null)kB"
-    done
-}
-
-ticks=0
-while :; do
-    sleep 10
-    kill -0 "$XVNC_PID" 2>/dev/null || { log "Xvnc died"; exit 1; }
-    kill -0 "$WS_PID" 2>/dev/null || { log "websockify died"; exit 1; }
-    for acc in "${ACCS[@]}"; do
-        if ! kill -0 "${PIDS[$acc]}" 2>/dev/null; then
-            log "$acc exited, restarting"
-            before="$(xdotool search --name MicroEmulator 2>/dev/null | sort)"
-            start_acc "$acc"
-            place_new_window "$before" 0
-        fi
-        # Unbounded logs would fill the Railway disk on a multi-day session.
-        if [ "$(stat -c %s "$LOGS/$acc.log" 2>/dev/null || echo 0)" -gt "$MAX_LOG_BYTES" ]; then
-            : >"$LOGS/$acc.log"
-        fi
-    done
-    ticks=$((ticks + 10))
-    if [ "$TRIM_INTERVAL" -gt 0 ] && [ "$ticks" -ge "$TRIM_INTERVAL" ]; then
-        ticks=0
-        trim_ram
-    fi
-done
+# --- hand off to zeus-agent as PID 1 ------------------------------------
+# exec replaces this shell, so zeus-agent inherits PID 1.
+# Environment variables set above (DISPLAY, PORT, VNC_PORT, etc.) are visible
+# to the agent via std::env::var.
+log "exec zeus-agent (PID 1)"
+exec zeus-agent
