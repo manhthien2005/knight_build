@@ -21,7 +21,7 @@ RUN jlink \
 FROM rust:1-slim AS agent-builder
 WORKDIR /src
 # Only copy Rust workspace — not the whole repo — to keep layer caches tight.
-COPY Tool/tool .
+COPY tool .
 # rusqlite "bundled" feature compiles sqlite from C; cc is already in rust:1-slim.
 ENV RUSTUP_TOOLCHAIN=stable
 RUN cargo build --release -p zeus-agent
@@ -107,4 +107,5 @@ ENV MALLOC_ARENA_MAX=2 \
 EXPOSE 6080
 # entrypoint.sh sets up X + noVNC, then exec's zeus-agent as PID 1.
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
 
