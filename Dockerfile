@@ -46,12 +46,11 @@ RUN apt-get update \
         fontconfig \
         libfreetype6 \
         libxext6 libxi6 libxrender1 libxtst6 \
-        # iproute2 for 'ss' command (VNC viewer count B8.1)
         iproute2 \
- && dpkg --purge --force-depends \
+ && (dpkg --purge --force-depends \
         libgl1-mesa-dri libllvm15 \
         python3-numpy python3-babel python-babel-localedata \
-        python3-netaddr ieee-data liblapack3 libblas3 libgfortran5 libquadmath0 \
+        python3-netaddr ieee-data liblapack3 libblas3 libgfortran5 libquadmath0 || true) \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb \
            /usr/share/doc /usr/share/man /usr/share/locale/[a-df-z]* \
            /usr/share/novnc/*.md /usr/share/novnc/karma.conf.js /usr/share/novnc/tests \
@@ -108,3 +107,4 @@ ENV MALLOC_ARENA_MAX=2 \
 EXPOSE 6080
 # entrypoint.sh sets up X + noVNC, then exec's zeus-agent as PID 1.
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
