@@ -1,6 +1,6 @@
 # Knight Age Online (KnightOnline_402) — Docker build cho Railway
 
-Image tối giản để treo game J2ME `KnightOnline_402.jar` trong MicroEmulator 2.0.4,
+Image tối giản để treo game J2ME `Zeus_Knight.jar` trong MicroEmulator 2.0.4,
 xem/điều khiển qua noVNC trong browser. Mặc định chạy **2 tab** (`acc1`, `acc2`)
 với RMS + config tách riêng, vừa hạn mức Railway 2 vCPU / 1 GiB.
 
@@ -89,7 +89,8 @@ nên mỗi JVM phải tự nạp và giữ metadata class riêng. Thêm 14 MB ar
 - RMS tách biệt: có cả `accounts/acc1/home/.microemulator/config2.xml` và `acc2/...`.
 - Từ container resolve + mở được TCP `hs1.teamobi.com:19129` và
   `hsglobal.teamobi.com:19129` (host lấy từ `dx.class` trong game jar).
-- `sha256sum -c` cả 3 artifact ngay trong build.
+- `sha256sum -c` cả 3 artifact ngay trong build, cộng một lần check chéo `jar_sha256` khai trong
+  `zeus-jar.json` (4 dòng check): jar đổi mà manifest không đổi thì build fail.
 
 ## Đã bỏ những gì so với image gốc
 

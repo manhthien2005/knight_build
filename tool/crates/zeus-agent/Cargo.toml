@@ -1,0 +1,51 @@
+[package]
+name = "zeus-agent"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "zeus-agent"
+path = "src/main.rs"
+
+# Versions are pinned to what was measured: U4 proved this set compiles under the workspace
+# release profile (panic = "abort", opt-level = "s", lto = "thin", edition 2024) on Linux, and
+# V4.3 proved the crypto crates interoperate with WebCrypto. See AGENT-SPEC §2 B0.4.
+#
+# No tokio, by constraint: zeus-core is fully synchronous, the realtime socket runs on its own
+# thread via tungstenite + mpsc, and pulling tokio in would async-ify the whole tree for one
+# WebSocket.
+[dependencies]
+zeus-core = { path = "../zeus-core" }
+tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+ureq = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+p256 = { version = "0.14", features = ["ecdh"] }
+# sha2 is 0.11, NOT the 0.10 the spec originally listed: hkdf 0.13 requires sha2 0.11, and
+# pairing them the other way fails to compile (E0277, CoreProxy unsatisfied). p256 0.14 and
+# aes-gcm 0.11 already pull sha2 0.11, so 0.11 keeps a single sha2 across this crate.
+hkdf = "0.13"
+sha2 = "0.11"
+aes-gcm = "0.11"
+# rand_core is a direct dep because `fill_bytes` lives on its RngCore trait. Note the skew:
+# p256 0.14 pulls rand_core 0.10 while rand 0.9 pulls 0.9, so `rand::rngs::OsRng` cannot be
+# passed to p256's `SecretKey::random`. That does not matter here — the device key is derived
+# from RAILWAY_SERVICE_ID rather than generated, ephemeral keys come from the browser, and this
+# crate only needs randomness for 12-byte AES-GCM nonces and an ephemeral scalar.
+rand = "0.9"
+rand_core = "0.9"
+libc = "0.2"
+# crypto.rs (Task 10). All three were already in the lock transitively, so this is additive.
+base64 = "0.23"
+thiserror = "2"
+# tempfile: used by main_loop::build_control_settings to parse JSONB via zeus-core read_settings.
+tempfile = "3"
+# hex: pair code + private_key_seed encoding in pairing.rs.
+hex = "0.4"
+
+[dev-dependencies]
+# V4.3 interop test transcribes the recorded crypto vector byte-for-byte.
+hex-dev = { package = "hex", version = "0.4" }

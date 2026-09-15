@@ -1,0 +1,13 @@
+[toolchain]
+# The host triple here is deliberate, and removing it breaks this machine.
+# Bare `stable` resolves to the host default (x86_64-pc-windows-msvc), whose rustc shells out to
+# `link.exe`. Under Git Bash, `/usr/bin/link` from coreutils shadows it and every build script dies
+# with "link: extra operand … Try 'link --help'". The GNU toolchain links through mingw gcc, which
+# resolves correctly. Verified 2026-09-12 by making exactly that mistake.
+#
+# Cost: a channel name carrying a host triple cannot build for any other host, so the Linux agent
+# build must override it rather than edit this file — `RUSTUP_TOOLCHAIN=stable cargo build …`
+# (the env var outranks rust-toolchain.toml). See docs/full_spec/tool/AGENT-SPEC.md §9.1.
+channel = "stable-x86_64-pc-windows-gnu"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
