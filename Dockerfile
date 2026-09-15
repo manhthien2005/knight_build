@@ -1,14 +1,12 @@
 # KnightOnline_402 (J2ME MIDlet) on MicroEmulator 2.0.4, viewed over noVNC.
 # Target: Railway 2 vCPU / 1 GiB, 2 emulator tabs.
 #
-# Stage 1 builds a jlink runtime with only the modules the emulator actually
-# needs, then dumps a CDS archive. Java version is pinned to the runtime already
-# smoke-verified on Windows (Temurin 11.0.32+9), so JVM behaviour matches.
+# Stage 1 (jre): jlink runtime + CDS archive.
+# Stage 2 (agent): Rust build of zeus-agent.
+# Stage 3 (final): runtime image.
 #
-# Measured effect of this stage vs shipping the full eclipse-temurin JRE:
-#   image 597 MB -> 533 MB, and container RAM with 2 tabs 196 MiB -> 185 MiB,
-# because the 10 MB CDS archive is mmap'd read-only and shared by both JVMs
-# instead of each one filling its own metaspace.
+# Measured effect of jlink stage vs shipping the full eclipse-temurin JRE:
+#   image 597 MB -> 533 MB, container RAM 196 MiB -> 185 MiB.
 FROM eclipse-temurin:11.0.32_9-jdk-jammy AS jre
 RUN jlink \
         --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.prefs,java.security.jgss,java.instrument,jdk.unsupported,jdk.attach \
@@ -16,18 +14,26 @@ RUN jlink \
         --output /jre \
  && /jre/bin/java -Xshare:dump
 
+# ── Stage 2: Build zeus-agent (Rust) ─────────────────────────────────────────
+# RUSTUP_TOOLCHAIN outranks rust-toolchain.toml which pins a Windows host triple.
+# Do NOT change the toolchain file to "stable" — that switches Windows builds to
+# MSVC and /usr/bin/link shadows link.exe under Git Bash (AGENT-SPEC §2 B0.1).
+FROM rust:1-slim AS agent-builder
+WORKDIR /src
+# Only copy Rust workspace — not the whole repo — to keep layer caches tight.
+COPY Tool/tool .
+# rusqlite "bundled" feature compiles sqlite from C; cc is already in rust:1-slim.
+ENV RUSTUP_TOOLCHAIN=stable
+RUN cargo build --release -p zeus-agent
+# Output: /src/target/release/zeus-agent
+
+# ── Stage 3: Final runtime image ──────────────────────────────────────────────
 FROM ubuntu:22.04
 
 # X server + noVNC bridge + minimal WM. No desktop environment, no browser,
 # no systemd/snapd, no audio stack: the game JAR only uses
 # javax.microedition.{lcdui,io,rms,midlet} (verified by scanning all 187
 # classes), so there is no media/audio code path to support.
-#
-# The dpkg --purge line drops packages apt pulled in but nothing here executes:
-# libgl1-mesa-dri + libllvm15 (~146 MB) are only a *Recommends* of tigervnc for
-# GLX acceleration, which a software framebuffer never touches; the numpy/babel/
-# lapack chain came in via websockify; perl modules via a tigervnc helper script.
-# Verified after purging that Xvnc, openbox, noVNC and the emulator all still run.
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -40,6 +46,8 @@ RUN apt-get update \
         fontconfig \
         libfreetype6 \
         libxext6 libxi6 libxrender1 libxtst6 \
+        # iproute2 for 'ss' command (VNC viewer count B8.1)
+        iproute2 \
  && dpkg --purge --force-depends \
         libgl1-mesa-dri libllvm15 \
         python3-numpy python3-babel python-babel-localedata \
@@ -55,33 +63,21 @@ ENV JAVA_HOME=/opt/java \
 
 COPY vendor/microemulator-2.0.4/microemulator.jar /opt/microemulator-2.0.4/microemulator.jar
 COPY vendor/game/Zeus_Knight.jar /opt/knight/game/Zeus_Knight.jar
-# Build manifest (docs/full_spec/tool/WIRE-CONTRACT.md §2.4). The agent reads this at boot to
-# report devices.jar_ctl_version / jar_snapshot_version instead of parsing bytecode, so it must
-# ship beside the jar it describes. Not sha-pinned below: it is derived data whose own
-# jar_sha256 field names the jar, and a malformed copy fails closed when the agent parses it.
 COPY vendor/game/zeus-jar.json /opt/knight/game/zeus-jar.json
-# jattach: 63 KB static binary. A jlink runtime has no jcmd, and this is the
-# only way to force a full GC from outside the JVM so the RAM trim can uncommit.
 COPY vendor/tools/jattach /usr/local/bin/jattach
-# zeus-agent: PID 1. Pre-built as a static x86_64-unknown-linux-musl binary
-# (RUSTUP_TOOLCHAIN=stable cargo build --release --target x86_64-unknown-linux-musl -p zeus-agent).
-# Build locally with: Tool/tool/scripts/build-agent-linux.sh
-# then copy the output to vendor/tools/zeus-agent before `docker build`.
-COPY vendor/tools/zeus-agent /usr/local/bin/zeus-agent
 
-# Fail the build on a corrupted/substituted artifact instead of failing at runtime.
-# The fourth line is the same check run through the manifest: zeus-jar.json declares the
-# sha256 of the jar it describes, so re-pinning it here means a jar swapped without its
-# manifest (or a manifest copied from a different build) fails the build instead of
-# silently feeding the agent a wrong jar_ctl_version. grep returning nothing makes the
-# line malformed, so a corrupt manifest fails too.
+# zeus-agent: built in stage 2, not pre-compiled vendor binary.
+COPY --from=agent-builder /src/target/release/zeus-agent /usr/local/bin/zeus-agent
+
+# Verify immutable artifacts (jar + jattach). zeus-agent sha is no longer pinned
+# here — it changes every build. The jar sha256 is cross-checked against the
+# manifest field so a jar swapped without its manifest fails the build.
 RUN set -eu; \
     jar_sha="$(grep -oP '"jar_sha256":\s*"\K[0-9a-f]{64}' /opt/knight/game/zeus-jar.json)"; \
     printf '%s  %s\n' \
         dbd5f3eb8365d3e839d6a203149e0e3776fc1a0585e16ac1fc23f76c9fcae1c6 /opt/microemulator-2.0.4/microemulator.jar \
         47d822f0a4d30f0d05d34aee0957c194c09b7e3a81c4be343693a12121a0b29a /opt/knight/game/Zeus_Knight.jar \
         a08cb795a1e8d11ea6c2dd6adf8c9edead9a7c3bbca07681dad79cc3eaec0ef4 /usr/local/bin/jattach \
-        ccf64b10cb4d29c4eb39956c24908a1d4852a1bbc3773a20a4ee13d2b67be4b2 /usr/local/bin/zeus-agent \
         "$jar_sha" /opt/knight/game/Zeus_Knight.jar \
     | sha256sum -c - \
  && chmod +x /usr/local/bin/jattach \
@@ -91,14 +87,13 @@ COPY bin/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh \
  && mkdir -p /opt/knight/logs /opt/knight/state
 
-# 320 MiB heaps: 2x320 worst case still leaves ~250 MiB for X/websockify/OS on
-# 1 GiB, and MaxHeapFreeRatio=25 means a tab only holds that much while it is
-# genuinely busy. Capping glibc arenas keeps native RSS from drifting upward.
-# ACCOUNTS is a fallback for the pre-pair bootstrap phase only (Task 9 will
-# remove it from the main code path once Supabase pairing is implemented).
+# Supabase URL + anon key are compile-time constants in zeus-agent binary.
+# Only env vars needed at runtime:
+#   ZEUS_DEVICE_NAME  (optional, default: knight-node)
+#   RAILWAY_SERVICE_ID (for stable keypair across redeploys, injected by Railway)
+# No email/password needed — device auth is derived from the keypair.
 ENV MALLOC_ARENA_MAX=2 \
     HOME=/root \
-    ACCOUNTS="acc1 acc2" \
     HEAP_MAX=320m \
     MIN_HEAP_FREE=10 \
     MAX_HEAP_FREE=25 \
@@ -112,5 +107,4 @@ ENV MALLOC_ARENA_MAX=2 \
 
 EXPOSE 6080
 # entrypoint.sh sets up X + noVNC, then exec's zeus-agent as PID 1.
-# See RUNTIME-SPEC §6 (A5) for the rationale.
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
