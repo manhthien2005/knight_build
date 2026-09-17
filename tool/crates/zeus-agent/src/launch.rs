@@ -57,6 +57,15 @@ pub struct AccountPaths {
 }
 
 impl AccountPaths {
+    /// Build paths for a given slot index. Layout: `/opt/knight/accounts/<slot>/home`.
+    pub fn for_slot(slot_index: i32) -> Self {
+        let base = PathBuf::from(format!("/opt/knight/accounts/{slot_index}"));
+        Self {
+            home: base.join("home"),
+            tmp: base.join("tmp"),
+        }
+    }
+
     pub fn control_file(&self) -> PathBuf {
         self.home.join(CONTROL_FILE_NAME)
     }
@@ -119,6 +128,23 @@ pub struct LaunchSpec {
 }
 
 impl LaunchSpec {
+    /// Builds a LaunchSpec with production defaults for the Docker container layout.
+    ///
+    /// JRE at `/opt/knight/jre/bin/java`, jars in `/opt/knight/game/`.
+    pub fn default_for_paths(paths: AccountPaths) -> Self {
+        Self {
+            java: PathBuf::from("/opt/knight/jre/bin/java"),
+            microemulator_jar: PathBuf::from("/opt/knight/game/me.jar"),
+            game_jar: PathBuf::from("/opt/knight/game/game.jar"),
+            paths,
+            profile_id: "default".to_string(),
+            device_width: 480,
+            device_height: 800,
+            heap: HeapConfig::default(),
+            headless: false,
+        }
+    }
+
     /// Assembles argv in the exact measured order.
     ///
     /// Order is not free: JVM flags must precede `-cp`, the main class follows the classpath,

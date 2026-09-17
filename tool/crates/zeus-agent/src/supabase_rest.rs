@@ -298,7 +298,7 @@ impl SupabaseRest {
         let value: serde_json::Value = response.json()?;
         value.as_str()
             .map(str::to_owned)
-            .ok_or_else(|| RestError::Parse("register_device: no uuid in response".into()))
+            .ok_or_else(|| RestError::Decode("register_device: no uuid in response".into()))
     }
 
     /// Kiem tra device da duoc user claim chua (user_id != null).
@@ -335,7 +335,7 @@ impl SupabaseRest {
         body["access_token"]
             .as_str()
             .map(str::to_owned)
-            .ok_or_else(|| RestError::Parse(
+            .ok_or_else(|| RestError::Decode(
                 format!("sign_in_as_device: no access_token (device_id={})", device_id)
             ))
     }

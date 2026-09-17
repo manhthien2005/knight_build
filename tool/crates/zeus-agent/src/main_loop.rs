@@ -46,7 +46,7 @@ use std::{
 #[cfg(unix)]
 use crate::{
     launch::AccountPaths,
-    process_unix::{AccountProcess, StopOutcome},
+    process_unix::{self, Child, StopOutcome},
     supabase_realtime::{ChangeType, RealtimeClient, RealtimeEvent},
     supabase_rest::{
         CommandRow, CommandStatus, ConfigStatus, DeviceHeartbeat, JarManifest, RestError,
@@ -55,7 +55,7 @@ use crate::{
 };
 
 #[cfg(unix)]
-use zeus_core::wire::{read_snapshot, write_settings, SNAPSHOT_FILE_NAME};
+use zeus_core::wire::{read_settings, read_snapshot, write_settings, SNAPSHOT_FILE_NAME, SUPPORTED_VERSION};
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
@@ -83,7 +83,7 @@ struct AccountState {
     config_version: i32,
     applied_version: i32,    // version đã apply thành công lần gần nhất
     /// JVM đang chạy, nếu có.
-    process: Option<AccountProcess>,
+    process: Option<Child>,
     /// Snapshot lần đọc trước (để detect thay đổi có nghĩa).
     last_snapshot: Option<serde_json::Value>,
     /// Nhịp telemetry: chỉ push khi thay đổi ý nghĩa hoặc 60s tick.
@@ -334,7 +334,7 @@ fn try_apply_config(acc: &mut AccountState, jar_ctl_version: i32, rest: &Supabas
     };
 
     // Ghi file. write_settings là atomic replace.
-    let control_path = AccountPaths::for_slot(acc.slot_index).control_txt();
+    let control_path = AccountPaths::for_slot(acc.slot_index).control_file();
     match write_settings(&settings, &control_path) {
         Ok(_) => {
             eprintln!("[config] account={} applied config_version={}", acc.id, acc.config_version);
@@ -367,7 +367,7 @@ fn try_apply_config(acc: &mut AccountState, jar_ctl_version: i32, rest: &Supabas
 fn build_control_settings(
     control: &serde_json::Value,
 ) -> Result<zeus_core::wire::ControlSettings, String> {
-    use zeus_core::wire::{ControlSettings, read_settings, write_settings, control_path};
+    use zeus_core::wire::ControlSettings;
     use std::io::Write;
 
     // Cách đơn giản nhất không đụng tới private fields của ControlSettings:
@@ -396,7 +396,10 @@ fn build_control_settings(
         }
     }
     // Parse lại bằng read_settings của zeus-core.
-    read_settings(tmp.path()).map_err(|e| format!("read_settings: {e}"))
+    match read_settings(tmp.path()).map_err(|e| format!("read_settings: {e}"))? {
+        Some(s) => Ok(s),
+        None => Err("read_settings returned None (empty control file)".into()),
+    }
 }
 
 #[cfg(unix)]
@@ -416,14 +419,17 @@ fn settings_has_detect_spots(control: &serde_json::Value) -> bool {
 
 #[cfg(unix)]
 fn reconcile_desired_state(acc: &mut AccountState) {
-    let running = acc.process.as_ref().map(|p| p.is_alive()).unwrap_or(false);
+    let running = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
     match acc.desired_state.as_str() {
         "running" if !running => {
             eprintln!("[reconcile] account={} slot={}: starting", acc.id, acc.slot_index);
             let paths = AccountPaths::for_slot(acc.slot_index);
-            match AccountProcess::spawn(&paths) {
-                Ok(proc) => {
-                    acc.process = Some(proc);
+            let spec = crate::launch::LaunchSpec::default_for_paths(paths);
+            let mut command = spec.command();
+            crate::process_unix::prepare(&mut command);
+            match crate::process_unix::spawn(command) {
+                Ok(child) => {
+                    acc.process = Some(child);
                 }
                 Err(e) => {
                     eprintln!("[reconcile] account={} spawn failed: {e}", acc.id);
@@ -432,16 +438,13 @@ fn reconcile_desired_state(acc: &mut AccountState) {
         }
         "stopped" if running => {
             eprintln!("[reconcile] account={} slot={}: stopping", acc.id, acc.slot_index);
-            if let Some(mut proc) = acc.process.take() {
-                match proc.stop(Duration::from_secs(5)) {
-                    Ok(StopOutcome::Exited) => {
+            if let Some(child) = acc.process.take() {
+                match process_unix::stop(&child, Duration::from_secs(5)) {
+                    StopOutcome::AlreadyGone | StopOutcome::Terminated => {
                         eprintln!("[reconcile] account={}: stopped cleanly", acc.id);
                     }
-                    Ok(StopOutcome::Killed) => {
+                    StopOutcome::Killed => {
                         eprintln!("[reconcile] account={}: killed", acc.id);
-                    }
-                    Err(e) => {
-                        eprintln!("[reconcile] account={} stop error: {e}", acc.id);
                     }
                 }
             }
@@ -531,12 +534,11 @@ fn dispatch_command(
 #[cfg(unix)]
 fn tick_snapshot_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
     let paths = AccountPaths::for_slot(acc.slot_index);
-    let snapshot_path = paths.home.join(SNAPSHOT_FILE_NAME);
 
     let now = crate::supabase_rest::now_rfc3339();
 
     // Không có process chạy → không có snapshot.
-    let process_state = if acc.process.as_ref().map(|p| p.is_alive()).unwrap_or(false) {
+    let process_state = if acc.process.as_ref().map(|p| p.alive()).unwrap_or(false) {
         "running"
     } else {
         "stopped"
@@ -563,18 +565,22 @@ fn tick_snapshot_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
         return;
     }
 
-    // Đọc snapshot (B6.1).
-    let snap = match read_snapshot(&snapshot_path) {
-        Ok(s) => s,
+    // Đọc snapshot (B6.1). read_snapshot validates the format; if it returns Ok we know the
+    // file is well-formed. We then re-read the raw text to build a JSON object for telemetry,
+    // because PlayerSnapshot does not impl Serialize.
+    let _snap = match read_snapshot(&paths.home) {
+        Ok(Some(s)) => s,
+        Ok(None) => return, // snapshot chưa được publish (trước khi char vào game)
         Err(_) => {
             // B6.5: snapshot không parse được → degraded.
             return;
         }
     };
 
-    let snap_json = match serde_json::to_value(&snap) {
-        Ok(v) => v,
-        Err(_) => return,
+    // Build JSON from the raw key=value file for the telemetry push.
+    let snap_json = match read_snapshot_as_json(&paths.snapshot_file()) {
+        Some(v) => v,
+        None => return,
     };
 
     // B6.2: chỉ push khi thay đổi có nghĩa.
@@ -582,7 +588,7 @@ fn tick_snapshot_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
         return;
     }
 
-    let pid = acc.process.as_ref().and_then(|p| p.pid()).map(|p| p as i32);
+    let pid = acc.process.as_ref().map(|p| p.pid);
     acc.last_snapshot = Some(snap_json.clone());
     acc.last_telemetry_push = Instant::now();
 
@@ -593,7 +599,7 @@ fn tick_snapshot_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
             pid,
             ram_mb: None,
             cpu_pct: None,
-            snapshot_version: Some(snap.v as u32),
+            snapshot_version: Some(SUPPORTED_VERSION as u32),
             snapshot: Some(snap_json),
             restarts: None,
             updated_at: now,
@@ -626,6 +632,32 @@ fn has_meaningful_change(old: &Option<serde_json::Value>, new: &serde_json::Valu
     false
 }
 
+/// Đọc file snapshot raw (key=value) và chuyển thành JSON object cho telemetry.
+/// PlayerSnapshot không impl Serialize nên không dùng serde_json::to_value được.
+#[cfg(unix)]
+fn read_snapshot_as_json(path: &std::path::Path) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut map = serde_json::Map::new();
+    for line in text.lines() {
+        if line.is_empty() { continue; }
+        if let Some((key, value)) = line.split_once('=') {
+            // Thử parse số trước, rồi fallback thành string.
+            let json_val = if let Ok(n) = value.parse::<i64>() {
+                serde_json::Value::Number(n.into())
+            } else if let Ok(f) = value.parse::<f64>() {
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or_else(|| serde_json::Value::String(value.to_string()))
+            } else {
+                serde_json::Value::String(value.to_string())
+            };
+            map.insert(key.to_string(), json_val);
+        }
+    }
+    if map.is_empty() { return None; }
+    Some(serde_json::Value::Object(map))
+}
+
 // ── heartbeat tick (B6.3) ─────────────────────────────────────────────────────
 
 #[cfg(unix)]
@@ -650,11 +682,11 @@ fn tick_heartbeat(
     let now_str = crate::supabase_rest::now_rfc3339();
     for acc in accounts.values() {
         if let Some(snap) = &acc.last_snapshot {
-            let pid = acc.process.as_ref().and_then(|p| p.pid()).map(|p| p as i32);
+            let pid = acc.process.as_ref().map(|p| p.pid);
             let _ = rest.push_runtime(
                 &acc.id,
                 &RuntimePayload {
-                    process_state: if acc.process.as_ref().map(|p| p.is_alive()).unwrap_or(false) {
+                    process_state: if acc.process.as_ref().map(|p| p.alive()).unwrap_or(false) {
                         "running".into()
                     } else {
                         "stopped".into()
