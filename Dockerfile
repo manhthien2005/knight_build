@@ -15,59 +15,97 @@ RUN jlink \
  && /jre/bin/java -Xshare:dump
 
 # ── Stage 2: Build zeus-agent (Rust) ─────────────────────────────────────────
-# CRITICAL: builder must use the SAME glibc as the runtime (ubuntu:22.04 = 2.35).
-# rust:1-slim is currently based on Debian Trixie which ships glibc 2.39.
-# A binary compiled against 2.39 cannot run on 2.35 → GLIBC_2.39 not found crash.
-#
-# Solution: build inside ubuntu:22.04 itself, install Rust toolchain via rustup.
-# This guarantees the compiled binary uses glibc 2.35 and loads cleanly in Stage 3.
+# ABI CONTRACT: both this stage and the final runtime use ubuntu:22.04 (glibc 2.35).
+# DO NOT change this to rust:1-slim — that image now ships glibc 2.39 (Debian Trixie)
+# which produces a binary that cannot load in the ubuntu:22.04 runtime.
 FROM ubuntu:22.04 AS agent-builder
 ENV DEBIAN_FRONTEND=noninteractive
-# Build toolchain: curl (rustup), ca-certificates, gcc (cc linker), pkg-config,
-# libssl-dev (needed by some ureq TLS feature even when using rustls), perl (ring crate).
+
+# Install complete build + verification toolchain.
+# file     : ELF format verification (was missing → false "not ELF" failure)
+# binutils : readelf, objdump, nm
+# build-essential: gcc, g++, make, libc6-dev (replaces separate gcc libc6-dev)
+# pkg-config libssl-dev perl: needed by ring/ureq crates
+# curl ca-certificates: rustup installer
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        curl ca-certificates gcc libc6-dev pkg-config libssl-dev perl make \
+        curl \
+        ca-certificates \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        perl \
+        file \
+        binutils \
  && rm -rf /var/lib/apt/lists/*
 
-# Install Rust stable via rustup (non-interactive, no PATH modification needed in RUN).
+# Install Rust stable via rustup. RUSTUP_HOME/CARGO_HOME in /usr/local so PATH
+# persists correctly across all subsequent RUN layers via the ENV below.
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
+
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
 
 WORKDIR /src
-# Only copy Rust workspace — not the whole repo — to keep layer caches tight.
+# Copy only the Rust workspace to keep layer cache tight.
 COPY tool .
 
-# CRITICAL: rust-toolchain.toml in ./tool pins channel = "stable-x86_64-pc-windows-gnu"
-# for the Windows dev host (avoids /usr/bin/link coreutils collision under Git Bash).
-# RUSTUP_TOOLCHAIN env var outranks rust-toolchain.toml per rustup precedence rules.
-# (Documented in rust-toolchain.toml comment: "the Linux agent build must override it
-#  rather than edit this file — RUSTUP_TOOLCHAIN=stable cargo build …")
+# ── Toolchain override ────────────────────────────────────────────────────────
+# rust-toolchain.toml pins channel = "stable-x86_64-pc-windows-gnu" for the
+# Windows dev host (required to avoid /usr/bin/link Git Bash collision — see
+# the comment inside that file). RUSTUP_TOOLCHAIN env var outranks the file
+# per rustup precedence: env > rust-toolchain.toml > default.
+# The file itself documents this approach on line 9. DO NOT edit that file.
 ENV RUSTUP_TOOLCHAIN=stable
 
-# Verify: host must be x86_64-unknown-linux-gnu, NOT x86_64-pc-windows-gnu.
-# If this RUN step shows a Windows host, the build is wrong and must be fixed before
-# the cargo build step wastes time producing a PE32+ binary.
-RUN echo '=== toolchain verification ===' && \
-    rustc --version && \
-    rustc -vV && \
-    cargo --version && \
-    rustup show active-toolchain && \
-    echo '=== toolchain OK ==='
+# ── Pre-compile host assertion ────────────────────────────────────────────────
+# Fail immediately if the active host is not Linux. This prevents wasting the
+# full cargo build only to produce a PE32+ binary and a confusing error later.
+RUN set -eux; \
+    echo '=== Rust toolchain info ==='; \
+    rustc --version; \
+    rustc -vV; \
+    cargo --version; \
+    rustup show active-toolchain; \
+    HOST="$(rustc -vV | sed -n 's/^host: //p')"; \
+    echo "active host: ${HOST}"; \
+    test "${HOST}" = "x86_64-unknown-linux-gnu" \
+        || { echo "FATAL: rustc host is '${HOST}', expected x86_64-unknown-linux-gnu"; exit 1; }; \
+    echo '=== host assertion PASSED ==='
 
-RUN cargo build --release -p zeus-agent
+# ── Ensure Linux target is installed ─────────────────────────────────────────
+RUN rustup target add x86_64-unknown-linux-gnu
 
-# Regression gate: confirm the output is an ELF Linux binary, NOT a Windows PE32+.
-# If this fails, the toolchain override above is not working correctly.
-RUN echo '=== binary format check ===' && \
-    file target/release/zeus-agent && \
-    file target/release/zeus-agent | grep -q "ELF 64-bit" || \
-        { echo "FATAL: zeus-agent is not an ELF binary — toolchain misconfigured"; exit 1; } && \
-    echo '=== binary format OK (ELF 64-bit) ==='
-# Output: /src/target/release/zeus-agent
+# ── Compile ───────────────────────────────────────────────────────────────────
+# Explicit --target prevents any ambient config from redirecting to Windows.
+# Output: /src/target/x86_64-unknown-linux-gnu/release/zeus-agent
+RUN cargo build --release -p zeus-agent --target x86_64-unknown-linux-gnu
+
+# ── Binary format verification (in builder, where file/readelf are installed) ─
+# Each command is a separate test; a missing tool or wrong format causes an
+# immediate, clearly-named failure — not a misleading "toolchain misconfigured".
+RUN set -eux; \
+    BIN="target/x86_64-unknown-linux-gnu/release/zeus-agent"; \
+    echo '=== verifying binary exists and is executable ==='; \
+    test -f "${BIN}"; \
+    test -x "${BIN}"; \
+    echo '=== file utility check ==='; \
+    command -v file; \
+    file "${BIN}" | tee /tmp/zeus-file.txt; \
+    grep -q "ELF 64-bit" /tmp/zeus-file.txt \
+        || { echo "FAIL: not ELF 64-bit — see above"; cat /tmp/zeus-file.txt; exit 1; }; \
+    grep -q "x86-64" /tmp/zeus-file.txt \
+        || { echo "FAIL: not x86-64 — see above"; cat /tmp/zeus-file.txt; exit 1; }; \
+    echo '=== readelf check ==='; \
+    command -v readelf; \
+    readelf -h "${BIN}"; \
+    readelf -h "${BIN}" | grep -q "Machine:.*X86-64" \
+        || { echo "FAIL: readelf Machine is not X86-64"; exit 1; }; \
+    echo '=== ldd check (builder glibc) ==='; \
+    ldd "${BIN}"; \
+    echo '=== binary format verification PASSED ==='
 
 # ── Stage 3: Final runtime image ──────────────────────────────────────────────
 FROM ubuntu:22.04
@@ -107,27 +145,35 @@ COPY vendor/game/Zeus_Knight.jar /opt/knight/game/Zeus_Knight.jar
 COPY vendor/game/zeus-jar.json /opt/knight/game/zeus-jar.json
 COPY vendor/tools/jattach /usr/local/bin/jattach
 
-# zeus-agent: built in stage 2, not pre-compiled vendor binary.
-COPY --from=agent-builder /src/target/release/zeus-agent /usr/local/bin/zeus-agent
+# zeus-agent: exact path from the explicit --target build.
+# NOT target/release/ — that path is ambiguous and may not exist when
+# --target is used. Using the canonical target-qualified path.
+COPY --from=agent-builder \
+    /src/target/x86_64-unknown-linux-gnu/release/zeus-agent \
+    /usr/local/bin/zeus-agent
 
-# ── ABI / glibc smoke gate ────────────────────────────────────────────────────
-# Verify the compiled binary can actually be loaded inside THIS runtime image.
-# This catches glibc version mismatches and Windows PE32+ binaries at build time.
-#
-# 1. ldd --version   : print runtime glibc (must be 2.35 for ubuntu:22.04)
-# 2. ldd zeus-agent  : list shared lib deps; any "not found" = build failure
-# 3. ld-linux --verify: ELF interpreter directly verifies the binary is loadable
-# 4. ZEUS_SMOKE_TEST=1: actually execute the binary (early-exit, no network calls)
-RUN set -eu; \
-    echo '=== runtime glibc version ===' && \
-    ldd --version | head -1 && \
-    echo '=== ldd zeus-agent ===' && \
-    ldd /usr/local/bin/zeus-agent && \
-    echo '=== ld-linux verify ===' && \
-    /lib64/ld-linux-x86-64.so.2 --verify /usr/local/bin/zeus-agent && \
-    echo '=== zeus-agent binary smoke-test ===' && \
-    ZEUS_SMOKE_TEST=1 /usr/local/bin/zeus-agent && \
-    echo '=== ABI smoke gate PASSED ==='
+# ── ABI gate (final runtime stage) ───────────────────────────────────────────
+# Verify the binary is loadable inside THIS ubuntu:22.04 environment.
+# file/readelf are NOT installed here (build tools only). ldd is available
+# via libc-bin which is always present. ld-linux is in libc6.
+# ZEUS_SMOKE_TEST=1 executes the binary itself: early-exit path in main(),
+# prints wire constants, exits 0, no network calls.
+RUN set -eux; \
+    echo '=== final runtime ABI gate ==='; \
+    test -x /usr/local/bin/zeus-agent; \
+    echo '--- runtime glibc ---'; \
+    ldd --version | head -1; \
+    echo '--- ldd zeus-agent ---'; \
+    ldd /usr/local/bin/zeus-agent | tee /tmp/ldd-out.txt; \
+    grep -q "not found" /tmp/ldd-out.txt \
+        && { echo "FATAL: unresolved shared lib(s) — see ldd output above"; exit 1; } \
+        || true; \
+    echo '--- ld-linux ELF verify ---'; \
+    /lib64/ld-linux-x86-64.so.2 --verify /usr/local/bin/zeus-agent; \
+    echo '--- zeus-agent smoke-test ---'; \
+    ZEUS_SMOKE_TEST=1 /usr/local/bin/zeus-agent; \
+    echo '=== ABI gate PASSED ==='
+
 
 # Verify immutable artifacts (jar + jattach). zeus-agent sha is no longer pinned
 # here — it changes every build. The jar sha256 is cross-checked against the
