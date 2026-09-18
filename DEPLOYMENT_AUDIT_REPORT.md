@@ -1,10 +1,10 @@
 # BÁO CÁO KIỂM TRA & ĐÁNH GIÁ TRIỂN KHAI TOÀN DIỆN (DEPLOYMENT AUDIT REPORT)
 **Dự án**: `knight_build` (KnightOnline_402 Docker Runtime & Zeus Agent)  
 **Môi trường triển khai**: Railway (Metal Builder `builder-eoyagu`, Container 2 vCPU / 1 GiB RAM)  
-**Phiên kiểm tra & Khắc phục**: Round 20 + PA (`93ee4b4`) + PB (`89c786c`) + PC (`ac9f15e`) + PD toolchain fix (`2f2a3ae`)  
-**BASE_COMMIT**: `309412e` | **FINAL_COMMIT**: `2f2a3ae` | **LAST_VERIFIED_AT**: 2026-09-18T22:57 +07:00  
-**Trạng thái**: ⚠️ **READY_FOR_STAGING (P0 TOOLCHAIN FIX APPLIED)** — PD-01 sẽ xác nhận bằng kết quả Railway build.  
-**Tổng số vấn đề**: **109 gốc** + **4 PA** + **5 PB** + **1 PC** + **1 PD** = 120 điểm — tất cả đã khắc phục trong source. Railway builder sẽ xác nhận.  
+**Phiên kiểm tra & Khắc phục**: Round 20 + PA + PB + PC + PD + PE pipeline fix (`f6f764a`)  
+**BASE_COMMIT**: `309412e` | **FINAL_COMMIT**: `f6f764a` | **LAST_VERIFIED_AT**: 2026-09-18T23:14 +07:00  
+**Trạng thái**: ⚠️ **READY_FOR_STAGING (P0 BUILD PIPELINE FIXED)** — PE-01/PE-02 đã fix. Chờ Railway build confirm.  
+**Tổng số vấn đề**: **109 gốc** + 4 PA + 5 PB + 1 PC + 1 PD + **2 PE** = 122 điểm — tất cả khắc phục trong source. Railway sẽ xác nhận.  
 
 ---
 
@@ -710,3 +710,71 @@ READY_FOR_STAGING — chờ Railway build pass
   2. `=== binary format OK (ELF 64-bit) ===`
   3. `=== ABI smoke gate PASSED ===`
   4. Container start, port 6080 lăng nghe, `zeus-agent` là PID 1
+
+---
+
+## PHỤ LỤC G — PE-01/PE-02: BROKEN DOCKER BUILD PIPELINE (P0)
+
+> Commit fix: `f6f764a`. Giải quyết toàn bộ chuỗi lỗi build sau khi chuyển sang ubuntu:22.04 builder.
+
+### Hai defect được phân biệt rõ
+
+#### PE-01 (Defect A) — Builder/runtime GLIBC mismatch
+
+| | |
+|--|--|
+| **Triệu chứng** | `GLIBC_2.39' not found` khi container start trên Railway |
+| **Nguồn gốc** | `rust:1-slim` → Debian Trixie → glibc 2.39; runtime `ubuntu:22.04` → glibc 2.35 |
+| **Impact** | Container không start được. P0. |
+| **Fix** | `FROM ubuntu:22.04 AS agent-builder` (commit `ac9f15e`) |
+| **Status** | FIXED — nhưng triggered PE-02 vì builder stage được viết lại |
+
+#### PE-02 (Defect B) — Broken binary verification (`file` utility missing)
+
+| | |
+|--|--|
+| **Triệu chứng** | `/bin/sh: 1: file: not found` → `FATAL: zeus-agent is not an ELF binary` |
+| **Nguồn gốc** | `file` utility KHÔNG được cài trong `ubuntu:22.04` minimal. Lệnh `file ... \| grep -q ELF \|\| exit 1` khi `file` không tồn tại → pipe trả về không phải ELF → exit 1 với message SAI |
+| **Impact** | Binary KHÔNG phải non-ELF — verification tool bị thiếu. Message sai làm khó debug. P0 (build fail). |
+| **Fix** | Cài `file` + `binutils` trong apt-get; dùng deterministic RUN mỗi lệnh riêng biệt |
+| **Status** | FIXED_PENDING_VERIFICATION (commit `f6f764a`) |
+
+**Quan trọng**: PE-02 không chứng minh binary là sai format. Nó chứng minh verification tool bị thiếu.
+
+### Tất cả thay đổi trong `f6f764a` (Dockerfile)
+
+| # | Thay đổi | Giải quyết |
+|---|----------|-------------|
+| 1 | Thêm `file` + `binutils` vào apt-get (builder) | PE-02: file/readelf có sẵn |
+| 2 | Thay `build-essential` cho `gcc libc6-dev make` | Build toolchain đầy đủ |
+| 3 | Pre-compile host assertion: `HOST=$(rustc -vV)` | Phát hiện Windows host ngay |
+| 4 | `rustup target add x86_64-unknown-linux-gnu` | Target explicit, không nhập nhằng |
+| 5 | `cargo build --target x86_64-unknown-linux-gnu` | Không có ambient Windows redirect |
+| 6 | Binary path: `target/x86_64-unknown-linux-gnu/release/` | Path đúng khi dùng --target |
+| 7 | `COPY --from=agent-builder /src/target/x86_64-unknown-linux-gnu/...` | COPY đúng path |
+| 8 | Deterministic verification: `file \| tee; grep ELF; readelf; ldd` | Mỗi lệnh lỗi riêng |
+| 9 | ABI gate: `ldd \| tee; grep -q 'not found' && fail` | Logic đúng (trước inverted) |
+
+### Verification table sau fix
+
+| Gate | Tại | Kết quả | Ghi chú |
+|------|-----|---------|---------|
+| Rust host assertion | agent-builder | NEEDS_DOCKER | Phải: x86_64-unknown-linux-gnu |
+| `file zeus-agent` | agent-builder | NEEDS_DOCKER | Phải: ELF 64-bit x86-64 |
+| `readelf -h` Machine | agent-builder | NEEDS_DOCKER | Phải: X86-64 |
+| `ldd` (builder glibc) | agent-builder | NEEDS_DOCKER | Không có not found |
+| `ldd --version` | runtime | NEEDS_DOCKER | Phải: glibc 2.35 |
+| `ldd` (runtime) | runtime | NEEDS_DOCKER | Không có not found |
+| `ld-linux --verify` | runtime | NEEDS_DOCKER | Exit 0 |
+| `ZEUS_SMOKE_TEST=1` | runtime | NEEDS_DOCKER | Print wire constants, exit 0 |
+
+### Lịch sử build failures (3 commit liên tiếp)
+
+| Commit | Lỗi | Fix |
+|--------|-----|-----|
+| pre-`ac9f15e` | `GLIBC_2.39' not found` tại runtime | Builder → ubuntu:22.04 |
+| `ac9f15e`→`2f2a3ae` | `error: target tuple in channel name` | RUSTUP_TOOLCHAIN=stable |
+| `2f2a3ae`→`f6f764a` | `file: not found` / false non-ELF | Install file+binutils; explicit target |
+
+> **Commit `f6f764a` là commit đầu tiên có đầy đủ điều kiện để build thành công.**
+> Không mark Railway-ready cho đến khi build log xác nhận tất cả verification gates PASSED.
