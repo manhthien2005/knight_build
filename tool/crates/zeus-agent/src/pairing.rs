@@ -175,10 +175,26 @@ fn pair_device(
     eprintln!("[pairing] └──────────────────────────────────┘");
     eprintln!("[pairing] Device name: {device_name}");
 
-    // POST /devices → tạo hàng chưa có user_id.
-    let device_id = rest
-        .create_unpaired_device(&pair_code, &device_name, &pubkey_b64)
-        .map_err(|e| format!("create_unpaired_device: {e}"))?;
+    // POST /devices → create unpaired device row.
+    // pubkey_b64 is BASE64_STANDARD encoded SEC1 uncompressed bytes (65 bytes → 88 chars).
+    // The RPC register_device(text,text,text) receives this as p_pubkey TEXT and calls
+    // decode(p_pubkey,'base64') → BYTEA before storing. Never pass raw bytes or hex here.
+    let device_id = match rest.create_unpaired_device(&pair_code, &device_name, &pubkey_b64) {
+        Ok(id) => id,
+        Err(ref e) if is_schema_error(e) => {
+            // 400 means a contract mismatch between Rust and the SQL RPC.
+            // This is NOT a transient error — retrying immediately makes it worse
+            // (Railway restart loop, Supabase rate-limit, noisy logs).
+            // Log clearly and wait before allowing Railway to restart.
+            eprintln!("[pairing] SCHEMA CONTRACT ERROR in register_device: {e}");
+            eprintln!("[pairing] This is a permanent failure. Check that the SQL migration");
+            eprintln!("[pairing] 003_device_auth.sql register_device() uses decode(p_pubkey,'base64').");
+            eprintln!("[pairing] Sleeping 120s before exit to prevent tight restart loop.");
+            sleep(Duration::from_secs(120));
+            return Err(format!("create_unpaired_device schema error (400): {e}"));
+        }
+        Err(e) => return Err(format!("create_unpaired_device: {e}")),
+    };
 
     eprintln!("[pairing] device_id={device_id}, polling for user claim every 5s...");
 
@@ -230,6 +246,17 @@ fn pair_device(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Classify a `RestError` as a permanent schema/contract failure.
+///
+/// HTTP 400 = \"bad request\" = the SQL RPC rejected our parameter types or values.
+/// This is caused by a Rust↔SQL contract mismatch (e.g. sending TEXT where BYTEA expected)
+/// and cannot be fixed by retrying. It requires a code or migration fix.
+///
+/// HTTP 5xx and transport errors are transient and should be retried with backoff.
+fn is_schema_error(e: &crate::supabase_rest::RestError) -> bool {
+    matches!(e, crate::supabase_rest::RestError::Http { status, .. } if *status == 400)
+}
 
 /// Derive 32-byte key seed từ RAILWAY_SERVICE_ID dùng HKDF-SHA256.
 ///
