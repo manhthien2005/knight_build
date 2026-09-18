@@ -1,10 +1,10 @@
 # BÁO CÁO KIỂM TRA & ĐÁNH GIÁ TRIỂN KHAI TOÀN DIỆN (DEPLOYMENT AUDIT REPORT)
 **Dự án**: `knight_build` (KnightOnline_402 Docker Runtime & Zeus Agent)  
 **Môi trường triển khai**: Railway (Metal Builder `builder-eoyagu`, Container 2 vCPU / 1 GiB RAM)  
-**Phiên kiểm tra & Khắc phục**: Round 20 + PA (`93ee4b4`) + PB (`89c786c`) + PC glibc fix (`ac9f15e`)  
-**BASE_COMMIT**: `309412e` | **FINAL_COMMIT**: `ac9f15e` | **LAST_VERIFIED_AT**: 2026-09-18T22:39 +07:00  
-**Trạng thái**: ⚠️ **READY_FOR_STAGING (P0 GLIBC FIX APPLIED)** — PC-01 sẽ xác nhận bằng kết quả Docker build Railway.  
-**Tổng số vấn đề**: **109 gốc** + **4 PA** + **5 PB** + **1 PC** = 119 điểm — tất cả đã được khắc phục trong source. Docker build chưa chạy local, Railway builder sẽ xác nhận.  
+**Phiên kiểm tra & Khắc phục**: Round 20 + PA (`93ee4b4`) + PB (`89c786c`) + PC (`ac9f15e`) + PD toolchain fix (`2f2a3ae`)  
+**BASE_COMMIT**: `309412e` | **FINAL_COMMIT**: `2f2a3ae` | **LAST_VERIFIED_AT**: 2026-09-18T22:57 +07:00  
+**Trạng thái**: ⚠️ **READY_FOR_STAGING (P0 TOOLCHAIN FIX APPLIED)** — PD-01 sẽ xác nhận bằng kết quả Railway build.  
+**Tổng số vấn đề**: **109 gốc** + **4 PA** + **5 PB** + **1 PC** + **1 PD** = 120 điểm — tất cả đã khắc phục trong source. Railway builder sẽ xác nhận.  
 
 ---
 
@@ -626,3 +626,87 @@ READY_FOR_STAGING — chờ xác nhận Railway build
   2. `zeus-agent` start không có GLIBC error
   3. Port 6080 lăng nghe
   4. Pairing flow hoạt động
+
+---
+
+## PHỤ LỤC F — PD-01: RUST TOOLCHAIN CHANNEL MISMATCH (P0 — DOCKER BUILD FAILURE)
+
+> **Phát hiện**: Railway build fail với `error: target tuple in channel name 'stable-x86_64-pc-windows-gnu'`. Commit fix: `2f2a3ae`.
+
+### Mô tả
+
+**Triệu chứng:**
+```
+error: target tuple in channel name 'stable-x86_64-pc-windows-gnu'
+```
+Railway Docker build fail ngay trong `cargo build --release -p zeus-agent`.
+
+**Root cause:**
+```
+tool/rust-toolchain.toml (line 11):
+  channel = "stable-x86_64-pc-windows-gnu"
+  (cần cho Windows dev host, tránh /usr/bin/link Git Bash collision)
+
+Phúp cũ (Dockerfile trước PC commit):
+  ENV RUSTUP_TOOLCHAIN=stable  ← outranks rust-toolchain.toml
+
+Sau PC (glibc fix) — stage được viết lại — dòng ENV này bị DROP:
+  COPY tool .    ← rust-toolchain.toml được copy vào
+  RUN cargo build ...  ← rustup thấy Windows channel, fail trên Linux host
+```
+
+Rust-toolchain.toml đã document chính xác cách fix (line 9):
+> *"the Linux agent build must override it rather than edit this file — RUSTUP_TOOLCHAIN=stable cargo build"*
+
+**Severity**: **P0 — Docker build không compile được**.
+
+### Fix (commit `2f2a3ae`)
+
+```dockerfile
+# Sau COPY tool . (rust-toolchain.toml vào image), thêm:
+ENV RUSTUP_TOOLCHAIN=stable
+# env var outranks rust-toolchain.toml theo rustup precedence:
+# RUSTUP_TOOLCHAIN env > rust-toolchain.toml > default
+```
+
+Không sửa `rust-toolchain.toml` — file này đúng cho Windows dev host.
+
+### Verification Gates Added
+
+```bash
+# 1. Toolchain verification (trước cargo build)
+rustc -vV    # phải hiện: host: x86_64-unknown-linux-gnu
+rustup show active-toolchain  # phải hiện: stable-x86_64-unknown-linux-gnu
+
+# 2. Binary format check (sau cargo build)
+file target/release/zeus-agent | grep 'ELF 64-bit'
+# Nếu là PE32+ (Windows) → build FAIL
+
+# 3. Final runtime ABI gate
+ldd /usr/local/bin/zeus-agent
+/lib64/ld-linux-x86-64.so.2 --verify /usr/local/bin/zeus-agent
+ZEUS_SMOKE_TEST=1 /usr/local/bin/zeus-agent
+```
+
+### Summary: 3 build fixes cộng dồn
+
+| Commit | Fix | Triệu chứng đã sửa |
+|--------|-----|--------------------|
+| `ac9f15e` | Builder: `rust:1-slim` → `ubuntu:22.04` | `GLIBC_2.39' not found` |
+| `2f2a3ae` | `ENV RUSTUP_TOOLCHAIN=stable` restore | `error: target tuple in channel name` |
+| (cần xác nhận) | ABI gate: ldd + ld-linux + smoke-test | Build pass, runtime load OK |
+
+### Release Decision (cập nhật)
+
+```
+READY_FOR_STAGING — chờ Railway build pass
+```
+
+- PD-01 (P0) đã được fix trong Dockerfile.
+- Cả 3 build failures (glibc, toolchain) đã được địa chỉ.
+- **Không mark STAGING_VALIDATED cho đến khi Railway build pass và `zeus-agent` start thành công.**
+- **Bước tiếp**: Trigger Railway redeploy trên commit `2f2a3ae`. Xác nhận:
+  1. `=== toolchain OK ===` trong build log (host: x86_64-unknown-linux-gnu)
+  2. `=== binary format OK (ELF 64-bit) ===`
+  3. `=== ABI smoke gate PASSED ===`
+  4. Container start, port 6080 lăng nghe, `zeus-agent` là PID 1
