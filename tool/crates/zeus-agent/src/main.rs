@@ -15,7 +15,7 @@
 //! ## Startup sequence
 //!
 //! 1. `pairing::ensure_paired` → `PairState { device_id, access_token, secret_key_bytes }`
-//! 2. `main_loop::run(cfg, access_token)` → never returns (Loop until SIGTERM)
+//! 2. `main_loop::run(cfg, access_token, secret_key_bytes)` → never returns (Loop until SIGTERM)
 
 // Both modules are unix-only: `launch` uses `std::os::unix::fs::PermissionsExt` for the 0700
 // account home, and `process_unix` uses `pre_exec`/`libc` for setsid, kill(-pgid) and waitpid.
@@ -58,11 +58,30 @@ use zeus_core::wire::{
 fn main() {
     #[cfg(unix)]
     {
-        // Read config from environment.
-        let cfg = match main_loop::AgentConfig::from_env() {
+        // Đọc Supabase URL/key từ env (với fallback về compile-time constants) — Issue #26
+        let supabase_url = std::env::var("SUPABASE_URL")
+            .unwrap_or_else(|_| supabase_rest::SUPABASE_URL.to_string());
+        let supabase_anon_key = std::env::var("SUPABASE_ANON_KEY")
+            .unwrap_or_else(|_| supabase_rest::SUPABASE_ANON_KEY.to_string());
+
+        let rest = supabase_rest::SupabaseRest::new(supabase_url, supabase_anon_key);
+
+        let state_dir = std::path::Path::new("/opt/knight/state");
+
+        // Pairing — Issue #03: device_id được lấy từ pair_state, không phải env var
+        let pair_state = match pairing::ensure_paired(&rest, state_dir) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[zeus-agent] pairing failed: {e}");
+                std::process::exit(1);
+            }
+        };
+
+        // Khởi tạo AgentConfig SAU khi có device_id từ pairing — Issue #03
+        let mut cfg = match main_loop::AgentConfig::from_env() {
             Ok(c) => c,
             Err(e) => {
-                // Không phải panic — eprintln và print contract constants để smoke test tetst pass.
+                // Không phải panic — eprintln và print contract constants để smoke test pass.
                 eprintln!("[zeus-agent] config error: {e}");
                 eprintln!("[zeus-agent] running in smoke-test mode (no Supabase env vars)");
                 println!(
@@ -73,22 +92,12 @@ fn main() {
             }
         };
 
-        let rest = supabase_rest::SupabaseRest::new(
-            supabase_rest::SUPABASE_URL.to_string(),
-            supabase_rest::SUPABASE_ANON_KEY.to_string(),
-        );
-
-        let state_dir = std::path::Path::new("/opt/knight/state");
-        let pair_state = match pairing::ensure_paired(&rest, state_dir) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[zeus-agent] pairing failed: {e}");
-                std::process::exit(1);
-            }
-        };
+        // Ghi đè device_id từ pair_state — Issue #03
+        cfg.device_id = pair_state.device_id;
 
         // Vòng chính — không bao giờ return.
-        main_loop::run(cfg, pair_state.access_token);
+        // Truyền secret_key_bytes vào main_loop — Issues #101, #06
+        main_loop::run(cfg, pair_state.access_token, pair_state.secret_key_bytes);
     }
 
     #[cfg(not(unix))]
@@ -100,4 +109,3 @@ fn main() {
         );
     }
 }
-

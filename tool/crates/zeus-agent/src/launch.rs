@@ -133,13 +133,14 @@ impl LaunchSpec {
     /// JRE at `/opt/knight/jre/bin/java`, jars in `/opt/knight/game/`.
     pub fn default_for_paths(paths: AccountPaths) -> Self {
         Self {
-            java: PathBuf::from("/opt/knight/jre/bin/java"),
-            microemulator_jar: PathBuf::from("/opt/knight/game/me.jar"),
-            game_jar: PathBuf::from("/opt/knight/game/game.jar"),
+            // Paths must match Dockerfile exactly — Issue #02
+            java: PathBuf::from("/opt/java/bin/java"),
+            microemulator_jar: PathBuf::from("/opt/microemulator-2.0.4/microemulator.jar"),
+            game_jar: PathBuf::from("/opt/knight/game/Zeus_Knight.jar"),
             paths,
             profile_id: "default".to_string(),
-            device_width: 480,
-            device_height: 800,
+            device_width: 360,
+            device_height: 480,
             heap: HeapConfig::default(),
             headless: false,
         }
@@ -200,9 +201,10 @@ impl LaunchSpec {
 
         // Cap glibc arenas from the environment side instead — see `environment()`.
 
-        // ── classpath, then main class ───────────────────────────────────────
+        // ── classpath, then main class ───────────────────────────────────
         // `:` is the Linux separator. This is the line that makes the MIDlet resolvable.
         command
+            .arg("-Xshare:auto") // Activate CDS archive built in Dockerfile Stage 1 — Issue #107
             .arg("-cp")
             .arg(format!(
                 "{}:{}",

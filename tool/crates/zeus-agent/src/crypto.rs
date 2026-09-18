@@ -169,18 +169,24 @@ pub struct PlaintextCredentials {
 }
 
 impl PlaintextCredentials {
-    /// Overwrites the in-memory plaintext with zeros. Zeroing before the buffer is freed is enough
-    /// for this threat model (not a cold-boot defence). Extracted as a method so it can be asserted
-    /// directly on live data — reading the bytes *after* drop observes freed memory that the
-    /// allocator may already have reused.
+    /// Overwrites the in-memory plaintext with zeros. Uses `ptr::write_volatile` and a
+    /// compiler fence to prevent LLVM Dead Store Elimination (DSE) from stripping the zero
+    /// writes before the allocation is freed — Issue #96.
     fn zeroize(&mut self) {
         // SAFETY: `String::as_mut_vec` is unsafe because the caller may write non-UTF-8 bytes.
         // Writing `0` is U+0000, which *is* valid UTF-8, so the String's invariant holds after
         // this returns. Length is preserved (no truncate/extend), so the allocation stays sound.
+        // `write_volatile` + compiler_fence prevents LLVM from eliding these stores as dead
+        // writes before the deallocation, which is what plain assignment cannot guarantee.
         unsafe {
-            self.username.as_mut_vec().iter_mut().for_each(|b| *b = 0);
-            self.password.as_mut_vec().iter_mut().for_each(|b| *b = 0);
+            for b in self.username.as_mut_vec().iter_mut() {
+                std::ptr::write_volatile(b as *mut u8, 0u8);
+            }
+            for b in self.password.as_mut_vec().iter_mut() {
+                std::ptr::write_volatile(b as *mut u8, 0u8);
+            }
         }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -197,6 +203,17 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
+    /// Creates a `DeviceIdentity` from a 32-byte seed scalar — Issue #102.
+    ///
+    /// This is the public bridge between `pairing::ensure_paired` (which returns
+    /// `secret_key_bytes: [u8; 32]`) and `crypto::unseal` (which needs a `DeviceIdentity`).
+    /// The private `identity_from_scalar_bytes` function exists but cannot be called from
+    /// outside this module; this constructor exposes exactly the conversion that `main_loop`
+    /// needs without exposing any other crypto internals.
+    pub fn from_seed_bytes(bytes: &[u8; 32]) -> Self {
+        identity_from_scalar_bytes(bytes)
+    }
+
     /// Derives the keypair from a stable seed rather than generating one, so a redeploy does not
     /// force every user to re-pair. V4.3 settled the HKDF parameters and the byte-to-scalar
     /// mapping; what remains open is V6.1 — whether `RAILWAY_SERVICE_ID` itself survives a

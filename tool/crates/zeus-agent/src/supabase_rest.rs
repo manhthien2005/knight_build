@@ -310,6 +310,23 @@ impl SupabaseRest {
         Ok(rows.first().map(|row| !row["user_id"].is_null()).unwrap_or(false))
     }
 
+    /// Đặt desired_state của account lên DB. Phải gọi khi nhận lệnh start/stop/restart
+    /// để trạng thái trong DB khớp với RAM — Issue #97, tránh reconnect giết bot.
+    pub fn set_account_desired_state(&self, account_id: &str, state: &str) -> Result<(), RestError> {
+        self.request("PATCH", &format!("/rest/v1/accounts?id=eq.{account_id}"))
+            .prefer("return=minimal")
+            .send_json(serde_json::json!({"desired_state": state}))?;
+        Ok(())
+    }
+
+    /// Đặt trạng thái device (online/offline). Gọi khi SIGTERM để web biết node đã tắt — Issue #91.
+    pub fn set_device_status(&self, device_id: &str, status: &str) -> Result<(), RestError> {
+        self.request("PATCH", &format!("/rest/v1/devices?id=eq.{device_id}"))
+            .prefer("return=minimal")
+            .send_json(serde_json::json!({"status": status}))?;
+        Ok(())
+    }
+
     /// Dang nhap bang credentials duoc derive tu pubkey (khong can env var nao).
     ///
     /// Formula phai khop chinh xac voi SQL trong 003_device_auth.sql:
@@ -368,6 +385,8 @@ pub struct JarManifest {
     pub patcher_sha256: String,
     /// Thêm để agent tự khai, không phải để tin: một image build sai có thể khai gian, nhưng
     /// khi đó nó cũng khai sai mọi thứ khác và sẽ bị bắt ở bước khác.
+    /// `#[serde(default)]` để không fail khi field này vắng mặt trong zeus-jar.json — Issue #09.
+    #[serde(default)]
     pub agent_version: String,
 }
 
@@ -404,6 +423,8 @@ pub struct AccountRow {
 pub struct CommandRow {
     pub id: String,
     pub account_id: Option<String>,
+    /// device_id để lọc multi-node — Issue #98
+    pub device_id: Option<String>,
     #[serde(rename = "type")]
     pub kind: String,
     pub payload: Option<serde_json::Value>,
