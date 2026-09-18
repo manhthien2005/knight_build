@@ -256,6 +256,40 @@ fn pair_device(
         Err(e) => return Err(format!("create_unpaired_device: {e}")),
     };
 
+    // ── Step 1.5: attempt immediate sign-in for existing claimed device ───────
+    // If this device was already claimed (e.g. Railway redeploy with ephemeral disk),
+    // sign_in_as_device will succeed immediately with the existing auth credentials.
+    match attempt_sign_in(rest, &device_id, &pubkey_bytes) {
+        SignInOutcome::Authenticated(access_token) => {
+            eprintln!("[pairing] existing claimed device recovered (device_id={device_id})");
+            eprintln!("[pairing] authenticated successfully — skipping pairing flow");
+
+            let djson = DeviceJson {
+                device_id: device_id.clone(),
+                pair_code: None, // claimed
+                private_key_seed: hex::encode(&seed),
+            };
+            save_device_json(device_json_path, &djson)?;
+
+            return Ok(PairState {
+                device_id,
+                access_token,
+                secret_key_bytes: seed,
+            });
+        }
+        SignInOutcome::NotYetClaimed => {
+            // Unclaimed device: proceed to display pair code and poll.
+        }
+        SignInOutcome::Permanent(msg) => {
+            eprintln!("[pairing] PERMANENT AUTH ERROR on recovery check: {msg}");
+            sleep(Duration::from_secs(120));
+            return Err(format!("permanent auth error during recovery check: {msg}"));
+        }
+        SignInOutcome::Transient(msg) => {
+            eprintln!("[pairing] transient error on initial auth check: {msg}");
+        }
+    }
+
     eprintln!("[pairing] ┌──────────────────────────────────┐");
     eprintln!("[pairing] │  PAIR CODE: {pair_code}              │");
     eprintln!("[pairing] │  Nhập vào web dashboard để pair   │");
