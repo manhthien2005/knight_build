@@ -1,10 +1,10 @@
 # BÁO CÁO KIỂM TRA & ĐÁNH GIÁ TRIỂN KHAI TOÀN DIỆN (DEPLOYMENT AUDIT REPORT)
 **Dự án**: `knight_build` (KnightOnline_402 Docker Runtime & Zeus Agent)  
 **Môi trường triển khai**: Railway (Metal Builder `builder-eoyagu`, Container 2 vCPU / 1 GiB RAM)  
-**Phiên kiểm tra & Khắc phục**: Round 20 + PA + PB + PC + PD + PE pipeline fix (`f6f764a`)  
-**BASE_COMMIT**: `309412e` | **FINAL_COMMIT**: `f6f764a` | **LAST_VERIFIED_AT**: 2026-09-18T23:14 +07:00  
-**Trạng thái**: ⚠️ **READY_FOR_STAGING (P0 BUILD PIPELINE FIXED)** — PE-01/PE-02 đã fix. Chờ Railway build confirm.  
-**Tổng số vấn đề**: **109 gốc** + 4 PA + 5 PB + 1 PC + 1 PD + **2 PE** = 122 điểm — tất cả khắc phục trong source. Railway sẽ xác nhận.  
+**Phiên kiểm tra & Khắc phục**: Round 20 + PA + PB + PC + PD + PE + PF (`005_fix_claim_device_pgcrypto.sql`)  
+**BASE_COMMIT**: `309412e` | **LAST_VERIFIED_AT**: 2026-09-19T00:05 +07:00  
+**Trạng thái**: ⚠️ **FIXED_PENDING_VERIFICATION (P0 PAIRING RPC FIX)** — PF-01 (`claim_device` pgcrypto resolution) đã tạo forward migration 005. Chờ áp dụng trên Supabase SQL Editor và xác nhận dashboard claim.  
+**Tổng số vấn đề**: **109 gốc** + 4 PA + 5 PB + 1 PC + 1 PD + 2 PE + **1 PF** = 123 điểm.  
 
 ---
 
@@ -778,3 +778,34 @@ READY_FOR_STAGING — chờ Railway build pass
 
 > **Commit `f6f764a` là commit đầu tiên có đầy đủ điều kiện để build thành công.**
 > Không mark Railway-ready cho đến khi build log xác nhận tất cả verification gates PASSED.
+
+---
+
+## PHỤ LỤC H — PF-01: CLAIM_DEVICE PGCRYPTO RESOLUTION FAILURE (P0 PAIRING BLOCKER)
+
+> Migration fix: `docs/full_spec/web-manager/migrations/005_fix_claim_device_pgcrypto.sql`  
+> Trạng thái: **FIXED_PENDING_VERIFICATION** (chờ áp dụng trên Supabase SQL Editor và test claim trên dashboard)
+
+### 1. Triệu chứng
+Khi người dùng nhập mã ghép nối (pair code) trên Web Dashboard, Supabase RPC trả về lỗi:
+```text
+PostgreSQL error 42883: function digest(bytea, unknown) does not exist
+```
+Dashboard hiển thị lỗi pairing thất bại.
+
+### 2. Nguyên nhân cốt lõi (Root Cause)
+1. Hàm `claim_device(code text)` được định nghĩa với `SECURITY DEFINER` và `SET search_path = public`.
+2. Trên Supabase, extension `pgcrypto` được cài đặt trong schema `extensions`.
+3. Khi `search_path` chỉ chứa `public`, PostgreSQL chỉ tìm kiếm hàm trong `public` và `pg_catalog`. Do đó, các lời gọi không định danh schema tới các hàm của `pgcrypto`:
+   - `digest(v_pubkey_bytes, 'sha256')`
+   - `crypt(v_device_password, gen_salt('bf', 8))`
+   đều không thể phân giải và gây ra lỗi `42883 (undefined_function)`.
+
+### 3. Giải pháp khắc phục (Forward Migration 005)
+Tạo migration tiếp theo `005_fix_claim_device_pgcrypto.sql` mà không sửa đổi đè lịch sử cũ:
+- Đảm bảo `CREATE EXTENSION IF NOT EXISTS pgcrypto;`.
+- Định danh rõ ràng schema `extensions.` cho mọi hàm pgcrypto trong `claim_device`:
+  - `extensions.digest(v_pubkey_bytes, 'sha256'::text)`
+  - `extensions.crypt(v_device_password, extensions.gen_salt('bf', 8))`
+- Giữ nguyên `SET search_path = public` để bảo vệ an toàn cho hàm `SECURITY DEFINER`.
+- Giữ nguyên 100% chữ ký hàm `claim_device(code text) RETURNS uuid`, kiểu dữ liệu, logic phân quyền (`GRANT EXECUTE TO authenticated`, `REVOKE FROM anon`), và thuật toán sinh credential khớp với Rust `pairing.rs`.
