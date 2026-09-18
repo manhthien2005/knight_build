@@ -15,15 +15,31 @@ RUN jlink \
  && /jre/bin/java -Xshare:dump
 
 # ── Stage 2: Build zeus-agent (Rust) ─────────────────────────────────────────
-# RUSTUP_TOOLCHAIN outranks rust-toolchain.toml which pins a Windows host triple.
-# Do NOT change the toolchain file to "stable" — that switches Windows builds to
-# MSVC and /usr/bin/link shadows link.exe under Git Bash (AGENT-SPEC §2 B0.1).
-FROM rust:1-slim AS agent-builder
+# CRITICAL: builder must use the SAME glibc as the runtime (ubuntu:22.04 = 2.35).
+# rust:1-slim is currently based on Debian Trixie which ships glibc 2.39.
+# A binary compiled against 2.39 cannot run on 2.35 → GLIBC_2.39 not found crash.
+#
+# Solution: build inside ubuntu:22.04 itself, install Rust toolchain via rustup.
+# This guarantees the compiled binary uses glibc 2.35 and loads cleanly in Stage 3.
+FROM ubuntu:22.04 AS agent-builder
+ENV DEBIAN_FRONTEND=noninteractive
+# Build toolchain: curl (rustup), ca-certificates, gcc (cc linker), pkg-config,
+# libssl-dev (needed by some ureq TLS feature even when using rustls), perl (ring crate).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        curl ca-certificates gcc libc6-dev pkg-config libssl-dev perl make \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install Rust stable via rustup (non-interactive, no PATH modification needed in RUN).
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+
 WORKDIR /src
 # Only copy Rust workspace — not the whole repo — to keep layer caches tight.
 COPY tool .
-# rusqlite "bundled" feature compiles sqlite from C; cc is already in rust:1-slim.
-ENV RUSTUP_TOOLCHAIN=stable
 RUN cargo build --release -p zeus-agent
 # Output: /src/target/release/zeus-agent
 
@@ -67,6 +83,24 @@ COPY vendor/tools/jattach /usr/local/bin/jattach
 
 # zeus-agent: built in stage 2, not pre-compiled vendor binary.
 COPY --from=agent-builder /src/target/release/zeus-agent /usr/local/bin/zeus-agent
+
+# ── ABI / glibc smoke gate ────────────────────────────────────────────────────
+# Verify the compiled binary can actually be loaded inside THIS runtime image.
+# If there's a glibc version mismatch (e.g. built on 2.39, running on 2.35) this
+# step catches it at build time instead of at Railway startup.
+#
+# ldd --version: prints the glibc version present in THIS stage (should be 2.35).
+# ldd zeus-agent: lists all shared lib deps; any "not found" = build failure.
+# ZEUS_SMOKE_TEST=1: triggers main()'s early-exit path — prints wire constants,
+#   exits 0, no network calls, no Supabase. Verifies the binary actually executes.
+RUN set -eu; \
+    echo '=== runtime glibc version ===' && \
+    ldd --version | head -1 && \
+    echo '=== ldd zeus-agent ===' && \
+    ldd /usr/local/bin/zeus-agent && \
+    echo '=== zeus-agent binary smoke-test ===' && \
+    ZEUS_SMOKE_TEST=1 /usr/local/bin/zeus-agent && \
+    echo '=== ABI smoke gate PASSED ==='
 
 # Verify immutable artifacts (jar + jattach). zeus-agent sha is no longer pinned
 # here — it changes every build. The jar sha256 is cross-checked against the

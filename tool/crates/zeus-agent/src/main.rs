@@ -58,6 +58,17 @@ use zeus_core::wire::{
 fn main() {
     #[cfg(unix)]
     {
+        // Smoke-test mode: ZEUS_SMOKE_TEST=1 → print wire contract constants and exit 0.
+        // Used during Docker build to verify the binary loads (no glibc errors) without
+        // making any network calls. Set by the Dockerfile ABI smoke gate RUN step.
+        if std::env::var("ZEUS_SMOKE_TEST").as_deref() == Ok("1") {
+            println!(
+                "zeus-agent smoke-test OK: control v{CONTROL_VERSION} / {CTL_KEY_COUNT} keys \
+                 ({CONTROL_FILE_NAME}), snapshot v{SUPPORTED_VERSION} ({SNAPSHOT_FILE_NAME})"
+            );
+            return;
+        }
+
         // Đọc Supabase URL/key từ env (với fallback về compile-time constants) — Issue #26
         let supabase_url = std::env::var("SUPABASE_URL")
             .unwrap_or_else(|_| supabase_rest::SUPABASE_URL.to_string());
