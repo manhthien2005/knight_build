@@ -150,9 +150,18 @@ impl AgentConfig {
             .ok()
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(6080);
+        fn normalize_viewer_base(input: &str) -> String {
+            let trimmed = input.trim().trim_end_matches('/');
+            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                trimmed.to_string()
+            } else {
+                format!("https://{trimmed}")
+            }
+        }
         let viewer_base_url = std::env::var("VIEWER_BASE_URL")
             .ok()
-            .or_else(|| std::env::var("RAILWAY_PUBLIC_DOMAIN").ok().map(|d| format!("https://{d}")));
+            .or_else(|| std::env::var("RAILWAY_PUBLIC_DOMAIN").ok())
+            .map(|s| normalize_viewer_base(&s));
         Ok(Self {
             device_id,
             jar_manifest_path: std::env::var("JAR_MANIFEST_PATH")
@@ -859,7 +868,7 @@ fn dispatch_command(
                 "open-viewer" => {
                     // Issue #10, #57: tạo viewer URL từ env
                     let viewer_url = cfg.viewer_base_url.as_ref()
-                        .map(|base| format!("{base}/vnc.html?autoconnect=1&resize=scale&host={base}&port=443&path=websockify"))
+                        .map(|base| format!("{base}/vnc.html?autoconnect=1&resize=scale&path=websockify"))
                         .unwrap_or_else(|| "noVNC not configured".to_string());
                     // Ghi potato.ctl "1 0" cho tất cả slots
                     for acc in accounts.values() {

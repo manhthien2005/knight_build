@@ -1,3 +1,6 @@
+target/
+target-gnu/
+target-linux/
 tool/target/
 tool/target-gnu/
 tool/target-linux/
