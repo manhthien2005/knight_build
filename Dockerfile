@@ -40,7 +40,33 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 WORKDIR /src
 # Only copy Rust workspace — not the whole repo — to keep layer caches tight.
 COPY tool .
+
+# CRITICAL: rust-toolchain.toml in ./tool pins channel = "stable-x86_64-pc-windows-gnu"
+# for the Windows dev host (avoids /usr/bin/link coreutils collision under Git Bash).
+# RUSTUP_TOOLCHAIN env var outranks rust-toolchain.toml per rustup precedence rules.
+# (Documented in rust-toolchain.toml comment: "the Linux agent build must override it
+#  rather than edit this file — RUSTUP_TOOLCHAIN=stable cargo build …")
+ENV RUSTUP_TOOLCHAIN=stable
+
+# Verify: host must be x86_64-unknown-linux-gnu, NOT x86_64-pc-windows-gnu.
+# If this RUN step shows a Windows host, the build is wrong and must be fixed before
+# the cargo build step wastes time producing a PE32+ binary.
+RUN echo '=== toolchain verification ===' && \
+    rustc --version && \
+    rustc -vV && \
+    cargo --version && \
+    rustup show active-toolchain && \
+    echo '=== toolchain OK ==='
+
 RUN cargo build --release -p zeus-agent
+
+# Regression gate: confirm the output is an ELF Linux binary, NOT a Windows PE32+.
+# If this fails, the toolchain override above is not working correctly.
+RUN echo '=== binary format check ===' && \
+    file target/release/zeus-agent && \
+    file target/release/zeus-agent | grep -q "ELF 64-bit" || \
+        { echo "FATAL: zeus-agent is not an ELF binary — toolchain misconfigured"; exit 1; } && \
+    echo '=== binary format OK (ELF 64-bit) ==='
 # Output: /src/target/release/zeus-agent
 
 # ── Stage 3: Final runtime image ──────────────────────────────────────────────
@@ -86,18 +112,19 @@ COPY --from=agent-builder /src/target/release/zeus-agent /usr/local/bin/zeus-age
 
 # ── ABI / glibc smoke gate ────────────────────────────────────────────────────
 # Verify the compiled binary can actually be loaded inside THIS runtime image.
-# If there's a glibc version mismatch (e.g. built on 2.39, running on 2.35) this
-# step catches it at build time instead of at Railway startup.
+# This catches glibc version mismatches and Windows PE32+ binaries at build time.
 #
-# ldd --version: prints the glibc version present in THIS stage (should be 2.35).
-# ldd zeus-agent: lists all shared lib deps; any "not found" = build failure.
-# ZEUS_SMOKE_TEST=1: triggers main()'s early-exit path — prints wire constants,
-#   exits 0, no network calls, no Supabase. Verifies the binary actually executes.
+# 1. ldd --version   : print runtime glibc (must be 2.35 for ubuntu:22.04)
+# 2. ldd zeus-agent  : list shared lib deps; any "not found" = build failure
+# 3. ld-linux --verify: ELF interpreter directly verifies the binary is loadable
+# 4. ZEUS_SMOKE_TEST=1: actually execute the binary (early-exit, no network calls)
 RUN set -eu; \
     echo '=== runtime glibc version ===' && \
     ldd --version | head -1 && \
     echo '=== ldd zeus-agent ===' && \
     ldd /usr/local/bin/zeus-agent && \
+    echo '=== ld-linux verify ===' && \
+    /lib64/ld-linux-x86-64.so.2 --verify /usr/local/bin/zeus-agent && \
     echo '=== zeus-agent binary smoke-test ===' && \
     ZEUS_SMOKE_TEST=1 /usr/local/bin/zeus-agent && \
     echo '=== ABI smoke gate PASSED ==='
