@@ -1,10 +1,10 @@
 # BÁO CÁO KIỂM TRA & ĐÁNH GIÁ TRIỂN KHAI TOÀN DIỆN (DEPLOYMENT AUDIT REPORT)
 **Dự án**: `knight_build` (KnightOnline_402 Docker Runtime & Zeus Agent)  
 **Môi trường triển khai**: Railway (Metal Builder `builder-eoyagu`, Container 2 vCPU / 1 GiB RAM)  
-**Phiên kiểm tra & Khắc phục**: Round 20 (FINAL) + Post-Audit PA (commit `93ee4b4`) + Final Verification Pass (commit `89c786c`)  
-**BASE_COMMIT**: `309412e` | **FINAL_COMMIT**: `89c786c` | **LAST_VERIFIED_AT**: 2026-09-18T22:15 +07:00  
-**Trạng thái**: ⏳ **READY_FOR_STAGING** — 109 issues gốc + 4 (PA) + 5 (PB) bổ sung. Build gates: NEEDS_DOCKER. Railway staging: NOT_RUN.  
-**Tổng số vấn đề**: **109 gốc** + **4 PA** + **5 PB** = 118 điểm — tất cả đã được khắc phục trong mã nguồn. Chưa có `cargo test` và Railway staging test.  
+**Phiên kiểm tra & Khắc phục**: Round 20 + PA (`93ee4b4`) + PB (`89c786c`) + PC glibc fix (`ac9f15e`)  
+**BASE_COMMIT**: `309412e` | **FINAL_COMMIT**: `ac9f15e` | **LAST_VERIFIED_AT**: 2026-09-18T22:39 +07:00  
+**Trạng thái**: ⚠️ **READY_FOR_STAGING (P0 GLIBC FIX APPLIED)** — PC-01 sẽ xác nhận bằng kết quả Docker build Railway.  
+**Tổng số vấn đề**: **109 gốc** + **4 PA** + **5 PB** + **1 PC** = 119 điểm — tất cả đã được khắc phục trong source. Docker build chưa chạy local, Railway builder sẽ xác nhận.  
 
 ---
 
@@ -533,3 +533,96 @@ READY_FOR_STAGING
 
 > **Anh cần deploy Railway staging và test các flow: pair device, start/stop, realtime command, viewer, JVM crash.**
 > Sau khi các flow đó pass, có thể nâng lên `STAGING_VALIDATED`.
+
+---
+
+## PHỤ LỤC E — PC-01: GLIBC VERSION MISMATCH (P0 — CONTAINER CRASH AT STARTUP)
+
+> **Phat hiện**: Railway dắn bạo GLIBC crash. Commit fix: `ac9f15e`.
+
+### Mô tả
+
+**Triệu chứng:**
+```
+zeus-agent: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found
+```
+Container khởi động xong, `entrypoint.sh` chạy được, nhưng `exec zeus-agent` fail ngay lập tức.
+
+**Root cause:**
+```
+agent-builder: FROM rust:1-slim
+  └─ Debian Trixie → glibc 2.39 (vừa upgrade lên)
+  └─ Binary link với symbol GLIBC_2.39
+
+runtime: FROM ubuntu:22.04
+  └─ glibc 2.35 (không có GLIBC_2.39)
+  └─ ELF loader từ chối nạp binary
+```
+
+**Severity**: **P0 — Container không start được trên Railway**.
+
+### Fix (commit `ac9f15e`)
+
+**Dockerfile Stage 2:**
+```dockerfile
+# TRƯỚC:
+FROM rust:1-slim AS agent-builder
+ENV RUSTUP_TOOLCHAIN=stable
+RUN cargo build --release -p zeus-agent
+
+# SAU: build trong ubuntu:22.04 (cùng glibc với runtime)
+FROM ubuntu:22.04 AS agent-builder
+RUN apt-get install -y gcc libc6-dev pkg-config libssl-dev perl make curl ca-certificates
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl ... | sh -s -- -y --default-toolchain stable --profile minimal
+RUN cargo build --release -p zeus-agent
+```
+
+Binary giờ được compile trên glibc 2.35 → chạy được trên ubuntu:22.04 runtime.
+
+### ABI Smoke Gate (regression protection)
+
+Sau mỗi lần build, Docker chạy các check sau ngay trong final runtime stage:
+
+```bash
+# 1. In phiên bản glibc runtime (phải là 2.35 cho ubuntu:22.04)
+ldd --version | head -1
+
+# 2. Kiểm tra tất cả shared lib dep của binary
+ldd /usr/local/bin/zeus-agent
+# Nếu có dòng "not found" -> build FAIL
+
+# 3. Thực tế chạy binary (ZEUS_SMOKE_TEST=1 → early exit, không có network call)
+ZEUS_SMOKE_TEST=1 /usr/local/bin/zeus-agent
+# Phải exit 0, in: "zeus-agent smoke-test OK: control v..."
+```
+
+`ZEUS_SMOKE_TEST=1` kích hoạt path trong `main()` (thêm vào commit `ac9f15e`) — in wire
+constants và exit 0 trước mọi Supabase/network call. Nếu glibc mismatch tái xuất hiện
+trong tương lai, `docker build` sẽ fail tại đây thay vì im lặng build một image broken.
+
+### Verification table sau fix
+
+| Check | Kết quả | Ghi chú |
+|-------|----------|-----------|
+| `ldd --version` | NEEDS_DOCKER | Phải là glibc 2.35 |
+| `ldd zeus-agent` | NEEDS_DOCKER | Phải không có `not found` |
+| `ZEUS_SMOKE_TEST=1 zeus-agent` | NEEDS_DOCKER | Phải exit 0 |
+| Railway startup | NOT_VERIFIED | Anh cần trigger Railway redeploy sau push `ac9f15e` |
+
+> ⚠️ **Không mark Railway-ready cho đến khi anh xác nhận Railway build thành công và container start không có GLIBC error.**
+
+### Release Decision (cập nhật)
+
+```
+READY_FOR_STAGING — chờ xác nhận Railway build
+```
+
+- PC-01 (P0) đã được fix trong source + Dockerfile.
+- ABI smoke gate đã được thêm để bảo vệ regression.
+- Chưa đủ điều kiện `STAGING_VALIDATED`: Railway build chưa chạy, staging flows chưa test.
+- **Bước tiếp**: Trigger Railway redeploy, xác nhận:
+  1. Docker build pass (ABI gate PASSED in log)
+  2. `zeus-agent` start không có GLIBC error
+  3. Port 6080 lăng nghe
+  4. Pairing flow hoạt động
