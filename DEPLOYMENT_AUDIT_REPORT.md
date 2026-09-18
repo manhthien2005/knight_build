@@ -1,10 +1,10 @@
 # BÁO CÁO KIỂM TRA & ĐÁNH GIÁ TRIỂN KHAI TOÀN DIỆN (DEPLOYMENT AUDIT REPORT)
 **Dự án**: `knight_build` (KnightOnline_402 Docker Runtime & Zeus Agent)  
 **Môi trường triển khai**: Railway (Metal Builder `builder-eoyagu`, Container 2 vCPU / 1 GiB RAM)  
-**Phiên kiểm tra & Khắc phục**: Round 20 + PA + PB + PC + PD + PE + PF (`005_fix_claim_device_pgcrypto.sql`)  
-**BASE_COMMIT**: `309412e` | **LAST_VERIFIED_AT**: 2026-09-19T00:05 +07:00  
-**Trạng thái**: ⚠️ **FIXED_PENDING_VERIFICATION (P0 PAIRING RPC FIX)** — PF-01 (`claim_device` pgcrypto resolution) đã tạo forward migration 005. Chờ áp dụng trên Supabase SQL Editor và xác nhận dashboard claim.  
-**Tổng số vấn đề**: **109 gốc** + 4 PA + 5 PB + 1 PC + 1 PD + 2 PE + **1 PF** = 123 điểm.  
+**Phiên kiểm tra & Khắc phục**: Round 20 + PA + PB + PC + PD + PE + PF (`006_fix_claim_device_on_conflict.sql`)  
+**BASE_COMMIT**: `309412e` | **LAST_VERIFIED_AT**: 2026-09-19T00:12 +07:00  
+**Trạng thái**: ⚠️ **FIXED_PENDING_VERIFICATION (P0 PAIRING RPC FIX)** — PF-02 (`claim_device` auth.users ON CONFLICT error) đã tạo forward migration 006. Chờ áp dụng trên Supabase SQL Editor và xác nhận dashboard claim.  
+**Tổng số vấn đề**: **109 gốc** + 4 PA + 5 PB + 1 PC + 1 PD + 2 PE + **2 PF** = 124 điểm.  
 
 ---
 
@@ -809,3 +809,35 @@ Tạo migration tiếp theo `005_fix_claim_device_pgcrypto.sql` mà không sửa
   - `extensions.crypt(v_device_password, extensions.gen_salt('bf', 8))`
 - Giữ nguyên `SET search_path = public` để bảo vệ an toàn cho hàm `SECURITY DEFINER`.
 - Giữ nguyên 100% chữ ký hàm `claim_device(code text) RETURNS uuid`, kiểu dữ liệu, logic phân quyền (`GRANT EXECUTE TO authenticated`, `REVOKE FROM anon`), và thuật toán sinh credential khớp với Rust `pairing.rs`.
+
+---
+
+## PHỤ LỤC I — PF-02: CLAIM_DEVICE AUTH.USERS ON CONFLICT SPECIFICATION ERROR (P0 PAIRING BLOCKER)
+
+> Migration fix: `docs/full_spec/web-manager/migrations/006_fix_claim_device_on_conflict.sql`  
+> Trạng thái: **FIXED_PENDING_VERIFICATION** (chờ áp dụng trên Supabase SQL Editor và test claim trên dashboard)
+
+### 1. Triệu chứng
+Khi người dùng nhập pair code trên Web Dashboard (sau khi fix PF-01), Supabase RPC trả về lỗi:
+```text
+PostgreSQL error 42P10: there is no unique or exclusion constraint matching the ON CONFLICT specification
+```
+
+### 2. Nguyên nhân cốt lõi (Root Cause)
+1. Trong RPC `claim_device(code text)`, câu lệnh insert:
+   ```sql
+   INSERT INTO auth.users (...) VALUES (...) ON CONFLICT (email) DO UPDATE ...
+   ```
+   nhắm vào cột `(email)` trên bảng `auth.users`.
+2. Trên Supabase, bảng `auth.users` **không có** ràng buộc UNIQUE vô điều kiện trên `email`. Thay vào đó, Supabase (GoTrue) sử dụng một partial unique index:
+   `users_email_partial_key` (`UNIQUE (email) WHERE (is_sso_user = false)`).
+3. PostgreSQL yêu cầu mệnh đề suy diễn `ON CONFLICT (columns...)` phải khớp chính xác với chỉ mục duy nhất (kể cả điều kiện `WHERE` của partial index). Do đó, `ON CONFLICT (email)` bị PostgreSQL từ chối với mã lỗi `42P10`.
+
+### 3. Giải pháp khắc phục (Forward Migration 006)
+Tạo forward migration `006_fix_claim_device_on_conflict.sql`:
+- Bỏ mệnh đề `ON CONFLICT (email)` trên `auth.users`.
+- Thay thế bằng mô hình kiểm tra - cập nhật an toàn tuyệt đối trong PL/pgSQL:
+  1. `SELECT id INTO v_auth_user_id FROM auth.users WHERE email = v_device_email;`
+  2. Nếu đã tồn tại: `UPDATE auth.users SET encrypted_password = ..., updated_at = now();`
+  3. Nếu chưa tồn tại: `INSERT INTO auth.users (...)` kèm khối bắt ngoại lệ `EXCEPTION WHEN unique_violation THEN UPDATE` phòng ngừa race condition.
+- Không sửa đổi schema hay index của bảng `auth.users` của hệ thống Supabase.
