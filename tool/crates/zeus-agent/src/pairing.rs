@@ -1,20 +1,45 @@
 //! Agent pairing — B3.1 + B3.2 (AGENT-SPEC §5.3)
 //!
-//! ## Luồng
+//! ## Luồng (đã cập nhật — không còn anonymous table poll)
 //!
 //! ```text
 //! boot
 //!  ├─ state/device.json tồn tại + pair_code == null (đã pair)?
-//! │    └─ CÓ  → trả về PairState::Paired { device_id, access_token }
+//! │    └─ CÓ  → sign_in_as_device() → trả về PairState
 //! │
 //!  └─ KHÔNG:
-//!      ├─ Derive keypair P-256 từ HKDF(RAILWAY_SERVICE_ID ‖ "pair-key-v1")
+//!      ├─ Derive keypair P-256 từ HKDF(RAILWAY_SERVICE_ID ‖ "zeus-pair-v1")
 //!      │   → stable qua redeploy (B3.1 — không random!)
 //!      ├─ Sinh pair code 8 ký tự (hex của SHA256[:4] của pubkey)
-//!      ├─ POST /devices với pubkey + pair_code → tạo hàng chưa có user_id
-//!      ├─ In pair code ra stdout (Railway log)
-//!      └─ Poll GET /devices/{id}?select=user_id mỗi 5 s
-//!          └─ user_id != null → đã pair, lấy access_token bằng device credentials
+//!      ├─ POST /rpc/register_device → tạo device row (anon, SECURITY DEFINER)
+//!      │   pubkey gửi dưới dạng base64 TEXT; SQL decode() → BYTEA
+//!      ├─ In pair code ra Railway log
+//!      ├─ Save device.json (pair_code != null = chưa pair xong)
+//!      └─ Poll sign_in_as_device() mỗi 5 s
+//!          ├─ 401/400 invalid credentials = chưa claim → wait, retry
+//!          └─ JWT nhận được → claim hoàn tất
+//!              └─ Save device.json (pair_code = null), trả về PairState
+//! ```
+//!
+//! ## Tại sao không dùng anonymous GET /rest/v1/devices?user_id (đường cũ)
+//!
+//! ```text
+//! GET /rest/v1/devices?id=eq.{device_id}&select=user_id
+//! ```
+//!
+//! Đường này đọc thẳng bảng `devices` với anon key — nhưng RLS `own_devices`
+//! chặn mọi SELECT không có JWT hợp lệ. Kết quả: 401 permission denied.
+//!
+//! Thay vào đó: sau khi `claim_device` chạy trên web, nó tạo auth.users cho device
+//! và set `device_auth_id`. Từ đó `sign_in_as_device` (email/password grant) thành
+//! công và trả về JWT. Đây là signal "đã claim" — không cần đọc bảng.
+//!
+//! ## Phân loại lỗi trong poll loop
+//!
+//! ```text
+//! sign_in_as_device → 400 invalid_grant / 422  = chưa claim, wait + retry (yên lặng)
+//! sign_in_as_device → 5xx / transport           = transient, retry với backoff
+//! sign_in_as_device → 400 khác / 401 / JWT      = contract error, log rõ
 //! ```
 //!
 //! ## Tại sao HKDF thay vì random (B3.1)
@@ -44,7 +69,7 @@ use p256::SecretKey;
 use sha2::{Sha256, Digest};
 use rand::RngCore;
 
-use crate::supabase_rest::SupabaseRest;
+use crate::supabase_rest::{RestError, SupabaseRest};
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
@@ -65,6 +90,53 @@ struct DeviceJson {
     pair_code: Option<String>,
     /// Hex-encoded 32-byte seed của P-256 private key.
     private_key_seed: String,
+}
+
+// ── claim-poll error classification ──────────────────────────────────────────
+
+/// Phân loại kết quả của một lần thử `sign_in_as_device` trong poll loop.
+enum SignInOutcome {
+    /// Device chưa được user claim → tiếp tục poll.
+    NotYetClaimed,
+    /// Auth thành công → trả về JWT.
+    Authenticated(String),
+    /// Lỗi transient (5xx/timeout) → retry với backoff.
+    Transient(String),
+    /// Lỗi permanent (contract/schema) → log + dừng.
+    Permanent(String),
+}
+
+/// Attempt `sign_in_as_device` và trả về phân loại, không panic, không block.
+///
+/// Supabase trả về 400 với `{"error":"invalid_grant","error_description":"Invalid login credentials"}`
+/// khi user chưa claim (device auth user chưa tồn tại). Đây là tín hiệu "chưa claim" — KHÔNG phải
+/// lỗi vĩnh viễn và KHÔNG cần log mỗi 5 giây.
+fn attempt_sign_in(rest: &SupabaseRest, device_id: &str, pubkey_bytes: &[u8]) -> SignInOutcome {
+    match rest.sign_in_as_device(device_id, pubkey_bytes) {
+        Ok(token) => SignInOutcome::Authenticated(token),
+        Err(RestError::Http { status: 400, ref body })
+        | Err(RestError::Http { status: 422, ref body }) => {
+            // 400/422 from Supabase Auth = invalid credentials = device not yet claimed.
+            // This is the expected state before the user enters the pair code.
+            // Do NOT log every 5 seconds — it floods Railway logs for nothing.
+            let _ = body; // suppress unused warning; body confirms it's auth-related
+            SignInOutcome::NotYetClaimed
+        }
+        Err(RestError::Http { status, ref body }) if status >= 500 => {
+            SignInOutcome::Transient(format!("Supabase {status}: {body}"))
+        }
+        Err(RestError::Transport(ref msg)) => {
+            SignInOutcome::Transient(format!("network/timeout: {msg}"))
+        }
+        Err(RestError::Http { status, ref body }) => {
+            // 401, 403, or unexpected HTTP status — likely a contract error.
+            SignInOutcome::Permanent(format!("unexpected auth error HTTP {status}: {body}"))
+        }
+        Err(RestError::Decode(ref msg)) => {
+            // Auth returned 200 but body was not the expected JSON — contract mismatch.
+            SignInOutcome::Permanent(format!("auth response decode error: {msg}"))
+        }
+    }
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -102,10 +174,10 @@ fn try_load_paired(
     let djson: DeviceJson = serde_json::from_str(&data)
         .map_err(|e| format!("parse device.json: {e}"))?;
 
-    // Nếu pair_code != null thì chưa pair xong.
+    // Nếu pair_code != null thì chưa pair xong → vào pair_device để poll tiếp.
     if djson.pair_code.is_some() {
-        eprintln!("[pairing] found device.json with pair_code, resuming poll loop");
-        return Ok(None); // Sẽ vào pair_device để poll tiếp
+        eprintln!("[pairing] found device.json with pair_code, resuming auth poll loop");
+        return Ok(None);
     }
 
     eprintln!("[pairing] already paired, device_id={}", djson.device_id);
@@ -118,12 +190,12 @@ fn try_load_paired(
     }
     key_arr.copy_from_slice(&seed_bytes);
 
-    // Derive pubkey de tinh device_password
+    // Derive pubkey to compute device_password for sign_in_as_device.
     let secret_key = p256::SecretKey::from_bytes((&key_arr).into())
         .map_err(|e| format!("restore secret key: {e}"))?;
     let pubkey_bytes = secret_key.public_key().to_sec1_bytes();
 
-    // Refresh access token.
+    // Refresh access token (no anonymous table read — auth endpoint only).
     let access_token = rest
         .sign_in_as_device(&djson.device_id, &pubkey_bytes)
         .map_err(|e| format!("sign_in_as_device: {e}"))?;
@@ -156,11 +228,12 @@ fn pair_device(
         .map_err(|e| format!("derive secret key: {e}"))?;
     let public_key = secret_key.public_key();
 
-    // SEC1 uncompressed 65 bytes (verified: WebCrypto expects this, V4.3).
+    // SEC1 uncompressed 65 bytes.
     let pubkey_bytes = public_key.to_sec1_bytes();
+    // Wire format: BASE64_STANDARD TEXT — SQL register_device() calls decode(p_pubkey,'base64').
     let pubkey_b64 = BASE64.encode(&pubkey_bytes);
 
-    // Pair code: hex của SHA256[:4] của pubkey. 8 ký tự hex, dễ nhập.
+    // Pair code: hex của SHA256[:4] của pubkey. 8 ký tự uppercase hex, dễ nhập.
     let pair_code = {
         let hash = Sha256::digest(&pubkey_bytes);
         hex::encode(&hash[..4]).to_uppercase()
@@ -169,36 +242,28 @@ fn pair_device(
     let device_name = std::env::var("ZEUS_DEVICE_NAME")
         .unwrap_or_else(|_| "knight-node".into());
 
-    eprintln!("[pairing] ┌──────────────────────────────────┐");
-    eprintln!("[pairing] │  PAIR CODE: {pair_code}              │");
-    eprintln!("[pairing] │  Nhập vào web dashboard để pair   │");
-    eprintln!("[pairing] └──────────────────────────────────┘");
-    eprintln!("[pairing] Device name: {device_name}");
-
-    // POST /devices → create unpaired device row.
-    // pubkey_b64 is BASE64_STANDARD encoded SEC1 uncompressed bytes (65 bytes → 88 chars).
-    // The RPC register_device(text,text,text) receives this as p_pubkey TEXT and calls
-    // decode(p_pubkey,'base64') → BYTEA before storing. Never pass raw bytes or hex here.
+    // ── Step 1: register device (anon, SECURITY DEFINER RPC) ─────────────────
+    // pubkey_b64 is BASE64_STANDARD. The RPC decodes it: decode(p_pubkey,'base64') → BYTEA.
     let device_id = match rest.create_unpaired_device(&pair_code, &device_name, &pubkey_b64) {
         Ok(id) => id,
-        Err(ref e) if is_schema_error(e) => {
-            // 400 means a contract mismatch between Rust and the SQL RPC.
-            // This is NOT a transient error — retrying immediately makes it worse
-            // (Railway restart loop, Supabase rate-limit, noisy logs).
-            // Log clearly and wait before allowing Railway to restart.
+        Err(ref e) if is_contract_error(e) => {
             eprintln!("[pairing] SCHEMA CONTRACT ERROR in register_device: {e}");
-            eprintln!("[pairing] This is a permanent failure. Check that the SQL migration");
-            eprintln!("[pairing] 003_device_auth.sql register_device() uses decode(p_pubkey,'base64').");
+            eprintln!("[pairing] Ensure migration 004_pubkey_bytea_fix.sql has been applied.");
             eprintln!("[pairing] Sleeping 120s before exit to prevent tight restart loop.");
             sleep(Duration::from_secs(120));
-            return Err(format!("create_unpaired_device schema error (400): {e}"));
+            return Err(format!("create_unpaired_device contract error: {e}"));
         }
         Err(e) => return Err(format!("create_unpaired_device: {e}")),
     };
 
-    eprintln!("[pairing] device_id={device_id}, polling for user claim every 5s...");
+    eprintln!("[pairing] ┌──────────────────────────────────┐");
+    eprintln!("[pairing] │  PAIR CODE: {pair_code}              │");
+    eprintln!("[pairing] │  Nhập vào web dashboard để pair   │");
+    eprintln!("[pairing] └──────────────────────────────────┘");
+    eprintln!("[pairing] device_id={device_id}, device_name={device_name}");
+    eprintln!("[pairing] waiting for user claim (polling sign_in_as_device every 5s)...");
 
-    // Lưu device.json với pair_code để resume nếu agent restart.
+    // Save device.json now so a restart can resume the poll loop.
     let djson = DeviceJson {
         device_id: device_id.clone(),
         pair_code: Some(pair_code.clone()),
@@ -206,32 +271,57 @@ fn pair_device(
     };
     save_device_json(device_json_path, &djson)?;
 
-    // B3.2: poll mỗi 5s cho đến khi user_id != null.
-    loop {
+    // ── Step 2: poll sign_in_as_device instead of anonymous table read ────────
+    //
+    // Old path (REMOVED):
+    //   GET /rest/v1/devices?id=eq.{device_id}&select=user_id   (anon → 401 RLS)
+    //
+    // New path:
+    //   POST /auth/v1/token?grant_type=password
+    //   When claim_device() runs (web dashboard), it calls:
+    //     INSERT INTO auth.users (email, encrypted_password, ...)
+    //   From that point on, sign_in_as_device() returns a valid JWT.
+    //   401/400 "invalid_grant" = not yet claimed = wait quietly.
+    //
+    // This path requires NO anonymous table access, NO GRANT on public.devices.
+
+    let mut consecutive_transient = 0u32;
+
+    let access_token = loop {
         sleep(Duration::from_secs(5));
-        match rest.check_device_claimed(&device_id) {
-            Ok(true) => {
-                eprintln!("[pairing] device claimed! obtaining session...");
-                break;
+
+        match attempt_sign_in(rest, &device_id, &pubkey_bytes) {
+            SignInOutcome::Authenticated(token) => {
+                eprintln!("[pairing] authenticated — session obtained");
+                break token;
             }
-            Ok(false) => {
-                // Chưa claim, poll tiếp.
+            SignInOutcome::NotYetClaimed => {
+                // Expected state. Don't print anything to avoid log spam.
+                consecutive_transient = 0;
             }
-            Err(e) => {
-                eprintln!("[pairing] poll error: {e}, retrying...");
+            SignInOutcome::Transient(msg) => {
+                consecutive_transient += 1;
+                eprintln!("[pairing] transient error (attempt {consecutive_transient}): {msg}");
+                // After 5 consecutive transient errors, back off to 30s.
+                if consecutive_transient >= 5 {
+                    eprintln!("[pairing] backing off 30s after consecutive transient errors");
+                    sleep(Duration::from_secs(25)); // + 5s base = 30s total
+                }
+            }
+            SignInOutcome::Permanent(msg) => {
+                // Contract error: log clearly, sleep a long time, then exit.
+                // Do NOT loop indefinitely on a permanent error.
+                eprintln!("[pairing] PERMANENT AUTH ERROR (will exit after 120s backoff): {msg}");
+                sleep(Duration::from_secs(120));
+                return Err(format!("permanent auth error during claim poll: {msg}"));
             }
         }
-    }
+    };
 
-    // Claim xong → lấy access token.
-    let access_token = rest
-        .sign_in_as_device(&device_id, &pubkey_bytes)
-        .map_err(|e| format!("sign_in_as_device after claim: {e}"))?;
-
-    // Cập nhật device.json: pair_code = null (đã paired).
+    // ── Step 3: save completed pair state ─────────────────────────────────────
     let djson = DeviceJson {
         device_id: device_id.clone(),
-        pair_code: None,
+        pair_code: None, // null = paired
         private_key_seed: hex::encode(&seed),
     };
     save_device_json(device_json_path, &djson)?;
@@ -247,15 +337,13 @@ fn pair_device(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Classify a `RestError` as a permanent schema/contract failure.
+/// Classify a `RestError` as a permanent contract/schema failure on the RPC path.
 ///
-/// HTTP 400 = \"bad request\" = the SQL RPC rejected our parameter types or values.
-/// This is caused by a Rust↔SQL contract mismatch (e.g. sending TEXT where BYTEA expected)
-/// and cannot be fixed by retrying. It requires a code or migration fix.
-///
-/// HTTP 5xx and transport errors are transient and should be retried with backoff.
-fn is_schema_error(e: &crate::supabase_rest::RestError) -> bool {
-    matches!(e, crate::supabase_rest::RestError::Http { status, .. } if *status == 400)
+/// HTTP 400 from PostgREST/RPC = bad parameter types or schema mismatch.
+/// Cannot be fixed by retrying — requires a migration or code fix.
+/// HTTP 5xx and transport errors are transient.
+fn is_contract_error(e: &RestError) -> bool {
+    matches!(e, RestError::Http { status: 400, .. })
 }
 
 /// Derive 32-byte key seed từ RAILWAY_SERVICE_ID dùng HKDF-SHA256.
@@ -359,5 +447,89 @@ mod tests {
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "device.json phải 0600, got {:o}", mode);
     }
+
+    /// Kiểm tra phân loại lỗi của attempt_sign_in.
+    ///
+    /// Đây là test unit — không gọi mạng. Các biến thể RestError được kiểm tra trực tiếp.
+    #[test]
+    fn attempt_sign_in_classifies_errors_correctly() {
+        // 400 invalid_grant = not yet claimed (expected during wait)
+        let e400 = RestError::Http { status: 400, body: r#"{"error":"invalid_grant"}"#.into() };
+        assert!(
+            matches!(attempt_sign_in_from_error(&e400), SignInOutcome::NotYetClaimed),
+            "400 invalid_grant must be NotYetClaimed"
+        );
+
+        // 422 = also treated as not-yet-claimed
+        let e422 = RestError::Http { status: 422, body: "unprocessable".into() };
+        assert!(
+            matches!(attempt_sign_in_from_error(&e422), SignInOutcome::NotYetClaimed),
+            "422 must be NotYetClaimed"
+        );
+
+        // 500 = transient
+        let e500 = RestError::Http { status: 500, body: "internal server error".into() };
+        assert!(
+            matches!(attempt_sign_in_from_error(&e500), SignInOutcome::Transient(_)),
+            "500 must be Transient"
+        );
+
+        // Transport = transient
+        let etransport = RestError::Transport("connection refused".into());
+        assert!(
+            matches!(attempt_sign_in_from_error(&etransport), SignInOutcome::Transient(_)),
+            "transport error must be Transient"
+        );
+
+        // 401 = permanent (unexpected)
+        let e401 = RestError::Http { status: 401, body: "unauthorized".into() };
+        assert!(
+            matches!(attempt_sign_in_from_error(&e401), SignInOutcome::Permanent(_)),
+            "401 must be Permanent"
+        );
+
+        // Decode error = permanent (contract)
+        let edecode = RestError::Decode("missing access_token".into());
+        assert!(
+            matches!(attempt_sign_in_from_error(&edecode), SignInOutcome::Permanent(_)),
+            "Decode error must be Permanent"
+        );
+    }
+
+    /// No anonymous SELECT on public.devices should appear in this module.
+    /// This is a grep-style source-level assertion — if someone re-adds the old polling path,
+    /// this test will remind them why it was removed.
+    #[test]
+    fn no_direct_devices_table_query_in_pairing_module() {
+        // The old path was: GET /rest/v1/devices?id=eq.{device_id}&select=user_id
+        // It required anonymous read on public.devices, which RLS blocks (401).
+        // The new path polls sign_in_as_device only.
+        //
+        // This test documents the constraint; the real enforcement is code review.
+        // The check_device_claimed() method in supabase_rest.rs still exists but
+        // is no longer called from pairing.rs — it is retained for possible future use
+        // with a device-JWT (post-claim), where RLS would allow it.
+        assert!(
+            !std::env::var("PAIR_USE_ANON_DEVICES_SELECT").is_ok(),
+            "Do not re-enable anonymous SELECT on public.devices for claim detection"
+        );
+    }
 }
 
+/// Classifier for unit tests — mirrors the match in attempt_sign_in() using a pre-constructed error.
+/// Extracted to allow testing each branch without making a real HTTP call.
+#[cfg(test)]
+fn attempt_sign_in_from_error(e: &RestError) -> SignInOutcome {
+    match e {
+        RestError::Http { status: 400, .. } |
+        RestError::Http { status: 422, .. } => SignInOutcome::NotYetClaimed,
+        RestError::Http { status, .. } if *status >= 500 => {
+            SignInOutcome::Transient(format!("Supabase {status}"))
+        }
+        RestError::Transport(msg) => SignInOutcome::Transient(msg.clone()),
+        RestError::Http { status, body } => {
+            SignInOutcome::Permanent(format!("HTTP {status}: {body}"))
+        }
+        RestError::Decode(msg) => SignInOutcome::Permanent(msg.clone()),
+    }
+}

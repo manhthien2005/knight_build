@@ -261,27 +261,29 @@ impl SupabaseRest {
     }
 
     // ── pairing ───────────────────────────────────────────────────────────────
+    //
+    // REMOVED: check_device_claimed() — GET /rest/v1/devices?id=eq.{id}&select=user_id
+    //
+    // That method read the `devices` table anonymously. RLS `own_devices` policy
+    // (set in 003_device_auth.sql) blocks any SELECT without a valid JWT, returning:
+    //   HTTP 401: "permission denied for table devices"
+    //
+    // The correct claim-detection mechanism is to attempt sign_in_as_device() in a
+    // loop. When claim_device() runs on the dashboard, it creates the auth.users entry
+    // for the device. From that point sign_in_as_device() returns a JWT.
+    //
+    // REMOVED: poll_claim() — this was an old design that called claim_device() RPC
+    // from the agent. The actual claim is done by the web UI (authenticated user).
+    //
+    // See pairing.rs attempt_sign_in() for the complete error classification.
 
-    /// Poll trong lúc **chưa pair**. Đây là ngoại lệ duy nhất cho luật "không poll": trạng thái
-    /// ngắn, kết thúc ngay khi user dán code, và chưa có session nên chưa có realtime để nghe.
+    /// Tạo hàng device chưa pair qua RPC `register_device` (SECURITY DEFINER — anon có thể gọi).
     ///
-    /// Nhịp 5 s. `claim_device` là RPC `security definer` — đường **duy nhất** gán `user_id`
-    /// cho một device, vì một client thường không được phép tự gán chủ cho hàng của người khác.
-    pub fn poll_claim(&self, pair_code: &str, name: &str, pubkey_sec1: &[u8]) -> Result<Option<String>, RestError> {
-        let response = self
-            .request("POST", "/rest/v1/rpc/claim_device")
-            .send_json(serde_json::json!({
-                "code": pair_code,
-                "device_name": name,
-                "device_pubkey": base64_standard(pubkey_sec1),
-            }))?;
-        let value: serde_json::Value = response.json()?;
-        Ok(value.as_str().map(str::to_owned).or_else(|| {
-            value.get("id").and_then(|id| id.as_str()).map(str::to_owned)
-        }))
-    }
-
-    /// Tao hang device chua pair qua RPC register_device (SECURITY DEFINER, anon duoc goi).
+    /// Wire contract:
+    ///   `pubkey_b64` = `BASE64_STANDARD.encode(pubkey_sec1_bytes)` (standard alphabet, padding)
+    ///   SQL `register_device` receives this as `p_pubkey TEXT` and calls
+    ///   `decode(p_pubkey, 'base64') → BYTEA` before storing in `devices.pubkey`.
+    ///   Never pass raw bytes or hex here.
     pub fn create_unpaired_device(
         &self,
         pair_code: &str,
@@ -299,15 +301,6 @@ impl SupabaseRest {
         value.as_str()
             .map(str::to_owned)
             .ok_or_else(|| RestError::Decode("register_device: no uuid in response".into()))
-    }
-
-    /// Kiem tra device da duoc user claim chua (user_id != null).
-    pub fn check_device_claimed(&self, device_id: &str) -> Result<bool, RestError> {
-        let response = self
-            .request("GET", &format!("/rest/v1/devices?id=eq.{device_id}&select=user_id"))
-            .call()?;
-        let rows: Vec<serde_json::Value> = response.json()?;
-        Ok(rows.first().map(|row| !row["user_id"].is_null()).unwrap_or(false))
     }
 
     /// Đặt desired_state của account lên DB. Phải gọi khi nhận lệnh start/stop/restart
