@@ -16,7 +16,7 @@
 # background. If they die before exec, we fail fast. After exec, zeus-agent
 # is expected to monitor them and exit (triggering Railway's restart policy)
 # if a critical one dies.
-set -uo pipefail
+set -euo pipefail
 
 DISPLAY_NUM="${DISPLAY_NUM:-1}"
 export DISPLAY=":${DISPLAY_NUM}.0"
@@ -56,18 +56,34 @@ log "Xvnc up on :${DISPLAY_NUM} (${VNC_GEOMETRY:-800x600}x${VNC_DEPTH:-16})"
 # openbox only: gives focus handling and movable/decorated frames so both
 # emulator tabs can be seen and clicked. No panel, no compositor, no desktop.
 openbox >"$LOGS/openbox.log" 2>&1 &
-log "openbox started"
+OPENBOX_PID=$!
+log "openbox started (pid=${OPENBOX_PID})"
 
 # --- noVNC bridge --------------------------------------------------------
 # No TLS here on purpose: Railway terminates HTTPS at its edge, so the
 # browser still gets wss:// while this stays a plain local hop.
 websockify --web=/usr/share/novnc/ "0.0.0.0:${PORT}" "localhost:${VNC_PORT}" \
     >"$LOGS/websockify.log" 2>&1 &
-log "noVNC on :${PORT} -> localhost:${VNC_PORT}"
+WEBSOCKIFY_PID=$!
+log "noVNC on :${PORT} -> localhost:${VNC_PORT} (pid=${WEBSOCKIFY_PID})"
 
 # Brief settle: give websockify a moment to bind the port before the agent
 # tries to read it. 1 s is conservative — websockify typically binds in <100 ms.
 sleep 1
+
+# Verify infrastructure is still alive. If either process died immediately
+# (port conflict, missing binary, bad config) fail fast so Railway restarts.
+kill -0 "${OPENBOX_PID}" 2>/dev/null || {
+    log "openbox died at startup"
+    cat "$LOGS/openbox.log"
+    exit 1
+}
+kill -0 "${WEBSOCKIFY_PID}" 2>/dev/null || {
+    log "websockify died at startup"
+    cat "$LOGS/websockify.log"
+    exit 1
+}
+log "infrastructure healthy (xvnc=${XVNC_PID} openbox=${OPENBOX_PID} websockify=${WEBSOCKIFY_PID})"
 
 # --- hand off to zeus-agent as PID 1 ------------------------------------
 # exec replaces this shell, so zeus-agent inherits PID 1.

@@ -105,6 +105,12 @@ ENV MALLOC_ARENA_MAX=2 \
     PORT=6080
 
 EXPOSE 6080
+# Health check: verify websockify is bound on $PORT. bash /dev/tcp is available
+# without curl in the base image. start-period covers Xvnc + JVM boot time.
+# Railway's health policy uses its own TCP check, but this HEALTHCHECK is used
+# by `docker ps` and CI smoke tests.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD bash -c '</dev/tcp/localhost/6080' || exit 1
 # entrypoint.sh sets up X + noVNC, then exec's zeus-agent as PID 1.
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 

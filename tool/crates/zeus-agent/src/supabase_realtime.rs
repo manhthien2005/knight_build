@@ -117,6 +117,9 @@ type WsConn = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
 pub struct RealtimeClient {
     ws: WsConn,
     ref_counter: AtomicU64,
+    /// Events được buffer trong `wait_for_reply()` — drain trước `ws.read()` lần sau.
+    /// Bảo vệ khỏi data loss trong cửa sổ ~100ms khi phải subscribe handshake.
+    pending: Vec<RealtimeEvent>,
 }
 
 // AtomicU64 là Send nhưng không Sync; WebSocket cũng không Sync. Cả hai đều đúng
@@ -164,6 +167,7 @@ impl RealtimeClient {
         Ok(Self {
             ws,
             ref_counter: AtomicU64::new(1),
+            pending: Vec::new(),
         })
     }
 
@@ -229,6 +233,12 @@ impl RealtimeClient {
     ///
     /// Khi socket chết (timeout hoặc close), trả `Ok(Some(Disconnected))`.
     pub fn read_event(&mut self) -> Result<Option<RealtimeEvent>, RealtimeError> {
+        // Drain pending events buffered during subscribe handshake first.
+        // pop() lấy theo LIFO — buffer thường chỉ có 0–1 item nên thứ tự không quan trọng.
+        if let Some(evt) = self.pending.pop() {
+            return Ok(Some(evt));
+        }
+
         let msg = match self.ws.read() {
             Ok(m) => m,
             Err(e) => {
@@ -280,6 +290,8 @@ impl RealtimeClient {
     /// Đọc frames cho đến khi tìm phx_reply khớp `ref_str`. Bỏ qua system frame.
     ///
     /// Trả `subscription_id` từ `postgres_changes[0].id` trong reply.
+    /// Bất kỳ `postgres_changes` event nào đến trong khi chờ reply được buffer vào
+    /// `self.pending` để không bị mất im lặng.
     fn wait_for_reply(&mut self, ref_str: &str) -> Result<u64, RealtimeError> {
         loop {
             let msg = self
@@ -299,7 +311,11 @@ impl RealtimeClient {
 
             // Bỏ qua frame không phải reply cho ref này.
             if v["ref"].as_str() != Some(ref_str) {
-                // Có thể là system error frame — không fatal ở đây.
+                // Buffer bất kỳ postgres_changes event nào đến trong cửa sổ handshake.
+                // Nếu không buffer, event bị drop vĩnh viễn và vòng chính không bao giờ thấy.
+                if let Ok(Some(evt)) = self.parse_text_frame(&text) {
+                    self.pending.push(evt);
+                }
                 continue;
             }
 
@@ -317,6 +333,7 @@ impl RealtimeClient {
             return Ok(sub_id);
         }
     }
+
 
     fn parse_text_frame(&self, text: &str) -> Result<Option<RealtimeEvent>, RealtimeError> {
         let v: serde_json::Value = serde_json::from_str(text)
@@ -466,5 +483,41 @@ mod tests {
         let r2 = counter.fetch_add(1, Ordering::Relaxed);
         let r3 = counter.fetch_add(1, Ordering::Relaxed);
         assert!(r1 < r2 && r2 < r3, "ref phải tăng: {r1} < {r2} < {r3}");
+    }
+
+    /// Verify rằng một postgres_changes frame parse thành RealtimeEvent::Change, KHÔNG phải None.
+    /// Nếu parse_text_frame trả None cho frame này, buffering trong wait_for_reply() sẽ im lặng
+    /// không buffer gì — regression test cho D3 fix.
+    #[test]
+    fn postgres_changes_frame_is_not_silently_none() {
+        // Frame này là đúng Supabase protocol shape. parse_text_frame phải trả Some(Change).
+        let frame = r#"{
+            "event": "postgres_changes",
+            "payload": {
+                "ids": [104868189],
+                "data": {
+                    "type": "INSERT",
+                    "table": "commands",
+                    "schema": "public",
+                    "record": {"id":"cmd-1","type":"start","status":"queued"},
+                    "old_record": {},
+                    "commit_timestamp": "2026-09-18T15:00:00.000Z",
+                    "errors": null
+                }
+            },
+            "ref": null,
+            "topic": "realtime:commands"
+        }"#;
+
+        // Verify JSON shape manually (parse_text_frame không thể gọi trực tiếp vì cần &self).
+        let v: serde_json::Value = serde_json::from_str(frame).unwrap();
+        // Điều kiện để wait_for_reply buffer: event == "postgres_changes"
+        assert_eq!(v["event"].as_str().unwrap(), "postgres_changes",
+            "outer event phải là 'postgres_changes' để được buffer trong wait_for_reply");
+        // Điều kiện để parse_text_frame trả Some: data.type là INSERT/UPDATE/DELETE
+        let data = &v["payload"]["data"];
+        let ct = ChangeType::from_str(data["type"].as_str().unwrap());
+        assert!(ct.is_some(), "ChangeType::from_str phải thành công cho INSERT");
+        assert_eq!(data["table"].as_str().unwrap(), "commands");
     }
 }

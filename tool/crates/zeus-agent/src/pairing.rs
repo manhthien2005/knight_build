@@ -40,11 +40,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use p256::{
-    ecdh::EphemeralSecret,
-    PublicKey,
-    SecretKey,
-};
+use p256::SecretKey;
 use sha2::{Sha256, Digest};
 use rand::RngCore;
 
@@ -265,6 +261,16 @@ fn save_device_json(path: &Path, djson: &DeviceJson) -> Result<(), String> {
         .map_err(|e| format!("serialize device.json: {e}"))?;
     std::fs::write(&tmp, data)
         .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+
+    // 0600: private_key_seed là key material — không được world-readable.
+    // set_permissions trước khi rename để file cuối cũng có mode đúng.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod device.json.tmp: {e}"))?;
+    }
+
     std::fs::rename(&tmp, path)
         .map_err(|e| format!("rename device.json: {e}"))?;
     Ok(())
@@ -307,6 +313,24 @@ mod tests {
             pair_code.chars().all(|c| c.is_ascii_hexdigit()),
             "pair code phải là hex"
         );
+    }
+
+    /// device.json phải được ghi với mode 0600 — private key seed không được world-readable.
+    #[cfg(unix)]
+    #[test]
+    fn device_json_written_with_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device.json");
+        let djson = DeviceJson {
+            device_id: "test-device-id".into(),
+            pair_code: None,
+            private_key_seed: "aa".repeat(32),
+        };
+        save_device_json(&path, &djson).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "device.json phải 0600, got {:o}", mode);
     }
 }
 
