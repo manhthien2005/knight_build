@@ -8,7 +8,7 @@
 //! Trần scale thật là **200 concurrent realtime connection** ≈ 190 agent. Không
 //! phải RAM, không phải DB storage — đây là giới hạn cần nhớ khi bàn về fleet size.
 //!
-//! ## Phoenix protocol (từ frames thực tế — V4.4, 2026-09-15)
+//! ## Phoenix protocol (từ frames thực tế — Supabase Realtime protocol, vsn=1.0.0)
 //!
 //! Supabase Realtime dùng Phoenix channel protocol. Mỗi message là JSON:
 //! `{"topic":"...", "event":"...", "payload":{...}, "ref":"N", "join_ref":"N"}`
@@ -16,20 +16,24 @@
 //! Sequence hoàn chỉnh:
 //! ```text
 //! Client → Server: phx_join  (topic="realtime:<table>", ref="1", join_ref="1")
-//! Server → Client: phx_reply (ref="1", status="ok", postgres_changes=[{id:N}])
+//! Server → Client: phx_reply (ref="1", status="ok", response.postgres_changes=[{id:N}])
 //! Client → Server: heartbeat (topic="phoenix", ref="N", join_ref=null)  — mỗi 25–30 s
 //! Server → Client: phx_reply (ref="N", status="ok")
 //!
-//! Server → Client (khi có thay đổi DB):
-//!   { "event": "INSERT"|"UPDATE"|"DELETE",
-//!     "payload": { "type": "...", "table": "...", "schema": "public",
+//! Server → Client (khi có thay đổi DB) — outer event là "postgres_changes":
+//!   { "event": "postgres_changes",
+//!     "payload": {
+//!       "ids": [<sub_id>],
+//!       "data": { "type": "INSERT"|"UPDATE"|"DELETE",
+//!                  "table": "...", "schema": "public",
 //!                  "record": {...}, "old_record": {...},
-//!                  "commit_timestamp": "..." },
+//!                  "commit_timestamp": "..." }
+//!     },
 //!     "topic": "realtime:<table>" }
 //! ```
 //!
-//! Subscription ID: server trả `id` trong `postgres_changes` của phx_reply. Agent phải
-//! đối chiếu `id` này với event để phân biệt nguồn khi subscribe nhiều bảng.
+//! QUAN TRỌNG: outer event KHÔNG phải INSERT/UPDATE/DELETE — đó là nội dung payload.data.type.
+//! Subscription ID: server trả `id` trong `response.postgres_changes` của phx_reply.
 //!
 //! ## Blocking, một thread
 //!
@@ -142,15 +146,20 @@ impl RealtimeClient {
         let (ws, _response) =
             tungstenite::connect(&ws_url).map_err(|e| RealtimeError::Ws(e.to_string()))?;
 
-        // Set read timeout: nếu 35 s không có frame, socket coi là chết.
-        // tungstenite wraps TcpStream trong MaybeTlsStream; phải lấy qua get_ref().
-        if let MaybeTlsStream::Plain(tcp) = ws.get_ref() {
-            let _ = tcp.set_read_timeout(Some(Duration::from_secs(35)));
+        // Set read timeout trên underlying TcpStream để heartbeat miss không block mãi.
+        // Supabase dùng wss:// → MaybeTlsStream::Rustls, KHÔNG phải Plain.
+        // rustls 0.23: StreamOwned::get_ref() trả &T (the socket, không phải tuple).
+        match ws.get_ref() {
+            MaybeTlsStream::Plain(tcp) => {
+                let _ = tcp.set_read_timeout(Some(Duration::from_secs(35)));
+            }
+            MaybeTlsStream::Rustls(tls) => {
+                // get_ref() → &TcpStream trực tiếp.
+                let _ = tls.get_ref().set_read_timeout(Some(Duration::from_secs(35)));
+            }
+            _ => {} // NativeTls hoặc variant khác — không có feature này
         }
-        // Nếu là TLS stream (MaybeTlsStream::Rustls), timeout được set ở tầng TCP bên dưới.
-        // tungstenite::connect dùng rustls-tls-webpki-roots; vẫn cần set timeout trên inner stream.
-        // Vì không có public accessor cho inner TcpStream của rustls, ta sẽ dựa vào heartbeat
-        // để detect dead connection (heartbeat miss → server close trong 60 s, ta thấy Close frame).
+
 
         Ok(Self {
             ws,
@@ -315,26 +324,37 @@ impl RealtimeClient {
 
         let event = v["event"].as_str().unwrap_or("");
 
-        // Bỏ qua heartbeat ack, system frames, join replies.
+        // Bỏ qua heartbeat ack, system frames, join replies, presence.
         match event {
             "phx_reply" | "system" | "presence_state" | "presence_diff" => return Ok(None),
             _ => {}
         }
 
-        // Postgres change events: INSERT, UPDATE, DELETE.
-        let change_type = match ChangeType::from_str(event) {
-            Some(c) => c,
-            None => return Ok(None), // event lạ, bỏ qua
-        };
+        // Supabase Realtime gửi outer event là "postgres_changes", KHÔNG phải INSERT/UPDATE/DELETE.
+        // Loại thay đổi nằm trong payload.data.type.
+        // Tham khảo: https://supabase.com/docs/guides/realtime/protocol#postgres_changes
+        if event != "postgres_changes" {
+            // event lạ (broadcast, v.v.), bỏ qua
+            return Ok(None);
+        }
 
         let payload = &v["payload"];
-        let table = payload["table"]
+        let data = &payload["data"];
+
+        // Lấy type từ payload.data.type
+        let type_str = data["type"].as_str().unwrap_or("");
+        let change_type = match ChangeType::from_str(type_str) {
+            Some(c) => c,
+            None => return Ok(None), // type lạ ("*" hay rỗng), bỏ qua
+        };
+
+        let table = data["table"]
             .as_str()
             .unwrap_or("")
             .to_string();
 
-        let record = payload["record"].clone();
-        let old_record = payload["old_record"].clone();
+        let record = data["record"].clone();
+        let old_record = data["old_record"].clone();
 
         Ok(Some(RealtimeEvent::Change {
             table,
@@ -399,30 +419,38 @@ mod tests {
         }
     }
 
-    /// Frame INSERT phải parse thành RealtimeEvent::Change với đúng table và change_type.
-    /// Đây là frame thật từ V4.4 capture (2026-09-15).
+    /// Frame "postgres_changes" phải parse thành RealtimeEvent::Change với đúng table và change_type.
+    /// Frame theo đúng Supabase Realtime protocol (outer event = "postgres_changes", data bên trong).
+    /// Tham khảo: https://supabase.com/docs/guides/realtime/protocol#postgres_changes
     #[test]
     fn insert_frame_parses_correctly() {
         let frame = r#"{
-            "event": "INSERT",
+            "event": "postgres_changes",
             "payload": {
-                "type": "INSERT",
-                "table": "commands",
-                "schema": "public",
-                "record": {"id":"abc","type":"start","status":"queued"},
-                "old_record": {},
-                "commit_timestamp": "2026-09-15T08:00:00.000Z",
-                "errors": null
+                "ids": [104868189],
+                "data": {
+                    "type": "INSERT",
+                    "table": "commands",
+                    "schema": "public",
+                    "record": {"id":"abc","type":"start","status":"queued"},
+                    "old_record": {},
+                    "commit_timestamp": "2026-09-15T08:00:00.000Z",
+                    "errors": null
+                }
             },
             "ref": null,
             "topic": "realtime:commands"
         }"#;
 
         let v: serde_json::Value = serde_json::from_str(frame).unwrap();
-        let event_str = v["event"].as_str().unwrap();
-        let change_type = ChangeType::from_str(event_str).expect("INSERT phải parse được");
-        let table = v["payload"]["table"].as_str().unwrap();
-        let record = &v["payload"]["record"];
+        // outer event phải là "postgres_changes"
+        assert_eq!(v["event"].as_str().unwrap(), "postgres_changes");
+        // type và table nằm trong payload.data
+        let data = &v["payload"]["data"];
+        let change_type = ChangeType::from_str(data["type"].as_str().unwrap())
+            .expect("INSERT phải parse được");
+        let table = data["table"].as_str().unwrap();
+        let record = &data["record"];
 
         assert_eq!(change_type, ChangeType::Insert);
         assert_eq!(table, "commands");

@@ -866,12 +866,8 @@ fn dispatch_command(
                         let paths = AccountPaths::for_slot(acc.slot_index);
                         write_potato_ctl_for_path(&paths, "1 0");
                     }
-                    // Tính expires_at = now + 15 phút
-                    let expires_ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() + 900)
-                        .unwrap_or(0);
-                    let expires_rfc = crate::supabase_rest::now_rfc3339(); // approximate
+                    // Tính expires_at = now + 15 phút (900 giây)
+                    let expires_rfc = crate::supabase_rest::rfc3339_offset_from_now(900);
                     let _ = rest.set_viewer(&cfg.device_id, Some((&viewer_url, &expires_rfc)));
                 }
                 "close-viewer" => {
@@ -953,9 +949,9 @@ fn dispatch_command(
             }
         }
         "apply-config" => {
-            // Issue #31: ép apply lại config
+            // Issue #31: ép apply lại config. Dùng CONTROL_VERSION thay vì hardcode 13.
             acc.applied_version = 0;
-            try_apply_config(acc, 13, rest); // jar_ctl_version hardcoded as fallback
+            try_apply_config(acc, CONTROL_VERSION as i32, rest);
             if let Err(e) = rest.finish_command(&cmd.id, CommandStatus::Success, None) {
                 eprintln!("[command] finish_command failed: {e}");
             }

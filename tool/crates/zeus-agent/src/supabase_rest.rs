@@ -619,6 +619,20 @@ pub fn now_rfc3339() -> String {
     )
 }
 
+/// RFC3339 UTC cho thời điểm `offset_secs` giây từ bây giờ.
+///
+/// Dùng để tính `expires_at` cho viewer URL (now + 15 phút = offset 900).
+/// Không tính có thể thiếu import `time`/`chrono` — cùng thuật toán với `now_rfc3339`.
+pub fn rfc3339_offset_from_now(offset_secs: u64) -> String {
+    rfc3339_from_unix(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("container clock is before 1970")
+            .as_secs()
+            .saturating_add(offset_secs),
+    )
+}
+
 /// Phần thuần của `now_rfc3339`, tách ra để test được ngày cụ thể mà không đóng băng đồng hồ.
 fn rfc3339_from_unix(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
