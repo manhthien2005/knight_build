@@ -235,10 +235,8 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
         let _ = clear_snapshot(&paths.home);
         // prepare_directories trước khi spawn — Issue #16
         let _ = crate::launch::prepare_directories(&paths);
-        // Seed credentials trước khi start — Issue #06
-        seed_account_credentials(acc, &identity);
         try_apply_config(acc, jar_ctl_version, &rest);
-        reconcile_desired_state(acc, &rest);
+        reconcile_desired_state(acc, &rest, &identity);
     }
 
     // Spawn thread realtime.
@@ -346,8 +344,7 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
                 if acc.desired_state == "running" && acc.process.as_ref().map(|p| !p.alive()).unwrap_or(true) {
                     eprintln!("[reconcile] account={} crash detected, restarting", acc.id);
                     acc.restarts += 1;
-                    seed_account_credentials(acc, &identity);
-                    reconcile_desired_state(acc, &rest);
+                    reconcile_desired_state(acc, &rest, &identity);
                 }
             }
         }
@@ -441,7 +438,7 @@ fn handle_cloud_event(
                 // Apply config nếu version mới (B5)
                 try_apply_config(acc, jar_ctl_version, rest);
                 // Reconcile desired_state (B7.3)
-                reconcile_desired_state(acc, rest);
+                reconcile_desired_state(acc, rest, identity);
             } else {
                 // Account mới (không có trong map hiện tại) — Issue #12
                 // Kiểm tra device_id thuộc về node này
@@ -455,9 +452,8 @@ fn handle_cloud_event(
                     let _ = crate::launch::prepare_directories(&paths);
                     let _ = clear_snapshot(&paths.home);
                     let mut acc = acc;
-                    seed_account_credentials(&mut acc, identity);
                     try_apply_config(&mut acc, jar_ctl_version, rest);
-                    reconcile_desired_state(&mut acc, rest);
+                    reconcile_desired_state(&mut acc, rest, identity);
                     accounts.insert(account_id, acc);
                 }
             }
@@ -478,9 +474,8 @@ fn handle_cloud_event(
                 let _ = crate::launch::prepare_directories(&paths);
                 let _ = clear_snapshot(&paths.home);
                 let mut acc = acc;
-                seed_account_credentials(&mut acc, identity);
                 try_apply_config(&mut acc, jar_ctl_version, rest);
-                reconcile_desired_state(&mut acc, rest);
+                reconcile_desired_state(&mut acc, rest, identity);
                 accounts.insert(account_id, acc);
             }
         }
@@ -501,7 +496,7 @@ fn handle_cloud_event(
         }
 
         CloudEvent::CommandQueued { command } => {
-            dispatch_command(command, accounts, rest, cfg);
+            dispatch_command(command, accounts, rest, cfg, identity);
         }
 
         CloudEvent::Disconnected { reason } => {
@@ -547,7 +542,7 @@ fn handle_cloud_event(
                     .or_insert(fresh_acc);
                 // Reconcile CŨNG cho account mới được insert — Issue #44
                 try_apply_config(acc, jar_ctl_version, rest);
-                reconcile_desired_state(acc, rest);
+                reconcile_desired_state(acc, rest, identity);
             }
 
             spawn_realtime_thread(
@@ -699,48 +694,40 @@ fn settings_has_detect_spots(control: &serde_json::Value) -> bool {
 
 /// Unseal và seed credentials vào RMS trước khi khởi JVM — Issues #06, #35
 #[cfg(unix)]
-fn seed_account_credentials(acc: &AccountState, identity: &crate::crypto::DeviceIdentity) {
+fn seed_account_credentials(
+    acc: &AccountState,
+    identity: &crate::crypto::DeviceIdentity,
+) -> Result<(), String> {
     // Kiểm tra secret_sealed có đủ fields không — Issue #35
     if acc.secret_sealed.get("alg").is_none() {
-        eprintln!("[credentials] account={} has no sealed credentials, skipping", acc.id);
-        return;
+        return Err("missing sealed credentials".to_string());
     }
 
-    let sealed: crate::crypto::SealedSecret = match serde_json::from_value(acc.secret_sealed.clone()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[credentials] account={} deserialize sealed failed: {e}", acc.id);
-            return;
-        }
-    };
+    let sealed: crate::crypto::SealedSecret = serde_json::from_value(acc.secret_sealed.clone())
+        .map_err(|e| format!("deserialize sealed failed: {e}"))?;
 
-    let plaintext = match crate::crypto::unseal(identity, &sealed) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("[credentials] account={} unseal failed: {e}", acc.id);
-            return;
-        }
-    };
+    let plaintext = crate::crypto::unseal(identity, &sealed)
+        .map_err(|e| format!("unseal failed: {e}"))?;
 
     // Kiểm tra server_index trong khoảng hợp lệ 0..7 — Issue #87
     let server_index = acc.server_index.min(7);
 
     let paths = AccountPaths::for_slot(acc.slot_index);
-    if let Err(e) = zeus_core::wire::seed_credentials(
-        &paths.home,
-        &plaintext.username,
-        &plaintext.password,
-        server_index,
-    ) {
-        eprintln!("[credentials] account={} seed_credentials failed: {e}", acc.id);
-    }
+    crate::crypto::seed_then_forget(&paths.home, plaintext, server_index)
+        .map_err(|e| format!("seed_credentials failed: {e}"))?;
+
     // plaintext bị zero khi drop (PlaintextCredentials::Drop)
+    Ok(())
 }
 
 // ── reconcile desired state (B7.3) ────────────────────────────────────────────
 
 #[cfg(unix)]
-fn reconcile_desired_state(acc: &mut AccountState, rest: &SupabaseRest) {
+fn reconcile_desired_state(
+    acc: &mut AccountState,
+    rest: &SupabaseRest,
+    identity: &crate::crypto::DeviceIdentity,
+) {
     let running = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
     match acc.desired_state.as_str() {
         "running" if !running => {
@@ -754,6 +741,15 @@ fn reconcile_desired_state(acc: &mut AccountState, rest: &SupabaseRest) {
 
             // Ghi potato.ctl ban đầu "0 3" — Issue #24
             write_potato_ctl_for_path(&paths, "0 3");
+
+            // Seed credentials trước khi start JVM — đảm bảo invariant trước khi spawn
+            if let Err(e) = seed_account_credentials(acc, identity) {
+                eprintln!(
+                    "[reconcile] account={} credential preparation failed: {e}, aborting spawn",
+                    acc.id
+                );
+                return;
+            }
 
             // Đọc runtime config — Issue #49
             let mut spec = crate::launch::LaunchSpec::default_for_paths(paths.clone());
@@ -839,6 +835,7 @@ fn dispatch_command(
     accounts: &mut HashMap<String, AccountState>,
     rest: &SupabaseRest,
     cfg: &AgentConfig,
+    identity: &crate::crypto::DeviceIdentity,
 ) {
     // Issue #98: lọc device_id, bỏ qua lệnh không thuộc node này
     if let Some(ref cmd_device_id) = cmd.device_id {
@@ -919,7 +916,7 @@ fn dispatch_command(
             if let Err(e) = rest.set_account_desired_state(&account_id, "running") {
                 eprintln!("[command] set_account_desired_state failed: {e}");
             }
-            reconcile_desired_state(acc, rest);
+            reconcile_desired_state(acc, rest, identity);
             // Fix Issue #23: Success nếu spawn OK, Failed nếu không
             let spawned = acc.process.is_some();
             let status = if spawned { CommandStatus::Success } else { CommandStatus::Failed };
@@ -934,7 +931,7 @@ fn dispatch_command(
             if let Err(e) = rest.set_account_desired_state(&account_id, "stopped") {
                 eprintln!("[command] set_account_desired_state failed: {e}");
             }
-            reconcile_desired_state(acc, rest);
+            reconcile_desired_state(acc, rest, identity);
             if let Err(e) = rest.finish_command(&cmd.id, CommandStatus::Success, None) {
                 eprintln!("[command] finish_command failed: {e}");
             }
@@ -945,14 +942,14 @@ fn dispatch_command(
             if let Err(e) = rest.set_account_desired_state(&account_id, "stopped") {
                 eprintln!("[command] set_account_desired_state failed: {e}");
             }
-            reconcile_desired_state(acc, rest);
+            reconcile_desired_state(acc, rest, identity);
             // Đợi 500ms để process cũ có thời gian tắt
             std::thread::sleep(Duration::from_millis(500));
             acc.desired_state = "running".to_string();
             if let Err(e) = rest.set_account_desired_state(&account_id, "running") {
                 eprintln!("[command] set_account_desired_state failed: {e}");
             }
-            reconcile_desired_state(acc, rest);
+            reconcile_desired_state(acc, rest, identity);
             if let Err(e) = rest.finish_command(&cmd.id, CommandStatus::Running, None) {
                 eprintln!("[command] finish_command failed: {e}");
             }
