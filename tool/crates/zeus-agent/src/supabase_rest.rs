@@ -460,6 +460,43 @@ impl CommandStatus {
     }
 }
 
+/// Đánh giá kết quả lệnh start: thành công chỉ khi process thực sự đang chạy (alive).
+pub fn evaluate_start_status(is_alive: bool) -> (CommandStatus, Option<&'static str>) {
+    if is_alive {
+        (CommandStatus::Success, None)
+    } else {
+        (CommandStatus::Failed, Some("process failed to start"))
+    }
+}
+
+/// Đánh giá kết quả lệnh stop: thành công khi process không còn chạy (not alive).
+pub fn evaluate_stop_status(is_alive: bool) -> (CommandStatus, Option<&'static str>) {
+    if !is_alive {
+        (CommandStatus::Success, None)
+    } else {
+        (CommandStatus::Failed, Some("process failed to stop"))
+    }
+}
+
+/// Đánh giá kết quả lệnh restart: thành công chỉ khi replacement process thực sự đang chạy (alive).
+pub fn evaluate_restart_status(is_alive: bool) -> (CommandStatus, Option<&'static str>) {
+    if is_alive {
+        (CommandStatus::Success, None)
+    } else {
+        (CommandStatus::Failed, Some("replacement process failed to start"))
+    }
+}
+
+/// Đánh giá kết quả lệnh apply-config từ outcome của `try_apply_config`.
+pub fn evaluate_apply_config_status(
+    result: Result<(), &'static str>,
+) -> (CommandStatus, Option<&'static str>) {
+    match result {
+        Ok(()) => (CommandStatus::Success, None),
+        Err(err) => (CommandStatus::Failed, Some(err)),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RestError {
     /// 4xx/5xx từ Supabase. `status` để phân biệt "RLS chặn" (401/403) với "hàng không tồn tại".
@@ -787,5 +824,48 @@ mod tests {
         // alphabet là cách nhanh nhất để phá interop mà test vẫn xanh.
         let sec1 = [0x04u8; 65];
         assert_eq!(base64_standard(&sec1), crate::crypto::b64_encode(&sec1));
+    }
+
+    #[test]
+    fn test_start_status_evaluation() {
+        assert_eq!(evaluate_start_status(true), (CommandStatus::Success, None));
+        assert_eq!(
+            evaluate_start_status(false),
+            (CommandStatus::Failed, Some("process failed to start"))
+        );
+    }
+
+    #[test]
+    fn test_stop_status_evaluation() {
+        assert_eq!(evaluate_stop_status(false), (CommandStatus::Success, None));
+        assert_eq!(
+            evaluate_stop_status(true),
+            (CommandStatus::Failed, Some("process failed to stop"))
+        );
+    }
+
+    #[test]
+    fn test_restart_status_evaluation() {
+        assert_eq!(evaluate_restart_status(true), (CommandStatus::Success, None));
+        assert_eq!(
+            evaluate_restart_status(false),
+            (CommandStatus::Failed, Some("replacement process failed to start"))
+        );
+        // Restart must NEVER report Running
+        assert_ne!(evaluate_restart_status(true).0, CommandStatus::Running);
+        assert_ne!(evaluate_restart_status(false).0, CommandStatus::Running);
+    }
+
+    #[test]
+    fn test_apply_config_status_evaluation() {
+        assert_eq!(evaluate_apply_config_status(Ok(())), (CommandStatus::Success, None));
+        assert_eq!(
+            evaluate_apply_config_status(Err("config version mismatch")),
+            (CommandStatus::Failed, Some("config version mismatch"))
+        );
+        assert_eq!(
+            evaluate_apply_config_status(Err("config was not applied")),
+            (CommandStatus::Failed, Some("config was not applied"))
+        );
     }
 }

@@ -53,8 +53,9 @@ use crate::{
     process_unix::{self, Child, StopOutcome},
     supabase_realtime::{ChangeType, RealtimeClient, RealtimeEvent},
     supabase_rest::{
-        CommandRow, CommandStatus, ConfigStatus, DeviceHeartbeat, JarManifest, RestError,
-        RuntimePayload, SupabaseRest,
+        evaluate_apply_config_status, evaluate_restart_status, evaluate_start_status,
+        evaluate_stop_status, CommandRow, CommandStatus, ConfigStatus, DeviceHeartbeat,
+        JarManifest, RestError, RuntimePayload, SupabaseRest,
     },
 };
 
@@ -496,7 +497,7 @@ fn handle_cloud_event(
         }
 
         CloudEvent::CommandQueued { command } => {
-            dispatch_command(command, accounts, rest, cfg, identity);
+            dispatch_command(command, accounts, rest, cfg, identity, jar_ctl_version);
         }
 
         CloudEvent::Disconnected { reason } => {
@@ -558,10 +559,14 @@ fn handle_cloud_event(
 // ── config apply (B5) ─────────────────────────────────────────────────────────
 
 #[cfg(unix)]
-fn try_apply_config(acc: &mut AccountState, jar_ctl_version: i32, rest: &SupabaseRest) {
+fn try_apply_config(
+    acc: &mut AccountState,
+    jar_ctl_version: i32,
+    rest: &SupabaseRest,
+) -> Result<(), &'static str> {
     // Đã apply rồi, không apply lại.
-    if acc.applied_version == acc.config_version {
-        return;
+    if acc.applied_version == acc.config_version && acc.applied_version != 0 {
+        return Ok(());
     }
 
     // Version gate (CLOUD-SPEC §3, B5.1).
@@ -573,7 +578,7 @@ fn try_apply_config(acc: &mut AccountState, jar_ctl_version: i32, rest: &Supabas
         if let Err(e) = rest.set_config_status(&acc.id, ConfigStatus::VersionMismatch, None, None) {
             eprintln!("[config] set_config_status failed: {e}");
         }
-        return;
+        return Err("config version mismatch");
     }
 
     // Dựng ControlSettings từ JSONB — Issues #04, #52
@@ -589,7 +594,7 @@ fn try_apply_config(acc: &mut AccountState, jar_ctl_version: i32, rest: &Supabas
             ) {
                 eprintln!("[config] set_config_status failed: {re}");
             }
-            return;
+            return Err("config was not applied");
         }
     };
 
@@ -614,6 +619,7 @@ fn try_apply_config(acc: &mut AccountState, jar_ctl_version: i32, rest: &Supabas
                     eprintln!("[config] clear_detect_spots failed: {e}");
                 }
             }
+            Ok(())
         }
         Err(e) => {
             let msg = e.to_string();
@@ -621,6 +627,7 @@ fn try_apply_config(acc: &mut AccountState, jar_ctl_version: i32, rest: &Supabas
             if let Err(re) = rest.set_config_status(&acc.id, ConfigStatus::Error, Some(&msg), None) {
                 eprintln!("[config] set_config_status failed: {re}");
             }
+            Err("config was not applied")
         }
     }
 }
@@ -731,6 +738,7 @@ fn reconcile_desired_state(
     let running = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
     match acc.desired_state.as_str() {
         "running" if !running => {
+            acc.process = None;
             eprintln!("[reconcile] account={} slot={}: starting", acc.id, acc.slot_index);
             let paths = AccountPaths::for_slot(acc.slot_index);
             // prepare_directories trước khi spawn — Issue #16
@@ -836,6 +844,7 @@ fn dispatch_command(
     rest: &SupabaseRest,
     cfg: &AgentConfig,
     identity: &crate::crypto::DeviceIdentity,
+    jar_ctl_version: i32,
 ) {
     // Issue #98: lọc device_id, bỏ qua lệnh không thuộc node này
     if let Some(ref cmd_device_id) = cmd.device_id {
@@ -917,10 +926,8 @@ fn dispatch_command(
                 eprintln!("[command] set_account_desired_state failed: {e}");
             }
             reconcile_desired_state(acc, rest, identity);
-            // Fix Issue #23: Success nếu spawn OK, Failed nếu không
-            let spawned = acc.process.is_some();
-            let status = if spawned { CommandStatus::Success } else { CommandStatus::Failed };
-            let msg = if !spawned { Some("spawn failed") } else { None };
+            let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+            let (status, msg) = evaluate_start_status(is_alive);
             if let Err(e) = rest.finish_command(&cmd.id, status, msg) {
                 eprintln!("[command] finish_command failed: {e}");
             }
@@ -932,7 +939,9 @@ fn dispatch_command(
                 eprintln!("[command] set_account_desired_state failed: {e}");
             }
             reconcile_desired_state(acc, rest, identity);
-            if let Err(e) = rest.finish_command(&cmd.id, CommandStatus::Success, None) {
+            let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+            let (status, msg) = evaluate_stop_status(is_alive);
+            if let Err(e) = rest.finish_command(&cmd.id, status, msg) {
                 eprintln!("[command] finish_command failed: {e}");
             }
         }
@@ -950,15 +959,18 @@ fn dispatch_command(
                 eprintln!("[command] set_account_desired_state failed: {e}");
             }
             reconcile_desired_state(acc, rest, identity);
-            if let Err(e) = rest.finish_command(&cmd.id, CommandStatus::Running, None) {
+            let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+            let (status, msg) = evaluate_restart_status(is_alive);
+            if let Err(e) = rest.finish_command(&cmd.id, status, msg) {
                 eprintln!("[command] finish_command failed: {e}");
             }
         }
         "apply-config" => {
-            // Issue #31: ép apply lại config. Dùng CONTROL_VERSION thay vì hardcode 13.
+            // Issue #31: ép apply lại config.
             acc.applied_version = 0;
-            try_apply_config(acc, CONTROL_VERSION as i32, rest);
-            if let Err(e) = rest.finish_command(&cmd.id, CommandStatus::Success, None) {
+            let result = try_apply_config(acc, jar_ctl_version, rest);
+            let (status, msg) = evaluate_apply_config_status(result);
+            if let Err(e) = rest.finish_command(&cmd.id, status, msg) {
                 eprintln!("[command] finish_command failed: {e}");
             }
         }
