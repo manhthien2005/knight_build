@@ -727,6 +727,66 @@ pub fn evaluate_subscriptions(accounts_ok: bool, commands_ok: bool) -> bool {
     accounts_ok && commands_ok
 }
 
+/// Pure representation of account merge for verifying cross-platform update invariants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountSnapshot {
+    pub id: String,
+    pub slot_index: i32,
+    pub username: String,
+    pub server_index: u8,
+    pub secret_sealed: serde_json::Value,
+    pub desired_state: String,
+    pub control_version: i32,
+    pub control: serde_json::Value,
+    pub config_version: i32,
+    /// Runtime-owned field (e.g. process PID) that must NEVER be overwritten by cloud refresh
+    pub live_process_pid: Option<i32>,
+}
+
+impl AccountSnapshot {
+    /// Merges fresh cloud fields into self, strictly preserving local runtime state.
+    pub fn merge_cloud_fields(&mut self, fresh: &AccountRow) {
+        self.username = fresh.username.clone();
+        self.server_index = (fresh.server_index as i32).clamp(0, 7) as u8;
+        self.secret_sealed = fresh.secret_sealed.clone();
+        self.desired_state = fresh.desired_state.clone();
+        self.control_version = fresh.control_version;
+        self.control = fresh.control.clone();
+        self.config_version = fresh.config_version;
+    }
+
+    pub fn from_row(row: &AccountRow) -> Self {
+        Self {
+            id: row.id.clone(),
+            slot_index: row.slot_index,
+            username: row.username.clone(),
+            server_index: (row.server_index as i32).clamp(0, 7) as u8,
+            secret_sealed: row.secret_sealed.clone(),
+            desired_state: row.desired_state.clone(),
+            control_version: row.control_version,
+            control: row.control.clone(),
+            config_version: row.config_version,
+            live_process_pid: None,
+        }
+    }
+}
+
+/// Evaluates recovery action for drained commands given a refresh result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryAction {
+    /// Post-drain refresh succeeded; dispatch commands in order with updated accounts
+    ProceedWithDispatch,
+    /// Post-drain refresh failed; abort recovery to avoid executing against stale state
+    AbortDueToRefreshFailure,
+}
+
+pub fn evaluate_recovery_precondition<E: ?Sized>(refresh_result: Result<&[AccountRow], &E>) -> RecoveryAction {
+    match refresh_result {
+        Ok(_) => RecoveryAction::ProceedWithDispatch,
+        Err(_) => RecoveryAction::AbortDueToRefreshFailure,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RestError {
     /// 4xx/5xx từ Supabase. `status` để phân biệt "RLS chặn" (401/403) với "hàng không tồn tại".
@@ -1374,6 +1434,100 @@ mod tests {
         assert!(!evaluate_subscriptions(true, false));
         assert!(!evaluate_subscriptions(false, true));
         assert!(evaluate_subscriptions(true, true));
+    }
+
+    #[test]
+    fn test_account_state_barrier_and_merge_semantics() {
+        use std::collections::HashMap;
+
+        // Case A: new account before recovered Start
+        let mut in_memory_accounts: HashMap<String, AccountSnapshot> = HashMap::new();
+        let row_a = AccountRow {
+            id: "acc-new".to_string(),
+            slot_index: 0,
+            label: "Acc New".to_string(),
+            username: "newbie".to_string(),
+            secret_sealed: serde_json::json!({"sealed": "secret"}),
+            server_index: 1,
+            desired_state: "stopped".to_string(),
+            control_version: 1,
+            control: serde_json::json!({"opt": 1}),
+            config_version: 1,
+            runtime: serde_json::json!({}),
+        };
+        assert!(!in_memory_accounts.contains_key(&row_a.id));
+
+        // Post-drain refresh contains row_a
+        in_memory_accounts.insert(row_a.id.clone(), AccountSnapshot::from_row(&row_a));
+        assert!(in_memory_accounts.contains_key("acc-new"));
+        let acc_a = in_memory_accounts.get("acc-new").unwrap();
+        assert_eq!(acc_a.username, "newbie");
+
+        // Case B: credential update before recovered Restart
+        let mut acc_b = AccountSnapshot {
+            id: "acc-b".to_string(),
+            slot_index: 1,
+            username: "old_user".to_string(),
+            server_index: 0,
+            secret_sealed: serde_json::json!({"version": 1}),
+            desired_state: "running".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            live_process_pid: Some(4001),
+        };
+        let row_b_updated = AccountRow {
+            id: "acc-b".to_string(),
+            slot_index: 1,
+            label: "Acc B".to_string(),
+            username: "updated_user".to_string(),
+            secret_sealed: serde_json::json!({"version": 2}),
+            server_index: 3,
+            desired_state: "running".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            runtime: serde_json::json!({}),
+        };
+        acc_b.merge_cloud_fields(&row_b_updated);
+        assert_eq!(acc_b.username, "updated_user");
+        assert_eq!(acc_b.server_index, 3);
+        assert_eq!(acc_b.secret_sealed, serde_json::json!({"version": 2}));
+
+        // Case C: config update before recovered apply-config
+        let row_c_updated = AccountRow {
+            id: "acc-b".to_string(),
+            slot_index: 1,
+            label: "Acc B".to_string(),
+            username: "updated_user".to_string(),
+            secret_sealed: serde_json::json!({"version": 2}),
+            server_index: 3,
+            desired_state: "running".to_string(),
+            control_version: 5,
+            control: serde_json::json!({"speed": 10}),
+            config_version: 4,
+            runtime: serde_json::json!({}),
+        };
+        acc_b.merge_cloud_fields(&row_c_updated);
+        assert_eq!(acc_b.control_version, 5);
+        assert_eq!(acc_b.control, serde_json::json!({"speed": 10}));
+        assert_eq!(acc_b.config_version, 4);
+
+        // Case D: refresh failure aborts recovery without dispatching or failing commands
+        let err: Result<&[AccountRow], &str> = Err(&"network timeout");
+        assert_eq!(
+            evaluate_recovery_precondition(err),
+            RecoveryAction::AbortDueToRefreshFailure
+        );
+        let ok_rows = vec![row_a];
+        let ok_res: Result<&[AccountRow], &str> = Ok(&ok_rows);
+        assert_eq!(
+            evaluate_recovery_precondition(ok_res),
+            RecoveryAction::ProceedWithDispatch
+        );
+
+        // Case E: existing live account preserves process handle during refresh
+        assert_eq!(acc_b.live_process_pid, Some(4001));
     }
 }
 

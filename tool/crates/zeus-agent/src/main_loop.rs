@@ -542,23 +542,7 @@ fn handle_cloud_event(
             });
 
             // Merge: giữ process đang chạy, cập nhật config
-            for (id, fresh_acc) in fresh {
-                let acc = accounts
-                    .entry(id)
-                    .and_modify(|existing| {
-                        existing.control_version = fresh_acc.control_version;
-                        existing.control = fresh_acc.control.clone();
-                        existing.config_version = fresh_acc.config_version;
-                        existing.desired_state = fresh_acc.desired_state.clone();
-                        existing.secret_sealed = fresh_acc.secret_sealed.clone();
-                        existing.server_index = fresh_acc.server_index;
-                        existing.username = fresh_acc.username.clone();
-                    })
-                    .or_insert(fresh_acc);
-                // Reconcile CŨNG cho account mới được insert — Issue #44
-                try_apply_config(acc, jar_ctl_version, rest);
-                reconcile_desired_state(acc, rest, identity);
-            }
+            merge_account_states(accounts, fresh, rest, identity, jar_ctl_version);
 
             spawn_realtime_thread(
                 cfg.supabase_url.clone(),
@@ -1348,36 +1332,40 @@ fn spawn_realtime_thread(
 #[cfg(unix)]
 fn boot_fetch_accounts(rest: &SupabaseRest, device_id: &str) -> HashMap<String, AccountState> {
     match rest.fetch_accounts(device_id) {
-        Ok(rows) => rows
-            .into_iter()
-            .map(|row| {
-                let id = row.id.clone();
-                let server_index = (row.server_index as i32).clamp(0, 7) as u8;
-                let state = AccountState {
-                    id: row.id,
-                    slot_index: row.slot_index,
-                    desired_state: row.desired_state,
-                    control_version: row.control_version,
-                    control: row.control,
-                    config_version: row.config_version,
-                    applied_version: 0,
-                    username: row.username,
-                    server_index,
-                    secret_sealed: row.secret_sealed,
-                    runtime_config: row.runtime,
-                    process: None,
-                    last_snapshot: None,
-                    last_telemetry_push: Instant::now(),
-                    restarts: 0,
-                };
-                (id, state)
-            })
-            .collect(),
+        Ok(rows) => account_states_from_rows(rows),
         Err(e) => {
             eprintln!("[boot] fetch_accounts failed: {e}");
             HashMap::new()
         }
     }
+}
+
+#[cfg(unix)]
+fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> HashMap<String, AccountState> {
+    rows.into_iter()
+        .map(|row| {
+            let id = row.id.clone();
+            let server_index = (row.server_index as i32).clamp(0, 7) as u8;
+            let state = AccountState {
+                id: row.id,
+                slot_index: row.slot_index,
+                desired_state: row.desired_state,
+                control_version: row.control_version,
+                control: row.control,
+                config_version: row.config_version,
+                applied_version: 0,
+                username: row.username,
+                server_index,
+                secret_sealed: row.secret_sealed,
+                runtime_config: row.runtime,
+                process: None,
+                last_snapshot: None,
+                last_telemetry_push: Instant::now(),
+                restarts: 0,
+            };
+            (id, state)
+        })
+        .collect()
 }
 
 /// Tạo AccountState từ một realtime record JSON.
@@ -1406,6 +1394,40 @@ fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountS
 }
 
 #[cfg(unix)]
+fn merge_account_states(
+    accounts: &mut HashMap<String, AccountState>,
+    fresh: HashMap<String, AccountState>,
+    rest: &SupabaseRest,
+    identity: &crate::crypto::DeviceIdentity,
+    jar_ctl_version: i32,
+) {
+    for (id, fresh_acc) in fresh {
+        if let Some(existing) = accounts.get_mut(&id) {
+            existing.control_version = fresh_acc.control_version;
+            existing.control = fresh_acc.control;
+            existing.config_version = fresh_acc.config_version;
+            existing.desired_state = fresh_acc.desired_state;
+            existing.secret_sealed = fresh_acc.secret_sealed;
+            existing.server_index = fresh_acc.server_index;
+            existing.username = fresh_acc.username;
+            existing.runtime_config = fresh_acc.runtime_config;
+            // Preserves existing.process (supervised Child), existing.last_snapshot, existing.restarts, etc.
+            try_apply_config(existing, jar_ctl_version, rest);
+            reconcile_desired_state(existing, rest, identity);
+        } else {
+            // New account: initialize directories and clear old snapshot
+            let paths = AccountPaths::for_slot(fresh_acc.slot_index);
+            let _ = crate::launch::prepare_directories(&paths);
+            let _ = clear_snapshot(&paths.home);
+            let mut acc = fresh_acc;
+            try_apply_config(&mut acc, jar_ctl_version, rest);
+            reconcile_desired_state(&mut acc, rest, identity);
+            accounts.insert(id, acc);
+        }
+    }
+}
+
+#[cfg(unix)]
 fn recover_queued_commands(
     rest: &SupabaseRest,
     device_id: &str,
@@ -1418,18 +1440,44 @@ fn recover_queued_commands(
     if let Err(e) = rest.expire_stale_commands(device_id) {
         eprintln!("[recovery] expire_stale_commands failed: {e}");
     }
-    match rest.drain_commands(device_id) {
-        Ok(cmds) => {
-            eprintln!("[recovery] drained {} queued command(s)", cmds.len());
-            for cmd in cmds {
-                if !dedupe.record_if_new(&cmd.id) {
-                    eprintln!("[recovery] duplicate command id={} already processed, suppressing", cmd.id);
-                    continue;
-                }
-                dispatch_command(cmd, accounts, rest, cfg, identity, jar_ctl_version);
-            }
+
+    let cmds = match rest.drain_commands(device_id) {
+        Ok(cmds) => cmds,
+        Err(e) => {
+            eprintln!("[recovery] drain_commands failed: {e}");
+            return;
         }
-        Err(e) => eprintln!("[recovery] drain_commands failed: {e}"),
+    };
+
+    if cmds.is_empty() {
+        return;
+    }
+
+    eprintln!("[recovery] drained {} queued command(s)", cmds.len());
+
+    // State barrier: fetch fresh account snapshot AFTER drain to guarantee
+    // account state reflects any creation/update that happened before or with the commands.
+    match rest.fetch_accounts(device_id) {
+        Ok(rows) => {
+            let fresh = account_states_from_rows(rows);
+            merge_account_states(accounts, fresh, rest, identity, jar_ctl_version);
+        }
+        Err(e) => {
+            // Post-drain account refresh failed: do NOT dispatch account commands against stale state.
+            // Leave commands queued in database for future recovery; do not record them in dedupe.
+            eprintln!(
+                "[recovery] post-drain fetch_accounts failed: {e}, aborting recovery to prevent dispatching against stale account state"
+            );
+            return;
+        }
+    }
+
+    for cmd in cmds {
+        if !dedupe.record_if_new(&cmd.id) {
+            eprintln!("[recovery] duplicate command id={} already processed, suppressing", cmd.id);
+            continue;
+        }
+        dispatch_command(cmd, accounts, rest, cfg, identity, jar_ctl_version);
     }
 }
 

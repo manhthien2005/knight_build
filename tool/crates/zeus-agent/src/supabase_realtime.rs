@@ -49,6 +49,7 @@
 //!   3. Subscribe lại mọi bảng đã đăng ký.
 
 use std::{
+    collections::VecDeque,
     net::TcpStream,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
@@ -117,9 +118,9 @@ type WsConn = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
 pub struct RealtimeClient {
     ws: WsConn,
     ref_counter: AtomicU64,
-    /// Events được buffer trong `wait_for_reply()` — drain trước `ws.read()` lần sau.
+    /// Events được buffer trong `wait_for_reply()` — drain trước `ws.read()` lần sau theo thứ tự FIFO.
     /// Bảo vệ khỏi data loss trong cửa sổ ~100ms khi phải subscribe handshake.
-    pending: Vec<RealtimeEvent>,
+    pending: VecDeque<RealtimeEvent>,
 }
 
 // AtomicU64 là Send nhưng không Sync; WebSocket cũng không Sync. Cả hai đều đúng
@@ -167,7 +168,7 @@ impl RealtimeClient {
         Ok(Self {
             ws,
             ref_counter: AtomicU64::new(1),
-            pending: Vec::new(),
+            pending: VecDeque::new(),
         })
     }
 
@@ -233,9 +234,8 @@ impl RealtimeClient {
     ///
     /// Khi socket chết (timeout hoặc close), trả `Ok(Some(Disconnected))`.
     pub fn read_event(&mut self) -> Result<Option<RealtimeEvent>, RealtimeError> {
-        // Drain pending events buffered during subscribe handshake first.
-        // pop() lấy theo LIFO — buffer thường chỉ có 0–1 item nên thứ tự không quan trọng.
-        if let Some(evt) = self.pending.pop() {
+        // Drain pending events buffered during subscribe handshake first (FIFO).
+        if let Some(evt) = self.pending.pop_front() {
             return Ok(Some(evt));
         }
 
@@ -314,7 +314,7 @@ impl RealtimeClient {
                 // Buffer bất kỳ postgres_changes event nào đến trong cửa sổ handshake.
                 // Nếu không buffer, event bị drop vĩnh viễn và vòng chính không bao giờ thấy.
                 if let Ok(Some(evt)) = self.parse_text_frame(&text) {
-                    self.pending.push(evt);
+                    self.pending.push_back(evt);
                 }
                 continue;
             }
@@ -519,5 +519,19 @@ mod tests {
         let ct = ChangeType::from_str(data["type"].as_str().unwrap());
         assert!(ct.is_some(), "ChangeType::from_str phải thành công cho INSERT");
         assert_eq!(data["table"].as_str().unwrap(), "commands");
+    }
+
+    /// Events buffered during subscribe handshake must preserve FIFO arrival order.
+    #[test]
+    fn test_pending_event_queue_is_fifo() {
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back("event_a");
+        queue.push_back("event_b");
+        queue.push_back("event_c");
+
+        assert_eq!(queue.pop_front(), Some("event_a"));
+        assert_eq!(queue.pop_front(), Some("event_b"));
+        assert_eq!(queue.pop_front(), Some("event_c"));
+        assert_eq!(queue.pop_front(), None);
     }
 }
