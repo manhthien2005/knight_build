@@ -24,14 +24,17 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::supabase_rest::parse_procfs_stat_pgrp_and_state;
+use crate::supabase_rest::{
+    evaluate_proc_entry, parse_procfs_stat_pgrp_and_state, GroupLivenessDecision,
+    ProcEntryInspection,
+};
 
 /// Non-blocking liveness probe for the process group.
 ///
-/// Returns true if any live, non-zombie process belonging to `pgid` exists in `/proc`.
-/// A stopped child is always a zombie first (awaiting `waitpid`), and a dead leader
-/// may leave behind surviving descendants in the same process group. This inspects
-/// `/proc/<pid>/stat` to check if any executable workload remains in the group.
+/// Returns true if any live, non-zombie process belonging to `pgid` exists in `/proc`,
+/// OR if target-group liveness cannot be safely determined (fail-safe).
+/// Returns false ONLY when confirmed dead (ESRCH fast-path, or all processes scanned
+/// and no live workload remains in `pgid`).
 pub fn pgid_alive(pgid: i32) -> bool {
     if pgid <= 0 {
         return false;
@@ -47,10 +50,22 @@ pub fn pgid_alive(pgid: i32) -> bool {
     }
 
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return false;
+        // Global /proc read failure: kill(-pgid, 0) did not return ESRCH, but /proc cannot
+        // be read. Fail-safe: do NOT return false (uncertainty must never confirm death).
+        return true;
     };
 
-    for entry in entries.flatten() {
+    let mut uncertain = false;
+
+    for entry_res in entries {
+        let entry = match entry_res {
+            Ok(e) => e,
+            Err(_) => {
+                uncertain = true;
+                continue;
+            }
+        };
+
         let file_name = entry.file_name();
         let Some(name_str) = file_name.to_str() else {
             continue;
@@ -59,21 +74,63 @@ pub fn pgid_alive(pgid: i32) -> bool {
         if !name_str.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-
-        // Read /proc/<pid>/stat
-        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
-            // Process vanished between readdir and read, ignore
+        let Ok(pid) = name_str.parse::<i32>() else {
             continue;
         };
 
-        if let Some((state, process_pgid)) = parse_procfs_stat_pgrp_and_state(&stat) {
-            if process_pgid == pgid && state != b'Z' {
-                return true;
+        let stat_path = entry.path().join("stat");
+        let inspection = match std::fs::read_to_string(&stat_path) {
+            Ok(stat) => {
+                if let Some((state, pgrp)) = parse_procfs_stat_pgrp_and_state(&stat) {
+                    ProcEntryInspection::Parsed { state, pgrp }
+                } else {
+                    inspect_fallback_pgid(pid, pgid)
+                }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Process vanished between readdir and stat read: normal race, ignore
+                ProcEntryInspection::Vanished
+            }
+            Err(_) => {
+                // Non-NotFound error (e.g. PermissionDenied, EIO)
+                inspect_fallback_pgid(pid, pgid)
+            }
+        };
+
+        match evaluate_proc_entry(pgid, &inspection) {
+            GroupLivenessDecision::Alive => return true,
+            GroupLivenessDecision::Indeterminate => {
+                uncertain = true;
+            }
+            GroupLivenessDecision::ContinueScan => {}
         }
     }
 
+    if uncertain {
+        return true;
+    }
+
     false
+}
+
+fn inspect_fallback_pgid(pid: i32, target_pgid: i32) -> ProcEntryInspection {
+    let pgrp = unsafe { libc::getpgid(pid) };
+    if pgrp == -1 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            // Process vanished: normal race
+            ProcEntryInspection::Vanished
+        } else {
+            // Cannot determine PGID: fail-safe
+            ProcEntryInspection::InspectionFailed
+        }
+    } else if pgrp > 0 && pgrp != target_pgid {
+        // Confirmed belongs to an unrelated process group: safely ignored
+        ProcEntryInspection::UnrelatedGroup(pgrp)
+    } else {
+        // Belongs to target_pgid or unknown: cannot rule out live workload
+        ProcEntryInspection::InspectionFailed
+    }
 }
 
 /// PID of a supervised JVM, plus what is needed to stop it as a tree.

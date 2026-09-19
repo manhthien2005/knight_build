@@ -565,6 +565,105 @@ pub fn parse_procfs_stat_pgrp_and_state(stat: &str) -> Option<(u8, i32)> {
     Some((state, pgrp))
 }
 
+/// Result of inspecting an individual `/proc/<pid>` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcEntryInspection {
+    /// Successfully read and parsed stat
+    Parsed { state: u8, pgrp: i32 },
+    /// Process vanished during scan (NotFound / ESRCH) — normal race
+    Vanished,
+    /// Unreadable or unparseable, but verified to belong to an unrelated process group
+    UnrelatedGroup(i32),
+    /// Unreadable or unparseable, and belongs to or cannot be ruled out from target group
+    InspectionFailed,
+}
+
+/// Decision for an individual `/proc/<pid>` entry during group liveness scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupLivenessDecision {
+    /// Found confirmed live member of target group
+    Alive,
+    /// Inspection failed in a way that prevents declaring the group dead
+    Indeterminate,
+    /// No live workload found in this entry, continue scanning
+    ContinueScan,
+}
+
+/// Evaluates an inspected process entry against the target process group.
+pub fn evaluate_proc_entry(
+    target_pgid: i32,
+    inspection: &ProcEntryInspection,
+) -> GroupLivenessDecision {
+    match inspection {
+        ProcEntryInspection::Parsed { state, pgrp } => {
+            if *pgrp == target_pgid {
+                if *state != b'Z' {
+                    GroupLivenessDecision::Alive
+                } else {
+                    // Zombie in target group: not live workload
+                    GroupLivenessDecision::ContinueScan
+                }
+            } else {
+                GroupLivenessDecision::ContinueScan
+            }
+        }
+        ProcEntryInspection::Vanished => GroupLivenessDecision::ContinueScan,
+        ProcEntryInspection::UnrelatedGroup(_) => GroupLivenessDecision::ContinueScan,
+        ProcEntryInspection::InspectionFailed => GroupLivenessDecision::Indeterminate,
+    }
+}
+
+/// Outcome of a process-group liveness scan across `/proc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupScanOutcome {
+    /// Confirmed dead: no live workload remaining in target PGID
+    ConfirmedDead,
+    /// Confirmed alive: live non-zombie process in target PGID
+    LiveWorkloadPresent,
+    /// Uncertain / inspection failure: cannot prove dead
+    Uncertain,
+}
+
+impl GroupScanOutcome {
+    /// Fail-safe mapping: returns true if alive or uncertain; false ONLY if confirmed dead.
+    pub fn is_alive_or_uncertain(&self) -> bool {
+        matches!(self, Self::LiveWorkloadPresent | Self::Uncertain)
+    }
+}
+
+/// Evaluates an entire collection of procfs inspections for a target process group.
+/// Returns ConfirmedDead ONLY when there is enough evidence that no live non-zombie
+/// member of target_pgid remains.
+pub fn evaluate_group_liveness_scan<I>(
+    target_pgid: i32,
+    procfs_available: bool,
+    entries: I,
+) -> GroupScanOutcome
+where
+    I: IntoIterator<Item = ProcEntryInspection>,
+{
+    if !procfs_available {
+        return GroupScanOutcome::Uncertain;
+    }
+
+    let mut uncertain = false;
+    for entry in entries {
+        match evaluate_proc_entry(target_pgid, &entry) {
+            GroupLivenessDecision::Alive => return GroupScanOutcome::LiveWorkloadPresent,
+            GroupLivenessDecision::Indeterminate => {
+                uncertain = true;
+            }
+            GroupLivenessDecision::ContinueScan => {}
+        }
+    }
+
+    if uncertain {
+        GroupScanOutcome::Uncertain
+    } else {
+        GroupScanOutcome::ConfirmedDead
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RestError {
     /// 4xx/5xx từ Supabase. `status` để phân biệt "RLS chặn" (401/403) với "hàng không tồn tại".
@@ -1015,6 +1114,114 @@ mod tests {
         // Malformed line
         assert_eq!(parse_procfs_stat_pgrp_and_state("invalid content"), None);
         assert_eq!(parse_procfs_stat_pgrp_and_state("1234 ()"), None);
+    }
+
+    #[test]
+    fn test_group_liveness_decision_semantics() {
+        let target_pgid = 1000;
+
+        // Case A: Confirmed dead (e.g. ESRCH fast path or empty procfs scan)
+        assert_eq!(
+            evaluate_group_liveness_scan(target_pgid, true, vec![]),
+            GroupScanOutcome::ConfirmedDead
+        );
+        assert!(!evaluate_group_liveness_scan(target_pgid, true, vec![]).is_alive_or_uncertain());
+
+        // Case B: Target live non-zombie process found -> Alive
+        assert_eq!(
+            evaluate_group_liveness_scan(
+                target_pgid,
+                true,
+                vec![ProcEntryInspection::Parsed {
+                    state: b'S',
+                    pgrp: target_pgid,
+                }]
+            ),
+            GroupScanOutcome::LiveWorkloadPresent
+        );
+        assert!(evaluate_group_liveness_scan(
+            target_pgid,
+            true,
+            vec![ProcEntryInspection::Parsed {
+                state: b'S',
+                pgrp: target_pgid,
+            }]
+        ).is_alive_or_uncertain());
+
+        // Case C: Only target zombies found -> ConfirmedDead (no live workload)
+        assert_eq!(
+            evaluate_group_liveness_scan(
+                target_pgid,
+                true,
+                vec![ProcEntryInspection::Parsed {
+                    state: b'Z',
+                    pgrp: target_pgid,
+                }]
+            ),
+            GroupScanOutcome::ConfirmedDead
+        );
+        assert!(!evaluate_group_liveness_scan(
+            target_pgid,
+            true,
+            vec![ProcEntryInspection::Parsed {
+                state: b'Z',
+                pgrp: target_pgid,
+            }]
+        ).is_alive_or_uncertain());
+
+        // Case D: Global procfs inspection unavailable while group not disproven -> Uncertain (must NOT declare dead)
+        assert_eq!(
+            evaluate_group_liveness_scan(target_pgid, false, vec![]),
+            GroupScanOutcome::Uncertain
+        );
+        assert!(evaluate_group_liveness_scan(target_pgid, false, vec![]).is_alive_or_uncertain());
+
+        // Case E: A PID disappears during scan (Vanished) -> Normal race, scan continues, confirmed dead if no live workload
+        assert_eq!(
+            evaluate_group_liveness_scan(
+                target_pgid,
+                true,
+                vec![
+                    ProcEntryInspection::Vanished,
+                    ProcEntryInspection::Parsed {
+                        state: b'Z',
+                        pgrp: target_pgid,
+                    }
+                ]
+            ),
+            GroupScanOutcome::ConfirmedDead
+        );
+
+        // Case F: Non-race inspection error on target or undetermined PID -> Uncertain (must NOT declare dead)
+        assert_eq!(
+            evaluate_group_liveness_scan(
+                target_pgid,
+                true,
+                vec![
+                    ProcEntryInspection::Vanished,
+                    ProcEntryInspection::InspectionFailed,
+                ]
+            ),
+            GroupScanOutcome::Uncertain
+        );
+        assert!(evaluate_group_liveness_scan(
+            target_pgid,
+            true,
+            vec![ProcEntryInspection::InspectionFailed]
+        ).is_alive_or_uncertain());
+
+        // Unrelated group inspection failure is safely ignored
+        assert_eq!(
+            evaluate_group_liveness_scan(
+                target_pgid,
+                true,
+                vec![
+                    ProcEntryInspection::UnrelatedGroup(2000),
+                    ProcEntryInspection::Vanished,
+                ]
+            ),
+            GroupScanOutcome::ConfirmedDead
+        );
     }
 }
 
