@@ -24,6 +24,58 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crate::supabase_rest::parse_procfs_stat_pgrp_and_state;
+
+/// Non-blocking liveness probe for the process group.
+///
+/// Returns true if any live, non-zombie process belonging to `pgid` exists in `/proc`.
+/// A stopped child is always a zombie first (awaiting `waitpid`), and a dead leader
+/// may leave behind surviving descendants in the same process group. This inspects
+/// `/proc/<pid>/stat` to check if any executable workload remains in the group.
+pub fn pgid_alive(pgid: i32) -> bool {
+    if pgid <= 0 {
+        return false;
+    }
+
+    // Fast-path: if kill(-pgid, 0) returns -1 with ESRCH, no process in pgid exists at all.
+    // SAFETY: signal 0 delivers no signal, only tests existence / permissions.
+    if unsafe { libc::kill(-pgid, 0) } != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            return false;
+        }
+    }
+
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name_str) = file_name.to_str() else {
+            continue;
+        };
+        // Numerical directory names correspond to PIDs
+        if !name_str.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+
+        // Read /proc/<pid>/stat
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            // Process vanished between readdir and read, ignore
+            continue;
+        };
+
+        if let Some((state, process_pgid)) = parse_procfs_stat_pgrp_and_state(&stat) {
+            if process_pgid == pgid && state != b'Z' {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 /// PID of a supervised JVM, plus what is needed to stop it as a tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Child {
@@ -35,6 +87,11 @@ pub struct Child {
 }
 
 impl Child {
+    /// Non-blocking liveness probe for the process group.
+    pub fn pgid_alive(&self) -> bool {
+        pgid_alive(self.pgid)
+    }
+
     /// Non-blocking liveness probe.
     ///
     /// `kill(pid, 0)` is not enough: it also succeeds for a **zombie**, and a stopped child is
@@ -211,23 +268,23 @@ pub fn stop(child: &Child, grace: Duration) -> StopOutcome {
 
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline {
-        if !child.alive() {
+        if !pgid_alive(child.pgid) {
             return StopOutcome::Terminated;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    if !child.alive() {
+    if !pgid_alive(child.pgid) {
         return StopOutcome::Terminated;
     }
 
-    // Still alive past the grace period: the JVM is wedged, not slow. Escalate.
+    // Still alive past the grace period: the JVM or descendant is wedged, not slow. Escalate.
     // SAFETY: negative pid signals the whole process group.
     let kill_sent = unsafe { libc::kill(-child.pgid, libc::SIGKILL) };
     if kill_sent != 0 {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::ESRCH) {
-            if !child.alive() {
+            if !pgid_alive(child.pgid) {
                 return StopOutcome::Killed;
             }
         }
@@ -235,20 +292,20 @@ pub fn stop(child: &Child, grace: Duration) -> StopOutcome {
         return StopOutcome::Failed;
     }
 
-    // SIGKILL sent: verify process death within bounded deadline
+    // SIGKILL sent: verify process group death within bounded deadline
     let kill_deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < kill_deadline {
-        if !child.alive() {
+        if !pgid_alive(child.pgid) {
             return StopOutcome::Killed;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    if !child.alive() {
+    if !pgid_alive(child.pgid) {
         StopOutcome::Killed
     } else {
         eprintln!(
-            "[process_unix] process pgid={} still alive after SIGKILL escalation",
+            "[process_unix] process group pgid={} still alive after SIGKILL escalation",
             child.pgid
         );
         StopOutcome::Failed
@@ -544,6 +601,32 @@ mod tests {
             "waitpid must report resistant child was killed"
         );
         assert!(!child_c.alive(), "resistant child must not be alive after kill");
+
+        // Case D — leader terminates on SIGTERM, but descendant in same PGID ignores SIGTERM
+        // Proves that leader death alone is NOT sufficient for Stop success.
+        let mut leader_with_descendant = Command::new("sh");
+        // Non-interactive shell keeps background job in same PGID. Background job traps TERM, leader waits.
+        leader_with_descendant.args(["-c", "(trap '' TERM; sleep 30) & wait $!"]);
+        let child_d = spawn(leader_with_descendant).expect("spawn leader with descendant");
+        assert!(child_d.alive(), "leader must be alive initially");
+        assert!(child_d.pgid_alive(), "group must be alive initially");
+
+        // Stop with 200ms grace: leader terminates on SIGTERM, but descendant ignores SIGTERM.
+        // stop() must NOT return Terminated based on leader death; it must escalate to SIGKILL
+        // against the process group and confirm the entire group is dead before returning Killed.
+        let outcome_d = stop(&child_d, Duration::from_millis(200));
+        assert_eq!(
+            outcome_d,
+            StopOutcome::Killed,
+            "must escalate to SIGKILL because descendant survived leader death: {outcome_d:?}"
+        );
+        assert!(!child_d.pgid_alive(), "process group must have no live members after stop");
+        let reaped_d = reap();
+        assert!(
+            reaped_d.iter().any(|(pid, _)| *pid == child_d.pid),
+            "waitpid must reap leader"
+        );
     }
 }
+
 

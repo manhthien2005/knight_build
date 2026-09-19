@@ -268,7 +268,7 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
             // Dừng tất cả JVM
             for acc in accounts.values_mut() {
                 if let Some(child) = acc.process.take() {
-                    if child.alive() {
+                    if child.pgid_alive() {
                         process_unix::stop(&child, Duration::from_secs(5));
                     }
                 }
@@ -487,7 +487,7 @@ fn handle_cloud_event(
             if let Some(mut acc) = accounts.remove(&account_id) {
                 eprintln!("[cloud] account deleted {account_id}, stopping JVM");
                 if let Some(child) = acc.process.take() {
-                    if child.alive() {
+                    if child.pgid_alive() {
                         process_unix::stop(&child, Duration::from_secs(5));
                     }
                 }
@@ -518,7 +518,7 @@ fn handle_cloud_event(
                 } else {
                     eprintln!("[reconnect] account {id} no longer exists, stopping");
                     if let Some(child) = acc.process.take() {
-                        if child.alive() {
+                        if child.pgid_alive() {
                             process_unix::stop(&child, Duration::from_secs(5));
                         }
                     }
@@ -812,7 +812,7 @@ fn reconcile_desired_state(
             let (has_process, is_alive) = acc
                 .process
                 .as_ref()
-                .map(|p| (true, p.alive()))
+                .map(|p| (true, p.pgid_alive()))
                 .unwrap_or((false, false));
 
             let outcome = if is_alive {
@@ -828,7 +828,7 @@ fn reconcile_desired_state(
                         }
                         StopOutcome::Failed => {
                             eprintln!(
-                                "[reconcile] account={}: stop failed, process still alive",
+                                "[reconcile] account={}: stop failed, process group still alive",
                                 acc.id
                             );
                         }
@@ -969,7 +969,7 @@ fn dispatch_command(
                 eprintln!("[command] set_account_desired_state failed: {e}");
             }
             reconcile_desired_state(acc, rest, identity);
-            let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+            let is_alive = acc.process.as_ref().map(|p| p.pgid_alive()).unwrap_or(false);
             let (status, msg) = evaluate_stop_status(is_alive);
             if let Err(e) = rest.finish_command(&cmd.id, status, msg) {
                 eprintln!("[command] finish_command failed: {e}");
@@ -983,11 +983,11 @@ fn dispatch_command(
             }
             reconcile_desired_state(acc, rest, identity);
 
-            let old_is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+            let old_is_alive = acc.process.as_ref().map(|p| p.pgid_alive()).unwrap_or(false);
             match check_restart_precondition(old_is_alive) {
                 RestartPrecondition::BlockedOldProcessAlive => {
                     eprintln!(
-                        "[command] restart: account {} old process failed to stop; aborting replacement spawn",
+                        "[command] restart: account {} old process group failed to stop; aborting replacement spawn",
                         account_id
                     );
                     if let Err(e) = rest.finish_command(

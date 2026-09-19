@@ -552,6 +552,19 @@ pub fn check_restart_precondition(old_process_alive: bool) -> RestartPreconditio
     }
 }
 
+/// Parses (state, pgrp) from the text of a Linux `/proc/<pid>/stat` line.
+///
+/// Handles `comm` fields with spaces and nested parentheses by splitting from the rightmost `)`.
+/// Field 3 is state, Field 4 is ppid, Field 5 is pgrp (process group ID).
+pub fn parse_procfs_stat_pgrp_and_state(stat: &str) -> Option<(u8, i32)> {
+    let (_, after_comm) = stat.rsplit_once(')')?;
+    let mut tokens = after_comm.trim().split_whitespace();
+    let state = tokens.next()?.as_bytes().first().copied()?;
+    let _ppid = tokens.next()?;
+    let pgrp = tokens.next()?.parse::<i32>().ok()?;
+    Some((state, pgrp))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RestError {
     /// 4xx/5xx từ Supabase. `status` để phân biệt "RLS chặn" (401/403) với "hàng không tồn tại".
@@ -983,6 +996,25 @@ mod tests {
             check_restart_precondition(true),
             RestartPrecondition::BlockedOldProcessAlive
         );
+    }
+
+    #[test]
+    fn test_parse_procfs_stat_pgrp_and_state() {
+        // Standard stat line
+        let stat1 = "1234 (java) S 1 1000 1000 0 -1 4194304";
+        assert_eq!(parse_procfs_stat_pgrp_and_state(stat1), Some((b'S', 1000)));
+
+        // comm containing spaces and nested parentheses
+        let stat2 = "5678 (Web Content (worker)) R 1234 5000 5000 0 -1 4194304";
+        assert_eq!(parse_procfs_stat_pgrp_and_state(stat2), Some((b'R', 5000)));
+
+        // Zombie process
+        let stat3 = "9999 (defunct_worker) Z 1234 1000 1000 0 -1 4194304";
+        assert_eq!(parse_procfs_stat_pgrp_and_state(stat3), Some((b'Z', 1000)));
+
+        // Malformed line
+        assert_eq!(parse_procfs_stat_pgrp_and_state("invalid content"), None);
+        assert_eq!(parse_procfs_stat_pgrp_and_state("1234 ()"), None);
     }
 }
 
