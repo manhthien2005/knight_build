@@ -747,7 +747,11 @@ pub struct AccountSnapshot {
 
 impl AccountSnapshot {
     /// Merges fresh cloud fields into self, strictly preserving local runtime state.
+    /// A retiring account is monotonic and must never be updated or resurrected.
     pub fn merge_cloud_fields(&mut self, fresh: &AccountRow) {
+        if self.retiring {
+            return;
+        }
         self.username = fresh.username.clone();
         self.server_index = (fresh.server_index as i32).clamp(0, 7) as u8;
         self.secret_sealed = fresh.secret_sealed.clone();
@@ -824,34 +828,51 @@ pub enum ReconciliationPlan {
 /// Pure evaluator for account set reconciliation.
 ///
 /// Ensures Invariant A (fetch error is not data) and Invariant B (successful empty set is authoritative).
-pub fn evaluate_account_reconciliation<E: ?Sized>(
-    local_ids: &[String],
+/// Ensures Problem A invariant: retiring accounts remain retirement-monotonic, are excluded from
+/// `to_update`, and are routed through `to_retire` for ongoing safe process group termination retry.
+pub fn evaluate_account_reconciliation<'a, I, E>(
+    local_accounts: I,
     cloud_result: Result<&[AccountRow], &E>,
-) -> ReconciliationPlan {
+) -> ReconciliationPlan
+where
+    I: IntoIterator<Item = (&'a str, bool)>,
+    E: ?Sized,
+{
     match cloud_result {
         Err(_) => ReconciliationPlan::AbortedFetchFailed,
         Ok(cloud_rows) => {
             let cloud_ids: std::collections::HashSet<&str> =
                 cloud_rows.iter().map(|r| r.id.as_str()).collect();
-            let local_id_set: std::collections::HashSet<&str> =
-                local_ids.iter().map(|s| s.as_str()).collect();
+            let local_map: std::collections::HashMap<&str, bool> = local_accounts.into_iter().collect();
 
             let mut to_insert = Vec::new();
             let mut to_update = Vec::new();
             for row in cloud_rows {
-                if local_id_set.contains(row.id.as_str()) {
-                    to_update.push(row.id.clone());
-                } else {
-                    to_insert.push(row.id.clone());
+                match local_map.get(row.id.as_str()) {
+                    Some(&true) => {
+                        // Account is locally retiring. Under no circumstances may it be updated,
+                        // re-spawned, or resurrected into normal execution.
+                    }
+                    Some(&false) => {
+                        to_update.push(row.id.clone());
+                    }
+                    None => {
+                        to_insert.push(row.id.clone());
+                    }
                 }
             }
 
             let mut to_retire = Vec::new();
-            for id in local_ids {
-                if !cloud_ids.contains(id.as_str()) {
-                    to_retire.push(id.clone());
+            for (&id, &is_retiring) in &local_map {
+                // If the account is missing from cloud OR is already marked retiring,
+                // it belongs in to_retire (safe retirement / retry).
+                if is_retiring || !cloud_ids.contains(id) {
+                    to_retire.push(id.to_string());
                 }
             }
+            to_retire.sort();
+            to_update.sort();
+            to_insert.sort();
 
             ReconciliationPlan::Apply {
                 to_insert,
@@ -859,6 +880,37 @@ pub fn evaluate_account_reconciliation<E: ?Sized>(
                 to_retire,
             }
         }
+    }
+}
+
+/// Decision outcome for token refresh during reconnect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectTokenDecision {
+    pub rest_token: String,
+    pub realtime_token: String,
+    pub refreshed: bool,
+}
+
+/// Evaluates token propagation for realtime reconnect.
+///
+/// Ensures Problem B invariant:
+/// - On refresh success: new token is propagated to both REST and realtime reconnect.
+/// - On refresh failure: known-good current token is preserved without being overwritten.
+pub fn evaluate_reconnect_token_refresh<E>(
+    current_token: &str,
+    sign_in_result: Result<String, E>,
+) -> ReconnectTokenDecision {
+    match sign_in_result {
+        Ok(new_token) => ReconnectTokenDecision {
+            rest_token: new_token.clone(),
+            realtime_token: new_token,
+            refreshed: true,
+        },
+        Err(_) => ReconnectTokenDecision {
+            rest_token: current_token.to_string(),
+            realtime_token: current_token.to_string(),
+            refreshed: false,
+        },
     }
 }
 
@@ -1624,18 +1676,18 @@ mod tests {
 
     #[test]
     fn test_fetch_error_is_not_authoritative_empty() {
-        let local_ids = vec!["acc-1".to_string(), "acc-2".to_string()];
+        let local_accounts = [("acc-1", false), ("acc-2", false)];
         let err: Result<&[AccountRow], &str> = Err("network failure");
-        let plan = evaluate_account_reconciliation(&local_ids, err);
+        let plan = evaluate_account_reconciliation(local_accounts, err);
         assert_eq!(plan, ReconciliationPlan::AbortedFetchFailed);
     }
 
     #[test]
     fn test_successful_empty_cloud_set_retires_all_local_accounts() {
-        let local_ids = vec!["acc-1".to_string(), "acc-2".to_string()];
+        let local_accounts = [("acc-1", false), ("acc-2", false)];
         let empty_rows: &[AccountRow] = &[];
         let ok_empty: Result<&[AccountRow], &str> = Ok(empty_rows);
-        let plan = evaluate_account_reconciliation(&local_ids, ok_empty);
+        let plan = evaluate_account_reconciliation(local_accounts, ok_empty);
         assert_eq!(
             plan,
             ReconciliationPlan::Apply {
@@ -1648,7 +1700,7 @@ mod tests {
 
     #[test]
     fn test_partial_cloud_deletion_retires_only_missing() {
-        let local_ids = vec!["acc-a".to_string(), "acc-b".to_string(), "acc-c".to_string()];
+        let local_accounts = [("acc-a", false), ("acc-b", false), ("acc-c", false)];
         let cloud_rows = vec![
             AccountRow {
                 id: "acc-a".to_string(),
@@ -1678,7 +1730,7 @@ mod tests {
             },
         ];
         let ok_res: Result<&[AccountRow], &str> = Ok(&cloud_rows);
-        let plan = evaluate_account_reconciliation(&local_ids, ok_res);
+        let plan = evaluate_account_reconciliation(local_accounts, ok_res);
         assert_eq!(
             plan,
             ReconciliationPlan::Apply {
@@ -1746,16 +1798,43 @@ mod tests {
     }
 
     #[test]
-    fn test_acceptance_matrix_cases_a_through_f() {
-        // Case A: normal reconnect
-        // local A,B; cloud success A,B -> no disruption, metadata reconciled
-        let local_ids = vec!["acc-a".to_string(), "acc-b".to_string()];
+    fn test_case_f_retiring_account_not_resurrected_by_stale_snapshot() {
+        // Account A is locally retiring with an owned live process
+        let mut acc_a = AccountSnapshot {
+            id: "acc-a".to_string(),
+            slot_index: 0,
+            username: "user_a".to_string(),
+            server_index: 0,
+            secret_sealed: serde_json::json!({}),
+            desired_state: "stopped".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            live_process_pid: Some(9999),
+            retiring: true,
+        };
+        // Account B is normal running
+        let acc_b = AccountSnapshot {
+            id: "acc-b".to_string(),
+            slot_index: 1,
+            username: "user_b".to_string(),
+            server_index: 1,
+            secret_sealed: serde_json::json!({}),
+            desired_state: "running".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            live_process_pid: Some(8888),
+            retiring: false,
+        };
+
+        // Stale cloud snapshot arrives containing BOTH acc-a and acc-b (acc-a desired_state=running!)
         let row_a = AccountRow {
             id: "acc-a".to_string(),
             slot_index: 0,
             label: "Acc A".to_string(),
-            username: "user_a_updated".to_string(),
-            secret_sealed: serde_json::json!({"k": 1}),
+            username: "user_a_stale".to_string(),
+            secret_sealed: serde_json::json!({"stale": true}),
             server_index: 0,
             desired_state: "running".to_string(),
             control_version: 2,
@@ -1770,51 +1849,119 @@ mod tests {
             username: "user_b".to_string(),
             secret_sealed: serde_json::json!({}),
             server_index: 1,
-            desired_state: "stopped".to_string(),
+            desired_state: "running".to_string(),
             control_version: 1,
             control: serde_json::json!({}),
             config_version: 1,
             runtime: serde_json::json!({}),
         };
         let cloud_rows = vec![row_a.clone(), row_b.clone()];
-        let ok_a: Result<&[AccountRow], &str> = Ok(&cloud_rows);
-        let plan_a = evaluate_account_reconciliation(&local_ids, ok_a);
+
+        let local_accounts = [
+            (acc_a.id.as_str(), acc_a.retiring),
+            (acc_b.id.as_str(), acc_b.retiring),
+        ];
+
+        let plan = evaluate_account_reconciliation(local_accounts, Ok::<&[AccountRow], &str>(&cloud_rows));
+
+        // Hard Invariant: acc-a MUST NOT be in to_update or to_insert!
+        // acc-a MUST be in to_retire so retirement retry continues!
         assert_eq!(
-            plan_a,
+            plan,
             ReconciliationPlan::Apply {
                 to_insert: vec![],
-                to_update: vec!["acc-a".to_string(), "acc-b".to_string()],
-                to_retire: vec![],
-            }
-        );
-
-        // Case B: fetch failure
-        // local A,B; cloud ERROR -> A,B remain, no Stop caused by missing cloud rows
-        let err: Result<&[AccountRow], &str> = Err("transient 503 network error");
-        let plan_b = evaluate_account_reconciliation(&local_ids, err);
-        assert_eq!(plan_b, ReconciliationPlan::AbortedFetchFailed);
-
-        // Case C: real empty cloud
-        // local A; cloud success [] -> Stop success -> A removed
-        let local_single = vec!["acc-a".to_string()];
-        let empty_cloud: &[AccountRow] = &[];
-        let ok_c: Result<&[AccountRow], &str> = Ok(empty_cloud);
-        let plan_c = evaluate_account_reconciliation(&local_single, ok_c);
-        assert_eq!(
-            plan_c,
-            ReconciliationPlan::Apply {
-                to_insert: vec![],
-                to_update: vec![],
+                to_update: vec!["acc-b".to_string()],
                 to_retire: vec!["acc-a".to_string()],
             }
         );
-        let action_c = evaluate_retirement_action(true, true, Some(StopOutcome::Terminated));
-        assert_eq!(action_c, RetirementAction::RemoveCleaned);
 
-        // Case D: real deletion + Stop failure
-        // local A running; cloud success []; Stop cannot be proven successful
-        // -> A remains tracked for cleanup, A is not normal/autostart eligible, process handle not lost
-        let mut acc_d = AccountSnapshot {
+        // Attempting to merge cloud fields on a retiring account must be a strict no-op
+        acc_a.merge_cloud_fields(&row_a);
+        assert!(acc_a.retiring, "retiring flag must remain true");
+        assert_eq!(acc_a.desired_state, "stopped", "desired_state must not be resurrected to running");
+        assert_eq!(acc_a.username, "user_a", "cloud fields must not overwrite retiring state");
+        assert_eq!(acc_a.live_process_pid, Some(9999), "process handle must remain owned");
+        assert!(!acc_a.can_autostart(), "retiring account must never autostart");
+        assert!(!acc_a.can_accept_command(), "retiring account must never accept commands");
+    }
+
+    #[test]
+    fn test_case_h_reconnect_token_refresh() {
+        let current_token = "jwt-current-known-good-v1";
+
+        // Subcase H1: Successful device authentication returns refreshed token
+        let sign_in_ok: Result<String, &str> = Ok("jwt-refreshed-v2-token".to_string());
+        let decision_ok = evaluate_reconnect_token_refresh(current_token, sign_in_ok);
+        assert!(decision_ok.refreshed);
+        assert_eq!(decision_ok.rest_token, "jwt-refreshed-v2-token");
+        assert_eq!(decision_ok.realtime_token, "jwt-refreshed-v2-token");
+
+        // Subcase H2: Failed refresh preserves known-good token and does not pretend success
+        let sign_in_err: Result<String, &str> = Err("503 Service Unavailable");
+        let decision_err = evaluate_reconnect_token_refresh(current_token, sign_in_err);
+        assert!(!decision_err.refreshed);
+        assert_eq!(decision_err.rest_token, current_token);
+        assert_eq!(decision_err.realtime_token, current_token);
+    }
+
+    #[test]
+    fn test_case_g_credential_server_update_preserves_running_process() {
+        let mut live_acc = AccountSnapshot {
+            id: "acc-a".to_string(),
+            slot_index: 0,
+            username: "user_a".to_string(),
+            server_index: 0,
+            secret_sealed: serde_json::json!({"version": 1}),
+            desired_state: "running".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            live_process_pid: Some(4444),
+            retiring: false,
+        };
+        let row_a_new = AccountRow {
+            id: "acc-a".to_string(),
+            slot_index: 0,
+            label: "Acc A".to_string(),
+            username: "user_a_updated".to_string(),
+            secret_sealed: serde_json::json!({"version": 2}),
+            server_index: 5,
+            desired_state: "running".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            runtime: serde_json::json!({}),
+        };
+        live_acc.merge_cloud_fields(&row_a_new);
+        assert_eq!(live_acc.username, "user_a_updated");
+        assert_eq!(live_acc.server_index, 5);
+        assert_eq!(live_acc.secret_sealed, serde_json::json!({"version": 2}));
+        assert_eq!(live_acc.live_process_pid, Some(4444), "JVM PID must not be altered");
+    }
+
+    #[test]
+    fn test_acceptance_matrix_cases_a_through_h() {
+        // Case A: local A,B + fetch error -> neither retired
+        let local_accounts = [("acc-a", false), ("acc-b", false)];
+        let err: Result<&[AccountRow], &str> = Err("transient 503 network error");
+        let plan_a = evaluate_account_reconciliation(local_accounts, err);
+        assert_eq!(plan_a, ReconciliationPlan::AbortedFetchFailed);
+
+        // Case B: local A,B + successful cloud [] -> A,B selected for safe retirement
+        let empty_cloud: &[AccountRow] = &[];
+        let ok_b: Result<&[AccountRow], &str> = Ok(empty_cloud);
+        let plan_b = evaluate_account_reconciliation(local_accounts, ok_b);
+        assert_eq!(
+            plan_b,
+            ReconciliationPlan::Apply {
+                to_insert: vec![],
+                to_update: vec![],
+                to_retire: vec!["acc-a".to_string(), "acc-b".to_string()],
+            }
+        );
+
+        // Case C: running account DELETE + Stop failure -> process handle retained, retiring=true, blocked
+        let mut acc_c = AccountSnapshot {
             id: "acc-a".to_string(),
             slot_index: 0,
             username: "user_a".to_string(),
@@ -1827,20 +1974,50 @@ mod tests {
             live_process_pid: Some(9999),
             retiring: false,
         };
-        let action_d = evaluate_retirement_action(true, true, Some(StopOutcome::Failed));
-        assert_eq!(action_d, RetirementAction::RetainPendingCleanup);
-        // Under RetainPendingCleanup: account marks retiring and keeps process
-        acc_d.mark_retiring();
-        assert!(acc_d.retiring);
-        assert_eq!(acc_d.live_process_pid, Some(9999));
-        assert!(!acc_d.can_autostart());
-        assert!(!acc_d.can_accept_command());
+        let action_c = evaluate_retirement_action(true, true, Some(StopOutcome::Failed));
+        assert_eq!(action_c, RetirementAction::RetainPendingCleanup);
+        acc_c.mark_retiring();
+        assert!(acc_c.retiring);
+        assert_eq!(acc_c.desired_state, "stopped");
+        assert_eq!(acc_c.live_process_pid, Some(9999));
+        assert!(!acc_c.can_autostart());
+        assert!(!acc_c.can_accept_command());
 
-        // Case E: missed realtime DELETE
-        // local A,B; B removed in cloud while realtime disconnected; reconnect fetch success returns A
+        // Case D: running account DELETE + Stop success -> local state removed only after confirmed stop
+        assert_eq!(
+            evaluate_retirement_action(true, true, Some(StopOutcome::Terminated)),
+            RetirementAction::RemoveCleaned
+        );
+        assert_eq!(
+            evaluate_retirement_action(true, true, Some(StopOutcome::Killed)),
+            RetirementAction::RemoveCleaned
+        );
+        assert_eq!(
+            evaluate_retirement_action(true, true, Some(StopOutcome::AlreadyGone)),
+            RetirementAction::RemoveCleaned
+        );
+        assert_eq!(
+            evaluate_retirement_action(false, false, None),
+            RetirementAction::RemoveCleaned
+        );
+
+        // Case E: missed DELETE during disconnect -> reconnect snapshot missing B -> B safely retires
+        let row_a = AccountRow {
+            id: "acc-a".to_string(),
+            slot_index: 0,
+            label: "Acc A".to_string(),
+            username: "user_a".to_string(),
+            secret_sealed: serde_json::json!({}),
+            server_index: 0,
+            desired_state: "running".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            runtime: serde_json::json!({}),
+        };
         let cloud_only_a = vec![row_a.clone()];
         let ok_e: Result<&[AccountRow], &str> = Ok(&cloud_only_a);
-        let plan_e = evaluate_account_reconciliation(&local_ids, ok_e);
+        let plan_e = evaluate_account_reconciliation(local_accounts, ok_e);
         assert_eq!(
             plan_e,
             ReconciliationPlan::Apply {
@@ -1850,8 +2027,43 @@ mod tests {
             }
         );
 
-        // Case F: UPDATE
-        // running account receives new server_index/secret_sealed -> cached metadata updated, current JVM not restarted
+        // Case F: retiring account + later/stale snapshot containing same ID -> no resurrection
+        let local_with_retiring = [("acc-a", true), ("acc-b", false)];
+        let row_b = AccountRow {
+            id: "acc-b".to_string(),
+            slot_index: 1,
+            label: "Acc B".to_string(),
+            username: "user_b".to_string(),
+            secret_sealed: serde_json::json!({}),
+            server_index: 1,
+            desired_state: "running".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            runtime: serde_json::json!({}),
+        };
+        let cloud_stale_both = vec![row_a.clone(), row_b.clone()];
+        let plan_f = evaluate_account_reconciliation(
+            local_with_retiring,
+            Ok::<&[AccountRow], &str>(&cloud_stale_both),
+        );
+        assert_eq!(
+            plan_f,
+            ReconciliationPlan::Apply {
+                to_insert: vec![],
+                to_update: vec!["acc-b".to_string()],
+                to_retire: vec!["acc-a".to_string()],
+            }
+        );
+        // acc_c is retiring:
+        acc_c.merge_cloud_fields(&row_a);
+        assert!(acc_c.retiring);
+        assert_eq!(acc_c.desired_state, "stopped");
+        assert_eq!(acc_c.live_process_pid, Some(9999));
+        assert!(!acc_c.can_autostart());
+        assert!(!acc_c.can_accept_command());
+
+        // Case G: credential/server UPDATE while JVM running -> metadata updated, PID preserved
         let mut live_acc = AccountSnapshot {
             id: "acc-a".to_string(),
             slot_index: 0,
@@ -1865,11 +2077,11 @@ mod tests {
             live_process_pid: Some(1234),
             retiring: false,
         };
-        let row_a_new = AccountRow {
+        let row_a_update = AccountRow {
             id: "acc-a".to_string(),
             slot_index: 0,
             label: "Acc A".to_string(),
-            username: "user_a".to_string(),
+            username: "user_a_new".to_string(),
             secret_sealed: serde_json::json!({"version": 2}),
             server_index: 4,
             desired_state: "running".to_string(),
@@ -1878,10 +2090,22 @@ mod tests {
             config_version: 1,
             runtime: serde_json::json!({}),
         };
-        live_acc.merge_cloud_fields(&row_a_new);
+        live_acc.merge_cloud_fields(&row_a_update);
+        assert_eq!(live_acc.username, "user_a_new");
         assert_eq!(live_acc.server_index, 4);
         assert_eq!(live_acc.secret_sealed, serde_json::json!({"version": 2}));
-        assert_eq!(live_acc.live_process_pid, Some(1234)); // JVM PID untouched
+        assert_eq!(live_acc.live_process_pid, Some(1234));
+
+        // Case H: reconnect token refresh -> exact newly returned JWT is token supplied to realtime
+        let decision_h1 = evaluate_reconnect_token_refresh("token-v1", Ok::<String, &str>("token-v2".to_string()));
+        assert!(decision_h1.refreshed);
+        assert_eq!(decision_h1.rest_token, "token-v2");
+        assert_eq!(decision_h1.realtime_token, "token-v2");
+
+        let decision_h2 = evaluate_reconnect_token_refresh("token-v1", Err("timeout"));
+        assert!(!decision_h2.refreshed);
+        assert_eq!(decision_h2.rest_token, "token-v1");
+        assert_eq!(decision_h2.realtime_token, "token-v1");
     }
 }
 

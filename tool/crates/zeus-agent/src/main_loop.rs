@@ -317,10 +317,10 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
                 event,
                 &mut accounts,
                 jar_ctl_version,
-                &rest,
+                &mut rest,
                 &cfg,
                 &identity,
-                &current_access_token,
+                &mut current_access_token,
                 &tx,
                 &mut dedupe,
             ),
@@ -419,10 +419,10 @@ fn handle_cloud_event(
     event: CloudEvent,
     accounts: &mut HashMap<String, AccountState>,
     jar_ctl_version: i32,
-    rest: &SupabaseRest,
+    rest: &mut SupabaseRest,
     cfg: &AgentConfig,
     identity: &crate::crypto::DeviceIdentity,
-    access_token: &str,
+    current_access_token: &mut String,
     tx: &mpsc::Sender<CloudEvent>,
     dedupe: &mut CommandDedupe,
 ) {
@@ -530,20 +530,23 @@ fn handle_cloud_event(
         CloudEvent::Disconnected { reason } => {
             eprintln!("[main_loop] realtime disconnected: {reason}, reconnecting");
             // Refresh JWT trước khi reconnect — Issues #50, #104
-            match rest.sign_in_as_device(&cfg.device_id, &identity.public_key_sec1) {
-                Ok(new_token) => {
-                    rest.set_access_token(new_token.clone());
-                    eprintln!("[auth] JWT token refreshed before reconnect");
-                }
-                Err(e) => {
-                    eprintln!("[auth] JWT refresh on disconnect failed: {e}");
-                }
+            let sign_in_res = rest.sign_in_as_device(&cfg.device_id, &identity.public_key_sec1);
+            let decision = crate::supabase_rest::evaluate_reconnect_token_refresh(
+                current_access_token,
+                sign_in_res,
+            );
+            if decision.refreshed {
+                rest.set_access_token(decision.rest_token);
+                *current_access_token = decision.realtime_token.clone();
+                eprintln!("[auth] JWT token refreshed before reconnect");
+            } else {
+                eprintln!("[auth] JWT refresh on disconnect failed, preserving current token");
             }
 
             spawn_realtime_thread(
                 cfg.supabase_url.clone(),
                 cfg.supabase_anon_key.clone(),
-                access_token.to_string(),
+                decision.realtime_token,
                 tx.clone(),
             );
         }
@@ -1401,6 +1404,7 @@ fn retire_account_safely(accounts: &mut HashMap<String, AccountState>, account_i
 /// Reconcile authoritative cloud accounts với local runtime accounts.
 ///
 /// Invariant B: Snapshot rỗng thành công LÀ authoritative (tất cả local account bị xóa trên cloud).
+/// Problem A: Account đang retiring là monotonic, không bao giờ bị merge/resurrect hay autostart lại.
 #[cfg(unix)]
 fn reconcile_cloud_accounts(
     accounts: &mut HashMap<String, AccountState>,
@@ -1409,20 +1413,36 @@ fn reconcile_cloud_accounts(
     identity: &crate::crypto::DeviceIdentity,
     jar_ctl_version: i32,
 ) {
-    let fresh_map = account_states_from_rows(fresh_rows);
-    let fresh_ids: std::collections::HashSet<String> = fresh_map.keys().cloned().collect();
+    let local_entries: Vec<(&str, bool)> = accounts
+        .iter()
+        .map(|(id, acc)| (id.as_str(), acc.retiring))
+        .collect();
 
-    // 1. Retire an toàn các account local không còn tồn tại trên cloud
-    let local_ids: Vec<String> = accounts.keys().cloned().collect();
-    for id in local_ids {
-        if !fresh_ids.contains(&id) {
-            eprintln!("[reconcile] account {id} no longer in cloud set, retiring safely");
-            retire_account_safely(accounts, &id);
+    let plan = crate::supabase_rest::evaluate_account_reconciliation(
+        local_entries,
+        Ok::<&[crate::supabase_rest::AccountRow], std::convert::Infallible>(&fresh_rows),
+    );
+
+    match plan {
+        crate::supabase_rest::ReconciliationPlan::AbortedFetchFailed => {
+            eprintln!("[reconcile] cloud fetch aborted; leaving local accounts untouched");
+        }
+        crate::supabase_rest::ReconciliationPlan::Apply {
+            to_insert: _,
+            to_update: _,
+            to_retire,
+        } => {
+            // 1. Retire an toàn các account local không còn trên cloud HOẶC đang pending retirement
+            for id in to_retire {
+                eprintln!("[reconcile] account {id} retiring or missing from cloud set, ensuring safe retirement");
+                retire_account_safely(accounts, &id);
+            }
+
+            // 2. Merge các account mới / cập nhật metadata các account hiện có (chỉ non-retiring)
+            let fresh_map = account_states_from_rows(fresh_rows);
+            merge_account_states(accounts, fresh_map, rest, identity, jar_ctl_version);
         }
     }
-
-    // 2. Merge các account mới / cập nhật metadata các account hiện có
-    merge_account_states(accounts, fresh_map, rest, identity, jar_ctl_version);
 }
 
 // ── boot helpers ──────────────────────────────────────────────────────────────
@@ -1503,7 +1523,10 @@ fn merge_account_states(
 ) {
     for (id, fresh_acc) in fresh {
         if let Some(existing) = accounts.get_mut(&id) {
-            existing.retiring = false;
+            if existing.retiring {
+                eprintln!("[reconcile] account {id} is retiring, skipping cloud snapshot merge to prevent resurrection");
+                continue;
+            }
             existing.control_version = fresh_acc.control_version;
             existing.control = fresh_acc.control;
             existing.config_version = fresh_acc.config_version;
