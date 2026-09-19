@@ -497,6 +497,61 @@ pub fn evaluate_apply_config_status(
     }
 }
 
+/// Outcome of stopping a supervised child process tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopOutcome {
+    AlreadyGone,
+    Terminated,
+    Killed,
+    Failed,
+}
+
+impl StopOutcome {
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::AlreadyGone | Self::Terminated | Self::Killed)
+    }
+}
+
+/// Postcondition decision for account state transition to "stopped".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopTransition {
+    /// Process confirmed terminated or already absent: can clear process handle and runtime state.
+    ConfirmedStopped,
+    /// Process failed to terminate or still alive: MUST preserve process handle and state.
+    FailedStillAlive,
+}
+
+/// Evaluates whether an account transition to "stopped" is confirmed complete.
+pub fn evaluate_stop_transition(
+    has_process: bool,
+    is_alive: bool,
+    stop_outcome: Option<StopOutcome>,
+) -> StopTransition {
+    if !has_process || !is_alive {
+        return StopTransition::ConfirmedStopped;
+    }
+    match stop_outcome {
+        Some(outcome) if outcome.is_success() => StopTransition::ConfirmedStopped,
+        _ => StopTransition::FailedStillAlive,
+    }
+}
+
+/// Precondition check for restarting an account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartPrecondition {
+    Proceed,
+    BlockedOldProcessAlive,
+}
+
+/// Restart must never spawn a replacement JVM until the old JVM is confirmed stopped.
+pub fn check_restart_precondition(old_process_alive: bool) -> RestartPrecondition {
+    if old_process_alive {
+        RestartPrecondition::BlockedOldProcessAlive
+    } else {
+        RestartPrecondition::Proceed
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RestError {
     /// 4xx/5xx từ Supabase. `status` để phân biệt "RLS chặn" (401/403) với "hàng không tồn tại".
@@ -868,4 +923,66 @@ mod tests {
             (CommandStatus::Failed, Some("config was not applied"))
         );
     }
+
+    #[test]
+    fn test_stop_outcome_success() {
+        assert!(StopOutcome::AlreadyGone.is_success());
+        assert!(StopOutcome::Terminated.is_success());
+        assert!(StopOutcome::Killed.is_success());
+        assert!(!StopOutcome::Failed.is_success());
+    }
+
+    #[test]
+    fn test_stop_transition_evaluation() {
+        // Idempotent: No process handle -> ConfirmedStopped
+        assert_eq!(
+            evaluate_stop_transition(false, false, None),
+            StopTransition::ConfirmedStopped
+        );
+        // Process handle existed but was already dead -> ConfirmedStopped
+        assert_eq!(
+            evaluate_stop_transition(true, false, None),
+            StopTransition::ConfirmedStopped
+        );
+        // Process was alive and stopped cleanly by SIGTERM -> ConfirmedStopped
+        assert_eq!(
+            evaluate_stop_transition(true, true, Some(StopOutcome::Terminated)),
+            StopTransition::ConfirmedStopped
+        );
+        // Process was alive and confirmed already gone -> ConfirmedStopped
+        assert_eq!(
+            evaluate_stop_transition(true, true, Some(StopOutcome::AlreadyGone)),
+            StopTransition::ConfirmedStopped
+        );
+        // Process was alive and confirmed stopped after SIGKILL escalation -> ConfirmedStopped
+        assert_eq!(
+            evaluate_stop_transition(true, true, Some(StopOutcome::Killed)),
+            StopTransition::ConfirmedStopped
+        );
+        // Process was alive but stop failed -> FailedStillAlive (do not clear handle or state)
+        assert_eq!(
+            evaluate_stop_transition(true, true, Some(StopOutcome::Failed)),
+            StopTransition::FailedStillAlive
+        );
+        // Process was alive but no outcome returned -> FailedStillAlive
+        assert_eq!(
+            evaluate_stop_transition(true, true, None),
+            StopTransition::FailedStillAlive
+        );
+    }
+
+    #[test]
+    fn test_restart_precondition() {
+        // Old process confirmed dead/stopped -> proceed with replacement spawn
+        assert_eq!(
+            check_restart_precondition(false),
+            RestartPrecondition::Proceed
+        );
+        // Old process still alive -> block replacement spawn
+        assert_eq!(
+            check_restart_precondition(true),
+            RestartPrecondition::BlockedOldProcessAlive
+        );
+    }
 }
+

@@ -192,11 +192,21 @@ impl ExitStatus {
 /// (measured claim in `docker-build/README.md`, **not yet reproduced** — V2.5). With N accounts
 /// the stops run concurrently, not serially, or N×7 s exceeds any grace period.
 pub fn stop(child: &Child, grace: Duration) -> StopOutcome {
+    if child.pgid <= 0 {
+        return StopOutcome::Failed;
+    }
+
     // SAFETY: negative pid signals the whole process group.
     let sent = unsafe { libc::kill(-child.pgid, libc::SIGTERM) };
     if sent != 0 {
-        // Already gone (ESRCH). Reap will collect it.
-        return StopOutcome::AlreadyGone;
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            // Already gone (ESRCH). Reap will collect it.
+            return StopOutcome::AlreadyGone;
+        } else {
+            eprintln!("[process_unix] kill(-{}, SIGTERM) failed: {err}", child.pgid);
+            return StopOutcome::Failed;
+        }
     }
 
     let deadline = Instant::now() + grace;
@@ -207,20 +217,45 @@ pub fn stop(child: &Child, grace: Duration) -> StopOutcome {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    // Still alive past the grace period: the JVM is wedged, not slow. Escalate.
-    // SAFETY: as above.
-    unsafe {
-        libc::kill(-child.pgid, libc::SIGKILL);
+    if !child.alive() {
+        return StopOutcome::Terminated;
     }
-    StopOutcome::Killed
+
+    // Still alive past the grace period: the JVM is wedged, not slow. Escalate.
+    // SAFETY: negative pid signals the whole process group.
+    let kill_sent = unsafe { libc::kill(-child.pgid, libc::SIGKILL) };
+    if kill_sent != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            if !child.alive() {
+                return StopOutcome::Killed;
+            }
+        }
+        eprintln!("[process_unix] kill(-{}, SIGKILL) failed: {err}", child.pgid);
+        return StopOutcome::Failed;
+    }
+
+    // SIGKILL sent: verify process death within bounded deadline
+    let kill_deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < kill_deadline {
+        if !child.alive() {
+            return StopOutcome::Killed;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    if !child.alive() {
+        StopOutcome::Killed
+    } else {
+        eprintln!(
+            "[process_unix] process pgid={} still alive after SIGKILL escalation",
+            child.pgid
+        );
+        StopOutcome::Failed
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StopOutcome {
-    AlreadyGone,
-    Terminated,
-    Killed,
-}
+pub use crate::supabase_rest::StopOutcome;
 
 /// Crash backoff. Replaces the flat `restartDelaySeconds` in the current web schema.
 ///
@@ -426,8 +461,14 @@ mod tests {
     /// This must stay the only process-spawning test in the crate: `reap()` calls `waitpid(-1)`,
     /// which collects *any* child of the test process, and the harness runs tests in parallel
     /// threads. A second spawning test would race for the same zombie.
+    ///
+    /// Runs lifecycle cases sequentially:
+    /// - Case A: graceful stop & setsid verification (SIGTERM -> Terminated)
+    /// - Case B: already gone detection on reaped child & nonexistent PID
+    /// - Case C: escalation on SIGTERM-resistant child (SIGTERM ignored -> SIGKILL -> Killed)
     #[test]
-    fn spawn_puts_the_child_in_its_own_process_group() {
+    fn spawn_and_lifecycle_termination_cases() {
+        // Case A — graceful stop & setsid verification
         // `sleep` rather than a shell loop: one process, no shell in between, so the pgid read
         // below is about the child `spawn` created and not about an intermediate's children.
         let mut command = Command::new("sleep");
@@ -448,9 +489,7 @@ mod tests {
         );
 
         // Leave nothing behind: stop the tree, then reap it. `sleep` dies on SIGTERM, so the only
-        // correct outcome is Terminated — Killed would mean `alive()` stayed true through the
-        // grace period (the zombie-blind bug this test was written to catch), and AlreadyGone
-        // would mean the child was already dead before we signalled it.
+        // correct outcome is Terminated.
         let outcome = stop(&child, Duration::from_secs(5));
         assert_eq!(
             outcome,
@@ -463,5 +502,48 @@ mod tests {
             "waitpid must report the child just stopped"
         );
         assert!(!child.alive(), "child must be gone after stop + reap");
+
+        // Case B — already gone
+        // B1: Process handle that was already stopped and reaped
+        let outcome_reaped = stop(&child, Duration::from_secs(1));
+        assert_eq!(
+            outcome_reaped,
+            StopOutcome::AlreadyGone,
+            "reaped child must be classified as AlreadyGone: {outcome_reaped:?}"
+        );
+        // B2: Genuinely nonexistent process group (exercises ESRCH errno handling)
+        let non_existent = Child {
+            pid: i32::MAX,
+            pgid: i32::MAX,
+            started_at: Instant::now(),
+        };
+        let outcome_nonexistent = stop(&non_existent, Duration::from_secs(1));
+        assert_eq!(
+            outcome_nonexistent,
+            StopOutcome::AlreadyGone,
+            "nonexistent child must be classified as AlreadyGone: {outcome_nonexistent:?}"
+        );
+
+        // Case C — escalation (SIGTERM-resistant child)
+        // Spawn a child that traps and ignores SIGTERM.
+        let mut resistant = Command::new("sh");
+        resistant.args(["-c", "trap '' TERM; sleep 30"]);
+        let child_c = spawn(resistant).expect("spawn resistant child");
+        assert!(child_c.alive(), "resistant child must be alive initially");
+
+        // With 200ms grace, SIGTERM is ignored and stop must escalate to SIGKILL and verify death
+        let outcome_c = stop(&child_c, Duration::from_millis(200));
+        assert_eq!(
+            outcome_c,
+            StopOutcome::Killed,
+            "SIGKILL escalation must succeed and confirm death: {outcome_c:?}"
+        );
+        let reaped_c = reap();
+        assert!(
+            reaped_c.iter().any(|(pid, _)| *pid == child_c.pid),
+            "waitpid must report resistant child was killed"
+        );
+        assert!(!child_c.alive(), "resistant child must not be alive after kill");
     }
 }
+

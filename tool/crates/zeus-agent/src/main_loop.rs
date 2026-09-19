@@ -53,9 +53,10 @@ use crate::{
     process_unix::{self, Child, StopOutcome},
     supabase_realtime::{ChangeType, RealtimeClient, RealtimeEvent},
     supabase_rest::{
-        evaluate_apply_config_status, evaluate_restart_status, evaluate_start_status,
-        evaluate_stop_status, CommandRow, CommandStatus, ConfigStatus, DeviceHeartbeat,
-        JarManifest, RestError, RuntimePayload, SupabaseRest,
+        check_restart_precondition, evaluate_apply_config_status, evaluate_restart_status,
+        evaluate_start_status, evaluate_stop_status, evaluate_stop_transition, CommandRow,
+        CommandStatus, ConfigStatus, DeviceHeartbeat, JarManifest, RestartPrecondition,
+        RestError, RuntimePayload, StopTransition, SupabaseRest,
     },
 };
 
@@ -808,27 +809,56 @@ fn reconcile_desired_state(
             }
         }
         "stopped" => {
-            // Luôn dọn dẹp bất kể process còn sống hay không — Issue #89
-            if let Some(child) = acc.process.take() {
-                if child.alive() {
+            let (has_process, is_alive) = acc
+                .process
+                .as_ref()
+                .map(|p| (true, p.alive()))
+                .unwrap_or((false, false));
+
+            let outcome = if is_alive {
+                if let Some(ref child) = acc.process {
                     eprintln!("[reconcile] account={} slot={}: stopping", acc.id, acc.slot_index);
-                    match process_unix::stop(&child, Duration::from_secs(5)) {
+                    let res = process_unix::stop(child, Duration::from_secs(5));
+                    match res {
                         StopOutcome::AlreadyGone | StopOutcome::Terminated => {
                             eprintln!("[reconcile] account={}: stopped cleanly", acc.id);
                         }
                         StopOutcome::Killed => {
                             eprintln!("[reconcile] account={}: killed", acc.id);
                         }
+                        StopOutcome::Failed => {
+                            eprintln!(
+                                "[reconcile] account={}: stop failed, process still alive",
+                                acc.id
+                            );
+                        }
+                    }
+                    Some(res)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            match evaluate_stop_transition(has_process, is_alive, outcome) {
+                StopTransition::ConfirmedStopped => {
+                    acc.process = None;
+                    // Xóa credentials và snapshot — Issues #32, #89
+                    let paths = AccountPaths::for_slot(acc.slot_index);
+                    if let Err(e) = clear_credentials(&paths.home) {
+                        eprintln!("[reconcile] clear_credentials failed: {e}");
+                    }
+                    if let Err(e) = clear_snapshot(&paths.home) {
+                        eprintln!("[reconcile] clear_snapshot failed: {e}");
                     }
                 }
-            }
-            // Xóa credentials và snapshot — Issues #32, #89
-            let paths = AccountPaths::for_slot(acc.slot_index);
-            if let Err(e) = clear_credentials(&paths.home) {
-                eprintln!("[reconcile] clear_credentials failed: {e}");
-            }
-            if let Err(e) = clear_snapshot(&paths.home) {
-                eprintln!("[reconcile] clear_snapshot failed: {e}");
+                StopTransition::FailedStillAlive => {
+                    eprintln!(
+                        "[reconcile] account={}: stop failed, keeping live process handle",
+                        acc.id
+                    );
+                }
             }
         }
         _ => {} // state đã đúng
@@ -952,6 +982,26 @@ fn dispatch_command(
                 eprintln!("[command] set_account_desired_state failed: {e}");
             }
             reconcile_desired_state(acc, rest, identity);
+
+            let old_is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+            match check_restart_precondition(old_is_alive) {
+                RestartPrecondition::BlockedOldProcessAlive => {
+                    eprintln!(
+                        "[command] restart: account {} old process failed to stop; aborting replacement spawn",
+                        account_id
+                    );
+                    if let Err(e) = rest.finish_command(
+                        &cmd.id,
+                        CommandStatus::Failed,
+                        Some("old process failed to stop"),
+                    ) {
+                        eprintln!("[command] finish_command failed: {e}");
+                    }
+                    return;
+                }
+                RestartPrecondition::Proceed => {}
+            }
+
             // Đợi 500ms để process cũ có thời gian tắt
             std::thread::sleep(Duration::from_millis(500));
             acc.desired_state = "running".to_string();
