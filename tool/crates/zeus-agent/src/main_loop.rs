@@ -54,8 +54,8 @@ use crate::{
     supabase_realtime::{ChangeType, RealtimeClient, RealtimeEvent},
     supabase_rest::{
         check_restart_precondition, evaluate_apply_config_status, evaluate_restart_status,
-        evaluate_start_status, evaluate_stop_status, evaluate_stop_transition, CommandRow,
-        CommandStatus, ConfigStatus, DeviceHeartbeat, JarManifest, RestartPrecondition,
+        evaluate_start_status, evaluate_stop_status, evaluate_stop_transition, CommandDedupe,
+        CommandRow, CommandStatus, ConfigStatus, DeviceHeartbeat, JarManifest, RestartPrecondition,
         RestError, RuntimePayload, StopTransition, SupabaseRest,
     },
 };
@@ -92,6 +92,8 @@ pub enum CloudEvent {
     CommandQueued { command: CommandRow },
     /// Socket WebSocket đứt — cần reconnect.
     Disconnected { reason: String },
+    /// Realtime subscriptions established for all required tables (accounts + commands).
+    RealtimeReady,
 }
 
 /// State của một account trong vòng chính.
@@ -216,7 +218,6 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
 
     // Boot: đọc full state.
     let mut accounts = boot_fetch_accounts(&rest, &cfg.device_id);
-    drain_and_expire_commands(&rest, &cfg.device_id);
 
     // Ghi potato.ctl ban đầu "0 3" cho tất cả slots hiện có — fix Issue #24
     for acc in accounts.values() {
@@ -249,6 +250,8 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
         access_token.clone(),
         tx.clone(),
     );
+
+    let mut dedupe = CommandDedupe::new(512);
 
     // Ticks
     let mut last_snapshot_tick = Instant::now();
@@ -311,6 +314,7 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
                 &identity,
                 &current_access_token,
                 &tx,
+                &mut dedupe,
             ),
             Err(mpsc::RecvTimeoutError::Timeout) => {} // bình thường, xử lý ticks bên dưới
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -402,6 +406,7 @@ fn handle_cloud_event(
     identity: &crate::crypto::DeviceIdentity,
     access_token: &str,
     tx: &mpsc::Sender<CloudEvent>,
+    dedupe: &mut CommandDedupe,
 ) {
     match event {
         CloudEvent::AccountChanged { account_id, record } => {
@@ -498,7 +503,16 @@ fn handle_cloud_event(
         }
 
         CloudEvent::CommandQueued { command } => {
+            if !dedupe.record_if_new(&command.id) {
+                eprintln!("[command] duplicate command id={} already processed, suppressing", command.id);
+                return;
+            }
             dispatch_command(command, accounts, rest, cfg, identity, jar_ctl_version);
+        }
+
+        CloudEvent::RealtimeReady => {
+            eprintln!("[main_loop] realtime ready: recovering queued commands");
+            recover_queued_commands(rest, &cfg.device_id, accounts, cfg, identity, jar_ctl_version, dedupe);
         }
 
         CloudEvent::Disconnected { reason } => {
@@ -508,7 +522,6 @@ fn handle_cloud_event(
             // disconnect do JWT hết hạn, cần refresh ngay)
             // B2.2: sau reconnect phải đọc lại full state vì có thể miss event.
             let fresh = boot_fetch_accounts(rest, &cfg.device_id);
-            drain_and_expire_commands(rest, &cfg.device_id);
 
             // Xóa các account đã bị xóa trong lúc offline — Issue #43
             let fresh_ids: std::collections::HashSet<String> = fresh.keys().cloned().collect();
@@ -1253,6 +1266,7 @@ fn spawn_realtime_thread(
         }
 
         eprintln!("[realtime] connected and subscribed");
+        let _ = tx.send(CloudEvent::RealtimeReady);
 
         let mut last_heartbeat = Instant::now();
 
@@ -1392,14 +1406,30 @@ fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountS
 }
 
 #[cfg(unix)]
-fn drain_and_expire_commands(rest: &SupabaseRest, device_id: &str) {
+fn recover_queued_commands(
+    rest: &SupabaseRest,
+    device_id: &str,
+    accounts: &mut HashMap<String, AccountState>,
+    cfg: &AgentConfig,
+    identity: &crate::crypto::DeviceIdentity,
+    jar_ctl_version: i32,
+    dedupe: &mut CommandDedupe,
+) {
     if let Err(e) = rest.expire_stale_commands(device_id) {
-        eprintln!("[boot] expire_stale_commands failed: {e}");
+        eprintln!("[recovery] expire_stale_commands failed: {e}");
     }
-    // drain_commands chỉ để log số lượng; thực tế sẽ đến qua realtime.
     match rest.drain_commands(device_id) {
-        Ok(cmds) => eprintln!("[boot] {} queued command(s) on boot", cmds.len()),
-        Err(e) => eprintln!("[boot] drain_commands failed: {e}"),
+        Ok(cmds) => {
+            eprintln!("[recovery] drained {} queued command(s)", cmds.len());
+            for cmd in cmds {
+                if !dedupe.record_if_new(&cmd.id) {
+                    eprintln!("[recovery] duplicate command id={} already processed, suppressing", cmd.id);
+                    continue;
+                }
+                dispatch_command(cmd, accounts, rest, cfg, identity, jar_ctl_version);
+            }
+        }
+        Err(e) => eprintln!("[recovery] drain_commands failed: {e}"),
     }
 }
 

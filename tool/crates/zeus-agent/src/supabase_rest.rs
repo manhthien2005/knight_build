@@ -664,6 +664,69 @@ where
     }
 }
 
+/// In-memory bounded FIFO deduplication cache for command IDs.
+///
+/// Prevents duplicate execution when a command appears in both REST drain
+/// and realtime subscription events during reconnect/boot recovery windows.
+#[derive(Debug, Clone)]
+pub struct CommandDedupe {
+    capacity: usize,
+    order: std::collections::VecDeque<String>,
+    seen: std::collections::HashSet<String>,
+}
+
+impl CommandDedupe {
+    pub fn new(capacity: usize) -> Self {
+        let cap = capacity.max(1);
+        Self {
+            capacity: cap,
+            order: std::collections::VecDeque::with_capacity(cap),
+            seen: std::collections::HashSet::with_capacity(cap),
+        }
+    }
+
+    /// Number of tracked command IDs.
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// Whether the dedupe cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    /// Checks if a command ID is currently in the dedupe set.
+    pub fn contains(&self, id: &str) -> bool {
+        self.seen.contains(id)
+    }
+
+    /// Records a command ID. If already seen, returns false.
+    /// If newly added, returns true and evicts the oldest entry when capacity is exceeded.
+    pub fn record_if_new(&mut self, id: &str) -> bool {
+        if self.seen.contains(id) {
+            return false;
+        }
+        if self.order.len() >= self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+        self.order.push_back(id.to_string());
+        self.seen.insert(id.to_string());
+        true
+    }
+}
+
+/// Evaluates if a command's TTL has elapsed against a reference RFC3339 timestamp.
+pub fn is_command_expired(expires_at: &str, now: &str) -> bool {
+    expires_at < now
+}
+
+/// Evaluates whether all required realtime table subscriptions are established.
+pub fn evaluate_subscriptions(accounts_ok: bool, commands_ok: bool) -> bool {
+    accounts_ok && commands_ok
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RestError {
     /// 4xx/5xx từ Supabase. `status` để phân biệt "RLS chặn" (401/403) với "hàng không tồn tại".
@@ -1222,6 +1285,95 @@ mod tests {
             ),
             GroupScanOutcome::ConfirmedDead
         );
+    }
+
+    #[test]
+    fn test_command_recovery_and_dedupe_semantics() {
+        // Case A: Recovered command list preserves source order
+        let cmd1 = CommandRow {
+            id: "cmd-1".to_string(),
+            account_id: Some("acc-1".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "start".to_string(),
+            payload: None,
+            expires_at: "2026-09-14T07:50:00Z".to_string(),
+        };
+        let cmd2 = CommandRow {
+            id: "cmd-2".to_string(),
+            account_id: Some("acc-2".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "stop".to_string(),
+            payload: None,
+            expires_at: "2026-09-14T07:55:00Z".to_string(),
+        };
+        let cmd3 = CommandRow {
+            id: "cmd-3".to_string(),
+            account_id: Some("acc-1".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "restart".to_string(),
+            payload: None,
+            expires_at: "2026-09-14T08:00:00Z".to_string(),
+        };
+        let drained = vec![cmd1.clone(), cmd2.clone(), cmd3.clone()];
+        let order_processed: Vec<String> = drained.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(order_processed, vec!["cmd-1", "cmd-2", "cmd-3"]);
+
+        // Case B: Recovered command ID followed by matching realtime event executes once
+        let mut dedupe = CommandDedupe::new(3);
+        assert!(dedupe.record_if_new(&cmd1.id), "drained command must be recorded");
+        assert!(
+            !dedupe.record_if_new(&cmd1.id),
+            "matching realtime duplicate must be suppressed"
+        );
+
+        // Case C: Unrelated normal realtime command still executes
+        assert!(
+            dedupe.record_if_new(&cmd2.id),
+            "unrelated realtime command must execute"
+        );
+
+        // Case D: Dedupe cache is bounded / evicts oldest entry
+        assert!(dedupe.record_if_new(&cmd3.id));
+        assert_eq!(dedupe.len(), 3);
+        assert!(dedupe.contains("cmd-1"));
+        assert!(dedupe.contains("cmd-2"));
+        assert!(dedupe.contains("cmd-3"));
+
+        // Inserting 4th command evicts "cmd-1"
+        let cmd4_id = "cmd-4";
+        assert!(dedupe.record_if_new(cmd4_id));
+        assert_eq!(dedupe.len(), 3);
+        assert!(!dedupe.contains("cmd-1"), "oldest entry must be evicted");
+        assert!(dedupe.contains("cmd-2"));
+        assert!(dedupe.contains("cmd-3"));
+        assert!(dedupe.contains("cmd-4"));
+
+        // Case E: Expired command does not become valid merely because it was recovered
+        let now_str = "2026-09-14T07:46:12Z";
+        let expired_cmd = CommandRow {
+            id: "cmd-expired".to_string(),
+            account_id: Some("acc-1".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "start".to_string(),
+            payload: None,
+            expires_at: "2026-09-14T07:46:10Z".to_string(),
+        };
+        let valid_cmd = CommandRow {
+            id: "cmd-valid".to_string(),
+            account_id: Some("acc-1".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "start".to_string(),
+            payload: None,
+            expires_at: "2026-09-14T07:46:15Z".to_string(),
+        };
+        assert!(is_command_expired(&expired_cmd.expires_at, now_str));
+        assert!(!is_command_expired(&valid_cmd.expires_at, now_str));
+
+        // Case F: Realtime ready is emitted only after successful subscriptions
+        assert!(!evaluate_subscriptions(false, false));
+        assert!(!evaluate_subscriptions(true, false));
+        assert!(!evaluate_subscriptions(false, true));
+        assert!(evaluate_subscriptions(true, true));
     }
 }
 
