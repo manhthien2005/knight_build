@@ -260,6 +260,7 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
     );
 
     let mut dedupe = CommandDedupe::new(512);
+    let mut retired_tombstones = std::collections::HashSet::<String>::new();
 
     // Ticks
     let mut last_snapshot_tick = Instant::now();
@@ -323,6 +324,7 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
                 &mut current_access_token,
                 &tx,
                 &mut dedupe,
+                &mut retired_tombstones,
             ),
             Err(mpsc::RecvTimeoutError::Timeout) => {} // bình thường, xử lý ticks bên dưới
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -360,12 +362,12 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
                 .map(|a| a.id.clone())
                 .collect();
             for id in retiring_ids {
-                retire_account_safely(&mut accounts, &id);
+                retire_account_safely(&mut accounts, &id, &mut retired_tombstones);
             }
 
-            // Auto-restart crashed JVMs — Issue #19 (chỉ autostart account không trong trạng thái retiring)
+            // Auto-restart crashed JVMs — Issue #19 (chỉ autostart account không trong trạng thái retiring/tombstoned)
             for acc in accounts.values_mut() {
-                if !acc.retiring && acc.desired_state == "running" && acc.process.as_ref().map(|p| !p.alive()).unwrap_or(true) {
+                if !acc.retiring && !retired_tombstones.contains(&acc.id) && acc.desired_state == "running" && acc.process.as_ref().map(|p| !p.alive()).unwrap_or(true) {
                     eprintln!("[reconcile] account={} crash detected, restarting", acc.id);
                     acc.restarts += 1;
                     reconcile_desired_state(acc, &rest, &identity);
@@ -425,6 +427,7 @@ fn handle_cloud_event(
     current_access_token: &mut String,
     tx: &mpsc::Sender<CloudEvent>,
     dedupe: &mut CommandDedupe,
+    retired_tombstones: &mut std::collections::HashSet<String>,
 ) {
     match event {
         CloudEvent::AccountChanged { account_id, record } => {
@@ -433,6 +436,15 @@ fn handle_cloud_event(
                 if dev_id != cfg.device_id {
                     return; // Lệnh thuộc về node khác
                 }
+            }
+
+            if crate::supabase_rest::evaluate_account_admission(
+                &account_id,
+                retired_tombstones.contains(&account_id),
+            ) == crate::supabase_rest::AccountAdmissionDecision::RejectedTombstoned
+            {
+                eprintln!("[cloud] account {account_id} is tombstoned/retired, ignoring update/insertion");
+                return;
             }
 
             if let Some(acc) = accounts.get_mut(&account_id) {
@@ -496,7 +508,15 @@ fn handle_cloud_event(
             if !dev_id.is_empty() && dev_id != cfg.device_id {
                 return;
             }
-            if accounts.contains_key(&account_id) { return; }
+            if accounts.contains_key(&account_id)
+                || crate::supabase_rest::evaluate_account_admission(
+                    &account_id,
+                    retired_tombstones.contains(&account_id),
+                ) == crate::supabase_rest::AccountAdmissionDecision::RejectedTombstoned
+            {
+                eprintln!("[cloud] account {account_id} already exists or is tombstoned, ignoring addition");
+                return;
+            }
             eprintln!("[cloud] account added {account_id}");
             if let Some(acc) = make_account_state_from_record(&record) {
                 let paths = AccountPaths::for_slot(acc.slot_index);
@@ -511,7 +531,8 @@ fn handle_cloud_event(
 
         CloudEvent::AccountDeleted { account_id } => {
             eprintln!("[cloud] realtime account deleted {account_id}, retiring safely");
-            retire_account_safely(accounts, &account_id);
+            retired_tombstones.insert(account_id.clone());
+            retire_account_safely(accounts, &account_id, retired_tombstones);
         }
 
         CloudEvent::CommandQueued { command } => {
@@ -519,12 +540,12 @@ fn handle_cloud_event(
                 eprintln!("[command] duplicate command id={} already processed, suppressing", command.id);
                 return;
             }
-            dispatch_command(command, accounts, rest, cfg, identity, jar_ctl_version);
+            dispatch_command(command, accounts, rest, cfg, identity, jar_ctl_version, retired_tombstones);
         }
 
         CloudEvent::RealtimeReady => {
             eprintln!("[main_loop] realtime ready: recovering queued commands");
-            recover_queued_commands(rest, &cfg.device_id, accounts, cfg, identity, jar_ctl_version, dedupe);
+            recover_queued_commands(rest, &cfg.device_id, accounts, cfg, identity, jar_ctl_version, dedupe, retired_tombstones);
         }
 
         CloudEvent::Disconnected { reason } => {
@@ -875,6 +896,7 @@ fn dispatch_command(
     cfg: &AgentConfig,
     identity: &crate::crypto::DeviceIdentity,
     jar_ctl_version: i32,
+    retired_tombstones: &std::collections::HashSet<String>,
 ) {
     // Issue #98: lọc device_id, bỏ qua lệnh không thuộc node này
     if let Some(ref cmd_device_id) = cmd.device_id {
@@ -932,6 +954,18 @@ fn dispatch_command(
             return;
         }
     };
+
+    if retired_tombstones.contains(&account_id) {
+        eprintln!("[command] account_id={account_id} is tombstoned/retired, rejecting command {}", cmd.kind);
+        if let Err(e) = rest.finish_command(
+            &cmd.id,
+            CommandStatus::Failed,
+            Some("account is deleted or retiring"),
+        ) {
+            eprintln!("[command] finish_command failed: {e}");
+        }
+        return;
+    }
 
     let acc = match accounts.get_mut(&account_id) {
         Some(a) => a,
@@ -1350,7 +1384,14 @@ fn spawn_realtime_thread(
 /// Invariant C: Không bao giờ quên một process có thể đang sống.
 /// Invariant D: Tái sử dụng process_unix::stop và evaluate_stop_transition.
 #[cfg(unix)]
-fn retire_account_safely(accounts: &mut HashMap<String, AccountState>, account_id: &str) {
+fn retire_account_safely(
+    accounts: &mut HashMap<String, AccountState>,
+    account_id: &str,
+    retired_tombstones: &mut std::collections::HashSet<String>,
+) {
+    // Tombstone account_id ngay lập tức để không bao giờ bị resurrect/admission lại
+    retired_tombstones.insert(account_id.to_string());
+
     let Some(acc) = accounts.get_mut(account_id) else {
         return;
     };
@@ -1412,6 +1453,7 @@ fn reconcile_cloud_accounts(
     rest: &SupabaseRest,
     identity: &crate::crypto::DeviceIdentity,
     jar_ctl_version: i32,
+    retired_tombstones: &mut std::collections::HashSet<String>,
 ) {
     let local_entries: Vec<(&str, bool)> = accounts
         .iter()
@@ -1421,6 +1463,7 @@ fn reconcile_cloud_accounts(
     let plan = crate::supabase_rest::evaluate_account_reconciliation(
         local_entries,
         Ok::<&[crate::supabase_rest::AccountRow], std::convert::Infallible>(&fresh_rows),
+        retired_tombstones.iter().map(|s| s.as_str()),
     );
 
     match plan {
@@ -1435,12 +1478,12 @@ fn reconcile_cloud_accounts(
             // 1. Retire an toàn các account local không còn trên cloud HOẶC đang pending retirement
             for id in to_retire {
                 eprintln!("[reconcile] account {id} retiring or missing from cloud set, ensuring safe retirement");
-                retire_account_safely(accounts, &id);
+                retire_account_safely(accounts, &id, retired_tombstones);
             }
 
-            // 2. Merge các account mới / cập nhật metadata các account hiện có (chỉ non-retiring)
+            // 2. Merge các account mới / cập nhật metadata các account hiện có (chỉ non-retiring & non-tombstoned)
             let fresh_map = account_states_from_rows(fresh_rows);
-            merge_account_states(accounts, fresh_map, rest, identity, jar_ctl_version);
+            merge_account_states(accounts, fresh_map, rest, identity, jar_ctl_version, retired_tombstones);
         }
     }
 }
@@ -1520,8 +1563,18 @@ fn merge_account_states(
     rest: &SupabaseRest,
     identity: &crate::crypto::DeviceIdentity,
     jar_ctl_version: i32,
+    retired_tombstones: &std::collections::HashSet<String>,
 ) {
     for (id, fresh_acc) in fresh {
+        if crate::supabase_rest::evaluate_account_admission(
+            &id,
+            retired_tombstones.contains(&id),
+        ) == crate::supabase_rest::AccountAdmissionDecision::RejectedTombstoned
+        {
+            eprintln!("[reconcile] account {id} is tombstoned/retired, skipping snapshot merge/insertion");
+            continue;
+        }
+
         if let Some(existing) = accounts.get_mut(&id) {
             if existing.retiring {
                 eprintln!("[reconcile] account {id} is retiring, skipping cloud snapshot merge to prevent resurrection");
@@ -1560,6 +1613,7 @@ fn recover_queued_commands(
     identity: &crate::crypto::DeviceIdentity,
     jar_ctl_version: i32,
     dedupe: &mut CommandDedupe,
+    retired_tombstones: &mut std::collections::HashSet<String>,
 ) {
     if let Err(e) = rest.expire_stale_commands(device_id) {
         eprintln!("[recovery] expire_stale_commands failed: {e}");
@@ -1588,7 +1642,7 @@ fn recover_queued_commands(
     };
 
     // Reconcile cloud accounts authoritatively
-    reconcile_cloud_accounts(accounts, fresh_rows, rest, identity, jar_ctl_version);
+    reconcile_cloud_accounts(accounts, fresh_rows, rest, identity, jar_ctl_version, retired_tombstones);
 
     if cmds.is_empty() {
         return;
@@ -1601,7 +1655,7 @@ fn recover_queued_commands(
             eprintln!("[recovery] duplicate command id={} already processed, suppressing", cmd.id);
             continue;
         }
-        dispatch_command(cmd, accounts, rest, cfg, identity, jar_ctl_version);
+        dispatch_command(cmd, accounts, rest, cfg, identity, jar_ctl_version, retired_tombstones);
     }
 }
 

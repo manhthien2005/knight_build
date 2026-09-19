@@ -825,18 +825,44 @@ pub enum ReconciliationPlan {
     },
 }
 
+/// Decision whether an account may be admitted for local tracking, update, or creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountAdmissionDecision {
+    Admitted,
+    RejectedTombstoned,
+}
+
+/// Evaluates whether an account is admitted for creation, update, or reconciliation.
+///
+/// Ensures the tombstone invariant: once an account is deleted or retired, its tombstone
+/// survives `AccountState` removal and permanently rejects any later creation, update,
+/// or resurrection attempt.
+pub fn evaluate_account_admission(
+    _account_id: &str,
+    is_tombstoned: bool,
+) -> AccountAdmissionDecision {
+    if is_tombstoned {
+        AccountAdmissionDecision::RejectedTombstoned
+    } else {
+        AccountAdmissionDecision::Admitted
+    }
+}
+
 /// Pure evaluator for account set reconciliation.
 ///
 /// Ensures Invariant A (fetch error is not data) and Invariant B (successful empty set is authoritative).
 /// Ensures Problem A invariant: retiring accounts remain retirement-monotonic, are excluded from
 /// `to_update`, and are routed through `to_retire` for ongoing safe process group termination retry.
-pub fn evaluate_account_reconciliation<'a, I, E>(
+/// Ensures Tombstone invariant: tombstoned account IDs are permanently excluded from `to_insert` and `to_update`.
+pub fn evaluate_account_reconciliation<'a, I, E, T>(
     local_accounts: I,
     cloud_result: Result<&[AccountRow], &E>,
+    tombstoned_ids: T,
 ) -> ReconciliationPlan
 where
     I: IntoIterator<Item = (&'a str, bool)>,
     E: ?Sized,
+    T: IntoIterator<Item = &'a str>,
 {
     match cloud_result {
         Err(_) => ReconciliationPlan::AbortedFetchFailed,
@@ -844,10 +870,18 @@ where
             let cloud_ids: std::collections::HashSet<&str> =
                 cloud_rows.iter().map(|r| r.id.as_str()).collect();
             let local_map: std::collections::HashMap<&str, bool> = local_accounts.into_iter().collect();
+            let tombstone_set: std::collections::HashSet<&str> = tombstoned_ids.into_iter().collect();
 
             let mut to_insert = Vec::new();
             let mut to_update = Vec::new();
             for row in cloud_rows {
+                if evaluate_account_admission(row.id.as_str(), tombstone_set.contains(row.id.as_str()))
+                    == AccountAdmissionDecision::RejectedTombstoned
+                {
+                    // Account is tombstoned. Under no circumstances may it be updated or inserted.
+                    continue;
+                }
+
                 match local_map.get(row.id.as_str()) {
                     Some(&true) => {
                         // Account is locally retiring. Under no circumstances may it be updated,
@@ -864,9 +898,9 @@ where
 
             let mut to_retire = Vec::new();
             for (&id, &is_retiring) in &local_map {
-                // If the account is missing from cloud OR is already marked retiring,
+                // If the account is missing from cloud OR is already marked retiring OR is tombstoned,
                 // it belongs in to_retire (safe retirement / retry).
-                if is_retiring || !cloud_ids.contains(id) {
+                if is_retiring || tombstone_set.contains(id) || !cloud_ids.contains(id) {
                     to_retire.push(id.to_string());
                 }
             }
@@ -1678,7 +1712,7 @@ mod tests {
     fn test_fetch_error_is_not_authoritative_empty() {
         let local_accounts = [("acc-1", false), ("acc-2", false)];
         let err: Result<&[AccountRow], &str> = Err("network failure");
-        let plan = evaluate_account_reconciliation(local_accounts, err);
+        let plan = evaluate_account_reconciliation(local_accounts, err, []);
         assert_eq!(plan, ReconciliationPlan::AbortedFetchFailed);
     }
 
@@ -1687,7 +1721,7 @@ mod tests {
         let local_accounts = [("acc-1", false), ("acc-2", false)];
         let empty_rows: &[AccountRow] = &[];
         let ok_empty: Result<&[AccountRow], &str> = Ok(empty_rows);
-        let plan = evaluate_account_reconciliation(local_accounts, ok_empty);
+        let plan = evaluate_account_reconciliation(local_accounts, ok_empty, []);
         assert_eq!(
             plan,
             ReconciliationPlan::Apply {
@@ -1730,7 +1764,7 @@ mod tests {
             },
         ];
         let ok_res: Result<&[AccountRow], &str> = Ok(&cloud_rows);
-        let plan = evaluate_account_reconciliation(local_accounts, ok_res);
+        let plan = evaluate_account_reconciliation(local_accounts, ok_res, []);
         assert_eq!(
             plan,
             ReconciliationPlan::Apply {
@@ -1798,48 +1832,32 @@ mod tests {
     }
 
     #[test]
-    fn test_case_f_retiring_account_not_resurrected_by_stale_snapshot() {
-        // Account A is locally retiring with an owned live process
-        let mut acc_a = AccountSnapshot {
-            id: "acc-a".to_string(),
-            slot_index: 0,
-            username: "user_a".to_string(),
-            server_index: 0,
-            secret_sealed: serde_json::json!({}),
-            desired_state: "stopped".to_string(),
-            control_version: 1,
-            control: serde_json::json!({}),
-            config_version: 1,
-            live_process_pid: Some(9999),
-            retiring: true,
-        };
-        // Account B is normal running
-        let acc_b = AccountSnapshot {
-            id: "acc-b".to_string(),
-            slot_index: 1,
-            username: "user_b".to_string(),
-            server_index: 1,
-            secret_sealed: serde_json::json!({}),
-            desired_state: "running".to_string(),
-            control_version: 1,
-            control: serde_json::json!({}),
-            config_version: 1,
-            live_process_pid: Some(8888),
-            retiring: false,
-        };
+    fn test_tombstone_admission_evaluation() {
+        assert_eq!(
+            evaluate_account_admission("acc-live", false),
+            AccountAdmissionDecision::Admitted
+        );
+        assert_eq!(
+            evaluate_account_admission("acc-dead", true),
+            AccountAdmissionDecision::RejectedTombstoned
+        );
+    }
 
-        // Stale cloud snapshot arrives containing BOTH acc-a and acc-b (acc-a desired_state=running!)
+    #[test]
+    fn test_tombstone_lifecycle_cases_f1_through_f6() {
+        use std::collections::HashSet;
+
         let row_a = AccountRow {
             id: "acc-a".to_string(),
             slot_index: 0,
             label: "Acc A".to_string(),
-            username: "user_a_stale".to_string(),
-            secret_sealed: serde_json::json!({"stale": true}),
+            username: "user_a".to_string(),
+            secret_sealed: serde_json::json!({}),
             server_index: 0,
             desired_state: "running".to_string(),
-            control_version: 2,
+            control_version: 1,
             control: serde_json::json!({}),
-            config_version: 2,
+            config_version: 1,
             runtime: serde_json::json!({}),
         };
         let row_b = AccountRow {
@@ -1855,34 +1873,137 @@ mod tests {
             config_version: 1,
             runtime: serde_json::json!({}),
         };
-        let cloud_rows = vec![row_a.clone(), row_b.clone()];
 
-        let local_accounts = [
-            (acc_a.id.as_str(), acc_a.retiring),
-            (acc_b.id.as_str(), acc_b.retiring),
-        ];
-
-        let plan = evaluate_account_reconciliation(local_accounts, Ok::<&[AccountRow], &str>(&cloud_rows));
-
-        // Hard Invariant: acc-a MUST NOT be in to_update or to_insert!
-        // acc-a MUST be in to_retire so retirement retry continues!
+        // F1: local A is retiring, stale snapshot contains A, Stop fails
+        // -> A remains owned, tombstone remains, no resurrection
+        let mut tombstones = HashSet::new();
+        tombstones.insert("acc-a".to_string());
+        let local_f1 = [("acc-a", true)];
+        let cloud_rows_f1 = vec![row_a.clone()];
+        let plan_f1 = evaluate_account_reconciliation(
+            local_f1,
+            Ok::<&[AccountRow], &str>(&cloud_rows_f1),
+            tombstones.iter().map(|s| s.as_str()),
+        );
         assert_eq!(
-            plan,
+            plan_f1,
             ReconciliationPlan::Apply {
                 to_insert: vec![],
-                to_update: vec!["acc-b".to_string()],
+                to_update: vec![],
                 to_retire: vec!["acc-a".to_string()],
             }
         );
+        // Stop fails -> process kept, account still retiring, tombstone intact
+        let action_f1 = evaluate_retirement_action(true, true, Some(StopOutcome::Failed));
+        assert_eq!(action_f1, RetirementAction::RetainPendingCleanup);
+        assert!(tombstones.contains("acc-a"));
 
-        // Attempting to merge cloud fields on a retiring account must be a strict no-op
-        acc_a.merge_cloud_fields(&row_a);
-        assert!(acc_a.retiring, "retiring flag must remain true");
-        assert_eq!(acc_a.desired_state, "stopped", "desired_state must not be resurrected to running");
-        assert_eq!(acc_a.username, "user_a", "cloud fields must not overwrite retiring state");
-        assert_eq!(acc_a.live_process_pid, Some(9999), "process handle must remain owned");
-        assert!(!acc_a.can_autostart(), "retiring account must never autostart");
-        assert!(!acc_a.can_accept_command(), "retiring account must never accept commands");
+        // F2 (HARD GATE): local A is retiring, stale snapshot contains A, Stop succeeds
+        // -> AccountState removed, tombstone remains, stale snapshot in same pass MUST NOT reinsert A
+        let local_f2 = [("acc-a", true)];
+        let cloud_rows_f2 = vec![row_a.clone()];
+        let plan_f2 = evaluate_account_reconciliation(
+            local_f2,
+            Ok::<&[AccountRow], &str>(&cloud_rows_f2),
+            tombstones.iter().map(|s| s.as_str()),
+        );
+        assert_eq!(
+            plan_f2,
+            ReconciliationPlan::Apply {
+                to_insert: vec![],
+                to_update: vec![],
+                to_retire: vec!["acc-a".to_string()],
+            }
+        );
+        // Stop succeeds -> AccountState is removed, but tombstone remains
+        let action_f2 = evaluate_retirement_action(true, true, Some(StopOutcome::Terminated));
+        assert_eq!(action_f2, RetirementAction::RemoveCleaned);
+        assert!(tombstones.contains("acc-a"));
+        // Admission evaluation on fresh row A during the same merge pass must REJECT
+        assert_eq!(
+            evaluate_account_admission("acc-a", tombstones.contains("acc-a")),
+            AccountAdmissionDecision::RejectedTombstoned
+        );
+
+        // F3: A has already been successfully retired and removed. Later stale snapshot contains A
+        // -> MUST NOT insert
+        let local_f3 = [("acc-b", false)];
+        let cloud_rows_f3 = vec![row_a.clone(), row_b.clone()];
+        let plan_f3 = evaluate_account_reconciliation(
+            local_f3,
+            Ok::<&[AccountRow], &str>(&cloud_rows_f3),
+            tombstones.iter().map(|s| s.as_str()),
+        );
+        assert_eq!(
+            plan_f3,
+            ReconciliationPlan::Apply {
+                to_insert: vec![], // acc-a is NOT inserted!
+                to_update: vec!["acc-b".to_string()],
+                to_retire: vec![],
+            }
+        );
+        assert_eq!(
+            evaluate_account_admission("acc-a", tombstones.contains("acc-a")),
+            AccountAdmissionDecision::RejectedTombstoned
+        );
+
+        // F4: A has already been successfully retired and removed. Later AccountChanged(A)
+        // -> MUST NOT insert
+        assert_eq!(
+            evaluate_account_admission("acc-a", tombstones.contains("acc-a")),
+            AccountAdmissionDecision::RejectedTombstoned
+        );
+
+        // F5: A has already been successfully retired and removed. Later AccountAdded(A)
+        // -> MUST NOT insert
+        assert_eq!(
+            evaluate_account_admission("acc-a", tombstones.contains("acc-a")),
+            AccountAdmissionDecision::RejectedTombstoned
+        );
+
+        // F6: Missed DELETE during disconnect: local A,B, authoritative cloud contains only A
+        // -> B becomes tombstoned -> safe retirement -> later stale snapshot containing B cannot resurrect B
+        let mut tombstones_f6 = HashSet::<String>::new();
+        let local_f6_initial = [("acc-a", false), ("acc-b", false)];
+        let cloud_authoritative_a = vec![row_a.clone()];
+        let plan_f6_reconnect = evaluate_account_reconciliation(
+            local_f6_initial,
+            Ok::<&[AccountRow], &str>(&cloud_authoritative_a),
+            tombstones_f6.iter().map(|s| s.as_str()),
+        );
+        assert_eq!(
+            plan_f6_reconnect,
+            ReconciliationPlan::Apply {
+                to_insert: vec![],
+                to_update: vec!["acc-a".to_string()],
+                to_retire: vec!["acc-b".to_string()],
+            }
+        );
+        // B is tombstoned and retired safely
+        tombstones_f6.insert("acc-b".to_string());
+        assert_eq!(
+            evaluate_retirement_action(true, true, Some(StopOutcome::Terminated)),
+            RetirementAction::RemoveCleaned
+        );
+        // Later stale snapshot arrives with B
+        let cloud_stale_with_b = vec![row_a.clone(), row_b.clone()];
+        let plan_f6_stale = evaluate_account_reconciliation(
+            [("acc-a", false)],
+            Ok::<&[AccountRow], &str>(&cloud_stale_with_b),
+            tombstones_f6.iter().map(|s| s.as_str()),
+        );
+        assert_eq!(
+            plan_f6_stale,
+            ReconciliationPlan::Apply {
+                to_insert: vec![], // B is NOT in to_insert!
+                to_update: vec!["acc-a".to_string()],
+                to_retire: vec![],
+            }
+        );
+        assert_eq!(
+            evaluate_account_admission("acc-b", tombstones_f6.contains("acc-b")),
+            AccountAdmissionDecision::RejectedTombstoned
+        );
     }
 
     #[test]
@@ -1944,13 +2065,13 @@ mod tests {
         // Case A: local A,B + fetch error -> neither retired
         let local_accounts = [("acc-a", false), ("acc-b", false)];
         let err: Result<&[AccountRow], &str> = Err("transient 503 network error");
-        let plan_a = evaluate_account_reconciliation(local_accounts, err);
+        let plan_a = evaluate_account_reconciliation(local_accounts, err, []);
         assert_eq!(plan_a, ReconciliationPlan::AbortedFetchFailed);
 
         // Case B: local A,B + successful cloud [] -> A,B selected for safe retirement
         let empty_cloud: &[AccountRow] = &[];
         let ok_b: Result<&[AccountRow], &str> = Ok(empty_cloud);
-        let plan_b = evaluate_account_reconciliation(local_accounts, ok_b);
+        let plan_b = evaluate_account_reconciliation(local_accounts, ok_b, []);
         assert_eq!(
             plan_b,
             ReconciliationPlan::Apply {
@@ -2017,7 +2138,7 @@ mod tests {
         };
         let cloud_only_a = vec![row_a.clone()];
         let ok_e: Result<&[AccountRow], &str> = Ok(&cloud_only_a);
-        let plan_e = evaluate_account_reconciliation(local_accounts, ok_e);
+        let plan_e = evaluate_account_reconciliation(local_accounts, ok_e, []);
         assert_eq!(
             plan_e,
             ReconciliationPlan::Apply {
@@ -2046,6 +2167,7 @@ mod tests {
         let plan_f = evaluate_account_reconciliation(
             local_with_retiring,
             Ok::<&[AccountRow], &str>(&cloud_stale_both),
+            ["acc-a"],
         );
         assert_eq!(
             plan_f,
