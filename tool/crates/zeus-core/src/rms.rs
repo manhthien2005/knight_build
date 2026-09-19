@@ -171,7 +171,9 @@ fn index_server_record(server_index: u8) -> CoreResult<Vec<u8>> {
 }
 
 /// Directory the stores for one profile live in.
-fn suite_directory(microemu_home: &Path) -> PathBuf {
+///
+/// Canonical MicroEmulator RMS store directory: `<microemu_home>/.microemulator/suite-null`.
+pub fn suite_directory(microemu_home: &Path) -> PathBuf {
     microemu_home
         .join(CONFIG_DIRECTORY_NAME)
         .join(SUITE_DIRECTORY_NAME)

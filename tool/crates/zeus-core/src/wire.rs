@@ -41,8 +41,7 @@ pub use crate::player::{clear_snapshot, parse_snapshot, read_snapshot, snapshot_
 // building the login screen and submits opcode 1 itself. The driver does not drive login.
 //
 // `seed_credentials` writes the server store FIRST — a present `user_pass` with a stale server
-// index would connect the account to the wrong world.
-pub use crate::rms::{clear_credentials, seed_credentials};
+pub use crate::rms::{clear_credentials, seed_credentials, suite_directory};
 
 // ── shared plumbing ──────────────────────────────────────────────────────────────
 
@@ -120,6 +119,7 @@ mod tests {
         let _: fn(&str) -> CoreResult<PlayerSnapshot> = parse_snapshot;
         let _: fn(&std::path::Path, &str, &str, u8) -> CoreResult<()> = seed_credentials;
         let _: fn(&std::path::Path) -> CoreResult<()> = clear_credentials;
+        let _: fn(&std::path::Path) -> std::path::PathBuf = suite_directory;
         let _: fn(&std::path::Path, &std::path::Path) -> CoreResult<()> = atomic_replace;
     }
 

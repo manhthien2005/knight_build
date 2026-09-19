@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use zeus_core::wire::{CONTROL_FILE_NAME, SNAPSHOT_FILE_NAME};
+use zeus_core::wire::{CONTROL_FILE_NAME, SNAPSHOT_FILE_NAME, suite_directory};
 
 /// MicroEmulator's entry point. From `runtime-descriptor.json`: `"main_class"`.
 pub const MAIN_CLASS: &str = "org.microemu.app.Main";
@@ -114,8 +114,6 @@ pub struct LaunchSpec {
     pub microemulator_jar: PathBuf,
     pub game_jar: PathBuf,
     pub paths: AccountPaths,
-    /// Stable per-account id. Passed as `--id`, and used by MicroEmulator to separate state.
-    pub profile_id: String,
     pub device_width: u32,
     pub device_height: u32,
     pub heap: HeapConfig,
@@ -138,7 +136,6 @@ impl LaunchSpec {
             microemulator_jar: PathBuf::from("/opt/microemulator-2.0.4/microemulator.jar"),
             game_jar: PathBuf::from("/opt/knight/game/Zeus_Knight.jar"),
             paths,
-            profile_id: "default".to_string(),
             device_width: 360,
             device_height: 480,
             heap: HeapConfig::default(),
@@ -214,14 +211,15 @@ impl LaunchSpec {
             .arg(MAIN_CLASS);
 
         // ── emulator options ─────────────────────────────────────────────────
+        // Per-account user.home provides MicroEmulator isolation, so no `--id` is passed.
+        // Omitting `--id` ensures MicroEmulator config root is `<user.home>/.microemulator/`
+        // and its RMS directory is `<user.home>/.microemulator/suite-null/`, aligning with Zeus RMS.
         command
             .arg("--resizableDevice")
             .arg(self.device_width.to_string())
             .arg(self.device_height.to_string())
             .arg("--rms")
-            .arg("file")
-            .arg("--id")
-            .arg(&self.profile_id);
+            .arg("file");
 
         // `--quit` is what makes supervision work: the JVM exits when the MIDlet is destroyed
         // instead of lingering as an empty window, so `waitpid` reports the death.
@@ -284,7 +282,6 @@ mod tests {
             microemulator_jar: PathBuf::from("/opt/microemulator-2.0.4/microemulator.jar"),
             game_jar: PathBuf::from("/opt/knight/game/Zeus_Knight.jar"),
             paths: container_paths("acc1"),
-            profile_id: "acc1".into(),
             device_width: 360,
             device_height: 480,
             heap: HeapConfig::default(),
@@ -338,6 +335,32 @@ mod tests {
         assert!(args.contains(&"--quit".to_string()));
         assert!(args.contains(&"--rms".to_string()));
         assert!(args.contains(&"file".to_string()));
+    }
+
+    /// Regression test: `--id` must NOT be passed to MicroEmulator.
+    ///
+    /// MicroEmulator `--id <id>` moves its config root from `<user.home>/.microemulator/`
+    /// to `<user.home>/.microemulator/<id>/`, which broke auto-login because the RMS stores
+    /// were written directly into `<user.home>/.microemulator/suite-null/`.
+    /// Per-account `-Duser.home` already provides full isolation across account slots,
+    /// so `--id` is omitted and reader/writer agree on one canonical RMS root.
+    #[test]
+    fn launch_omits_emulator_id_and_aligns_with_canonical_rms_path() {
+        let s = spec();
+        let args = argv(&s);
+        assert!(
+            !args.iter().any(|a| a == "--id"),
+            "--id must be omitted so MicroEmulator uses <user.home>/.microemulator/suite-null directly"
+        );
+        let rms_idx = args.iter().position(|a| a == "--rms").expect("missing --rms flag");
+        assert_eq!(args.get(rms_idx + 1).map(|s| s.as_str()), Some("file"));
+
+        // Canonical RMS root asserted against pure path helper from wire contract:
+        let expected_rms_dir = suite_directory(&s.paths.home);
+        assert_eq!(
+            expected_rms_dir,
+            PathBuf::from("/opt/knight/accounts/acc1/home/.microemulator/suite-null")
+        );
     }
 
     /// The heap-free-ratio pair is what makes the RSS trim actually reclaim. Dropping one of
