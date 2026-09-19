@@ -741,6 +741,8 @@ pub struct AccountSnapshot {
     pub config_version: i32,
     /// Runtime-owned field (e.g. process PID) that must NEVER be overwritten by cloud refresh
     pub live_process_pid: Option<i32>,
+    /// Flag indicating this account was removed in cloud and is undergoing safe process stop/cleanup
+    pub retiring: bool,
 }
 
 impl AccountSnapshot {
@@ -755,6 +757,19 @@ impl AccountSnapshot {
         self.config_version = fresh.config_version;
     }
 
+    pub fn mark_retiring(&mut self) {
+        self.retiring = true;
+        self.desired_state = "stopped".to_string();
+    }
+
+    pub fn can_autostart(&self) -> bool {
+        !self.retiring && self.desired_state == "running"
+    }
+
+    pub fn can_accept_command(&self) -> bool {
+        !self.retiring
+    }
+
     pub fn from_row(row: &AccountRow) -> Self {
         Self {
             id: row.id.clone(),
@@ -767,6 +782,82 @@ impl AccountSnapshot {
             control: row.control.clone(),
             config_version: row.config_version,
             live_process_pid: None,
+            retiring: false,
+        }
+    }
+}
+
+/// Action to take on account retirement given its process state and stop outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetirementAction {
+    /// Process confirmed terminated or was never alive: safe to clear credentials and remove state.
+    RemoveCleaned,
+    /// Process failed to terminate or liveness is uncertain: MUST retain process tracking and local state.
+    RetainPendingCleanup,
+}
+
+/// Evaluates the safe retirement action based on process existence, liveness, and stop outcome.
+pub fn evaluate_retirement_action(
+    has_process: bool,
+    is_alive: bool,
+    stop_outcome: Option<StopOutcome>,
+) -> RetirementAction {
+    match evaluate_stop_transition(has_process, is_alive, stop_outcome) {
+        StopTransition::ConfirmedStopped => RetirementAction::RemoveCleaned,
+        StopTransition::FailedStillAlive => RetirementAction::RetainPendingCleanup,
+    }
+}
+
+/// Outcome of reconciling local accounts against an authoritative cloud accounts fetch result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconciliationPlan {
+    /// Cloud fetch failed: local accounts MUST NOT be altered, stopped, or removed.
+    AbortedFetchFailed,
+    /// Cloud fetch succeeded (even if 0 accounts): cloud is authoritative.
+    Apply {
+        to_insert: Vec<String>,
+        to_update: Vec<String>,
+        to_retire: Vec<String>,
+    },
+}
+
+/// Pure evaluator for account set reconciliation.
+///
+/// Ensures Invariant A (fetch error is not data) and Invariant B (successful empty set is authoritative).
+pub fn evaluate_account_reconciliation<E: ?Sized>(
+    local_ids: &[String],
+    cloud_result: Result<&[AccountRow], &E>,
+) -> ReconciliationPlan {
+    match cloud_result {
+        Err(_) => ReconciliationPlan::AbortedFetchFailed,
+        Ok(cloud_rows) => {
+            let cloud_ids: std::collections::HashSet<&str> =
+                cloud_rows.iter().map(|r| r.id.as_str()).collect();
+            let local_id_set: std::collections::HashSet<&str> =
+                local_ids.iter().map(|s| s.as_str()).collect();
+
+            let mut to_insert = Vec::new();
+            let mut to_update = Vec::new();
+            for row in cloud_rows {
+                if local_id_set.contains(row.id.as_str()) {
+                    to_update.push(row.id.clone());
+                } else {
+                    to_insert.push(row.id.clone());
+                }
+            }
+
+            let mut to_retire = Vec::new();
+            for id in local_ids {
+                if !cloud_ids.contains(id.as_str()) {
+                    to_retire.push(id.clone());
+                }
+            }
+
+            ReconciliationPlan::Apply {
+                to_insert,
+                to_update,
+                to_retire,
+            }
         }
     }
 }
@@ -1475,6 +1566,7 @@ mod tests {
             control: serde_json::json!({}),
             config_version: 1,
             live_process_pid: Some(4001),
+            retiring: false,
         };
         let row_b_updated = AccountRow {
             id: "acc-b".to_string(),
@@ -1528,6 +1620,268 @@ mod tests {
 
         // Case E: existing live account preserves process handle during refresh
         assert_eq!(acc_b.live_process_pid, Some(4001));
+    }
+
+    #[test]
+    fn test_fetch_error_is_not_authoritative_empty() {
+        let local_ids = vec!["acc-1".to_string(), "acc-2".to_string()];
+        let err: Result<&[AccountRow], &str> = Err("network failure");
+        let plan = evaluate_account_reconciliation(&local_ids, err);
+        assert_eq!(plan, ReconciliationPlan::AbortedFetchFailed);
+    }
+
+    #[test]
+    fn test_successful_empty_cloud_set_retires_all_local_accounts() {
+        let local_ids = vec!["acc-1".to_string(), "acc-2".to_string()];
+        let empty_rows: &[AccountRow] = &[];
+        let ok_empty: Result<&[AccountRow], &str> = Ok(empty_rows);
+        let plan = evaluate_account_reconciliation(&local_ids, ok_empty);
+        assert_eq!(
+            plan,
+            ReconciliationPlan::Apply {
+                to_insert: vec![],
+                to_update: vec![],
+                to_retire: vec!["acc-1".to_string(), "acc-2".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_partial_cloud_deletion_retires_only_missing() {
+        let local_ids = vec!["acc-a".to_string(), "acc-b".to_string(), "acc-c".to_string()];
+        let cloud_rows = vec![
+            AccountRow {
+                id: "acc-a".to_string(),
+                slot_index: 0,
+                label: "Acc A".to_string(),
+                username: "user_a".to_string(),
+                secret_sealed: serde_json::json!({}),
+                server_index: 0,
+                desired_state: "running".to_string(),
+                control_version: 1,
+                control: serde_json::json!({}),
+                config_version: 1,
+                runtime: serde_json::json!({}),
+            },
+            AccountRow {
+                id: "acc-c".to_string(),
+                slot_index: 2,
+                label: "Acc C".to_string(),
+                username: "user_c".to_string(),
+                secret_sealed: serde_json::json!({}),
+                server_index: 2,
+                desired_state: "stopped".to_string(),
+                control_version: 1,
+                control: serde_json::json!({}),
+                config_version: 1,
+                runtime: serde_json::json!({}),
+            },
+        ];
+        let ok_res: Result<&[AccountRow], &str> = Ok(&cloud_rows);
+        let plan = evaluate_account_reconciliation(&local_ids, ok_res);
+        assert_eq!(
+            plan,
+            ReconciliationPlan::Apply {
+                to_insert: vec![],
+                to_update: vec!["acc-a".to_string(), "acc-c".to_string()],
+                to_retire: vec!["acc-b".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_failed_stop_retains_process_and_tracking() {
+        // Account has a running process, stop fails
+        let action = evaluate_retirement_action(true, true, Some(StopOutcome::Failed));
+        assert_eq!(action, RetirementAction::RetainPendingCleanup);
+    }
+
+    #[test]
+    fn test_successful_stop_allows_removal() {
+        // Stop terminated cleanly
+        assert_eq!(
+            evaluate_retirement_action(true, true, Some(StopOutcome::Terminated)),
+            RetirementAction::RemoveCleaned
+        );
+        // Stop killed after escalation
+        assert_eq!(
+            evaluate_retirement_action(true, true, Some(StopOutcome::Killed)),
+            RetirementAction::RemoveCleaned
+        );
+        // Already gone
+        assert_eq!(
+            evaluate_retirement_action(true, true, Some(StopOutcome::AlreadyGone)),
+            RetirementAction::RemoveCleaned
+        );
+        // No process was running
+        assert_eq!(
+            evaluate_retirement_action(false, false, None),
+            RetirementAction::RemoveCleaned
+        );
+    }
+
+    #[test]
+    fn test_retiring_account_cannot_autostart_or_accept_command() {
+        let mut acc = AccountSnapshot {
+            id: "acc-del".to_string(),
+            slot_index: 1,
+            username: "del_user".to_string(),
+            server_index: 0,
+            secret_sealed: serde_json::json!({}),
+            desired_state: "running".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            live_process_pid: Some(5555),
+            retiring: false,
+        };
+        assert!(acc.can_autostart());
+        assert!(acc.can_accept_command());
+
+        acc.mark_retiring();
+        assert_eq!(acc.desired_state, "stopped");
+        assert!(acc.retiring);
+        assert!(!acc.can_autostart());
+        assert!(!acc.can_accept_command());
+    }
+
+    #[test]
+    fn test_acceptance_matrix_cases_a_through_f() {
+        // Case A: normal reconnect
+        // local A,B; cloud success A,B -> no disruption, metadata reconciled
+        let local_ids = vec!["acc-a".to_string(), "acc-b".to_string()];
+        let row_a = AccountRow {
+            id: "acc-a".to_string(),
+            slot_index: 0,
+            label: "Acc A".to_string(),
+            username: "user_a_updated".to_string(),
+            secret_sealed: serde_json::json!({"k": 1}),
+            server_index: 0,
+            desired_state: "running".to_string(),
+            control_version: 2,
+            control: serde_json::json!({}),
+            config_version: 2,
+            runtime: serde_json::json!({}),
+        };
+        let row_b = AccountRow {
+            id: "acc-b".to_string(),
+            slot_index: 1,
+            label: "Acc B".to_string(),
+            username: "user_b".to_string(),
+            secret_sealed: serde_json::json!({}),
+            server_index: 1,
+            desired_state: "stopped".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            runtime: serde_json::json!({}),
+        };
+        let cloud_rows = vec![row_a.clone(), row_b.clone()];
+        let ok_a: Result<&[AccountRow], &str> = Ok(&cloud_rows);
+        let plan_a = evaluate_account_reconciliation(&local_ids, ok_a);
+        assert_eq!(
+            plan_a,
+            ReconciliationPlan::Apply {
+                to_insert: vec![],
+                to_update: vec!["acc-a".to_string(), "acc-b".to_string()],
+                to_retire: vec![],
+            }
+        );
+
+        // Case B: fetch failure
+        // local A,B; cloud ERROR -> A,B remain, no Stop caused by missing cloud rows
+        let err: Result<&[AccountRow], &str> = Err("transient 503 network error");
+        let plan_b = evaluate_account_reconciliation(&local_ids, err);
+        assert_eq!(plan_b, ReconciliationPlan::AbortedFetchFailed);
+
+        // Case C: real empty cloud
+        // local A; cloud success [] -> Stop success -> A removed
+        let local_single = vec!["acc-a".to_string()];
+        let empty_cloud: &[AccountRow] = &[];
+        let ok_c: Result<&[AccountRow], &str> = Ok(empty_cloud);
+        let plan_c = evaluate_account_reconciliation(&local_single, ok_c);
+        assert_eq!(
+            plan_c,
+            ReconciliationPlan::Apply {
+                to_insert: vec![],
+                to_update: vec![],
+                to_retire: vec!["acc-a".to_string()],
+            }
+        );
+        let action_c = evaluate_retirement_action(true, true, Some(StopOutcome::Terminated));
+        assert_eq!(action_c, RetirementAction::RemoveCleaned);
+
+        // Case D: real deletion + Stop failure
+        // local A running; cloud success []; Stop cannot be proven successful
+        // -> A remains tracked for cleanup, A is not normal/autostart eligible, process handle not lost
+        let mut acc_d = AccountSnapshot {
+            id: "acc-a".to_string(),
+            slot_index: 0,
+            username: "user_a".to_string(),
+            server_index: 0,
+            secret_sealed: serde_json::json!({}),
+            desired_state: "running".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            live_process_pid: Some(9999),
+            retiring: false,
+        };
+        let action_d = evaluate_retirement_action(true, true, Some(StopOutcome::Failed));
+        assert_eq!(action_d, RetirementAction::RetainPendingCleanup);
+        // Under RetainPendingCleanup: account marks retiring and keeps process
+        acc_d.mark_retiring();
+        assert!(acc_d.retiring);
+        assert_eq!(acc_d.live_process_pid, Some(9999));
+        assert!(!acc_d.can_autostart());
+        assert!(!acc_d.can_accept_command());
+
+        // Case E: missed realtime DELETE
+        // local A,B; B removed in cloud while realtime disconnected; reconnect fetch success returns A
+        let cloud_only_a = vec![row_a.clone()];
+        let ok_e: Result<&[AccountRow], &str> = Ok(&cloud_only_a);
+        let plan_e = evaluate_account_reconciliation(&local_ids, ok_e);
+        assert_eq!(
+            plan_e,
+            ReconciliationPlan::Apply {
+                to_insert: vec![],
+                to_update: vec!["acc-a".to_string()],
+                to_retire: vec!["acc-b".to_string()],
+            }
+        );
+
+        // Case F: UPDATE
+        // running account receives new server_index/secret_sealed -> cached metadata updated, current JVM not restarted
+        let mut live_acc = AccountSnapshot {
+            id: "acc-a".to_string(),
+            slot_index: 0,
+            username: "user_a".to_string(),
+            server_index: 0,
+            secret_sealed: serde_json::json!({"version": 1}),
+            desired_state: "running".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            live_process_pid: Some(1234),
+            retiring: false,
+        };
+        let row_a_new = AccountRow {
+            id: "acc-a".to_string(),
+            slot_index: 0,
+            label: "Acc A".to_string(),
+            username: "user_a".to_string(),
+            secret_sealed: serde_json::json!({"version": 2}),
+            server_index: 4,
+            desired_state: "running".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            runtime: serde_json::json!({}),
+        };
+        live_acc.merge_cloud_fields(&row_a_new);
+        assert_eq!(live_acc.server_index, 4);
+        assert_eq!(live_acc.secret_sealed, serde_json::json!({"version": 2}));
+        assert_eq!(live_acc.live_process_pid, Some(1234)); // JVM PID untouched
     }
 }
 

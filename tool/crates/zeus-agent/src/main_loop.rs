@@ -120,6 +120,8 @@ struct AccountState {
     last_telemetry_push: Instant,
     /// Số lần restart do crash.
     restarts: u32,
+    /// Cờ đánh dấu account đã bị xóa trên cloud và đang trong quá trình dừng JVM an toàn.
+    retiring: bool,
 }
 
 /// Cấu hình môi trường agent. Đọc từ biến môi trường lúc boot.
@@ -217,7 +219,13 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
     let jar_ctl_version = manifest.as_ref().map(|m| m.ctl_version as i32).unwrap_or(13);
 
     // Boot: đọc full state.
-    let mut accounts = boot_fetch_accounts(&rest, &cfg.device_id);
+    let mut accounts = match boot_fetch_accounts(&rest, &cfg.device_id) {
+        Ok(accs) => accs,
+        Err(e) => {
+            eprintln!("[boot] initial fetch_accounts failed: {e}, starting with empty local cache; will recover on RealtimeReady");
+            HashMap::new()
+        }
+    };
 
     // Ghi potato.ctl ban đầu "0 3" cho tất cả slots hiện có — fix Issue #24
     for acc in accounts.values() {
@@ -345,9 +353,19 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
                 std::process::exit(1);
             }
 
-            // Auto-restart crashed JVMs — Issue #19
+            // Retry retirement cho các account đang pending cleanup — Invariant C
+            let retiring_ids: Vec<String> = accounts
+                .values()
+                .filter(|a| a.retiring)
+                .map(|a| a.id.clone())
+                .collect();
+            for id in retiring_ids {
+                retire_account_safely(&mut accounts, &id);
+            }
+
+            // Auto-restart crashed JVMs — Issue #19 (chỉ autostart account không trong trạng thái retiring)
             for acc in accounts.values_mut() {
-                if acc.desired_state == "running" && acc.process.as_ref().map(|p| !p.alive()).unwrap_or(true) {
+                if !acc.retiring && acc.desired_state == "running" && acc.process.as_ref().map(|p| !p.alive()).unwrap_or(true) {
                     eprintln!("[reconcile] account={} crash detected, restarting", acc.id);
                     acc.restarts += 1;
                     reconcile_desired_state(acc, &rest, &identity);
@@ -418,6 +436,10 @@ fn handle_cloud_event(
             }
 
             if let Some(acc) = accounts.get_mut(&account_id) {
+                if acc.retiring {
+                    eprintln!("[cloud] account {account_id} is retiring, ignoring update");
+                    return;
+                }
                 // Cập nhật config từ record nếu có
                 if let Some(cv) = record["control_version"].as_i64() {
                     acc.control_version = cv as i32;
@@ -488,18 +510,8 @@ fn handle_cloud_event(
         }
 
         CloudEvent::AccountDeleted { account_id } => {
-            // Issue #13: xóa account khỏi map và dừng JVM
-            if let Some(mut acc) = accounts.remove(&account_id) {
-                eprintln!("[cloud] account deleted {account_id}, stopping JVM");
-                if let Some(child) = acc.process.take() {
-                    if child.pgid_alive() {
-                        process_unix::stop(&child, Duration::from_secs(5));
-                    }
-                }
-                let paths = AccountPaths::for_slot(acc.slot_index);
-                let _ = clear_credentials(&paths.home);
-                let _ = clear_snapshot(&paths.home);
-            }
+            eprintln!("[cloud] realtime account deleted {account_id}, retiring safely");
+            retire_account_safely(accounts, &account_id);
         }
 
         CloudEvent::CommandQueued { command } => {
@@ -518,31 +530,15 @@ fn handle_cloud_event(
         CloudEvent::Disconnected { reason } => {
             eprintln!("[main_loop] realtime disconnected: {reason}, reconnecting");
             // Refresh JWT trước khi reconnect — Issues #50, #104
-            // (token refresh đã xảy ra ở vòng lặp chính mỗi 45 phút, nhưng nếu
-            // disconnect do JWT hết hạn, cần refresh ngay)
-            // B2.2: sau reconnect phải đọc lại full state vì có thể miss event.
-            let fresh = boot_fetch_accounts(rest, &cfg.device_id);
-
-            // Xóa các account đã bị xóa trong lúc offline — Issue #43
-            let fresh_ids: std::collections::HashSet<String> = fresh.keys().cloned().collect();
-            accounts.retain(|id, acc| {
-                if fresh_ids.contains(id) {
-                    true
-                } else {
-                    eprintln!("[reconnect] account {id} no longer exists, stopping");
-                    if let Some(child) = acc.process.take() {
-                        if child.pgid_alive() {
-                            process_unix::stop(&child, Duration::from_secs(5));
-                        }
-                    }
-                    let paths = AccountPaths::for_slot(acc.slot_index);
-                    let _ = clear_credentials(&paths.home);
-                    false
+            match rest.sign_in_as_device(&cfg.device_id, &identity.public_key_sec1) {
+                Ok(new_token) => {
+                    rest.set_access_token(new_token.clone());
+                    eprintln!("[auth] JWT token refreshed before reconnect");
                 }
-            });
-
-            // Merge: giữ process đang chạy, cập nhật config
-            merge_account_states(accounts, fresh, rest, identity, jar_ctl_version);
+                Err(e) => {
+                    eprintln!("[auth] JWT refresh on disconnect failed: {e}");
+                }
+            }
 
             spawn_realtime_thread(
                 cfg.supabase_url.clone(),
@@ -733,6 +729,10 @@ fn reconcile_desired_state(
     rest: &SupabaseRest,
     identity: &crate::crypto::DeviceIdentity,
 ) {
+    if acc.retiring {
+        eprintln!("[reconcile] account={} is retiring, skipping desired state reconciliation", acc.id);
+        return;
+    }
     let running = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
     match acc.desired_state.as_str() {
         "running" if !running => {
@@ -944,6 +944,18 @@ fn dispatch_command(
             return;
         }
     };
+
+    if acc.retiring {
+        eprintln!("[command] account_id={account_id} is retiring/deleted, rejecting command {}", cmd.kind);
+        if let Err(e) = rest.finish_command(
+            &cmd.id,
+            CommandStatus::Failed,
+            Some("account is deleted or retiring"),
+        ) {
+            eprintln!("[command] finish_command failed: {e}");
+        }
+        return;
+    }
 
     match cmd.kind.as_str() {
         "start" => {
@@ -1281,8 +1293,9 @@ fn spawn_realtime_thread(
                                     CloudEvent::AccountChanged { account_id, record }
                                 }
                                 ChangeType::Delete => {
-                                    // old_record là Value (không phải Option)
+                                    // old_record là Value (không phải Option); fallback qua record nếu REPLICA IDENTITY FULL
                                     let account_id = old_record["id"].as_str()
+                                        .or_else(|| record["id"].as_str())
                                         .unwrap_or("")
                                         .to_string();
                                     if account_id.is_empty() { continue; }
@@ -1327,15 +1340,100 @@ fn spawn_realtime_thread(
     });
 }
 
+// ── safe retirement & reconciliation ─────────────────────────────────────────
+
+/// Dừng an toàn một account và chỉ giải phóng state khi process group đã chứng minh dừng.
+///
+/// Invariant C: Không bao giờ quên một process có thể đang sống.
+/// Invariant D: Tái sử dụng process_unix::stop và evaluate_stop_transition.
+#[cfg(unix)]
+fn retire_account_safely(accounts: &mut HashMap<String, AccountState>, account_id: &str) {
+    let Some(acc) = accounts.get_mut(account_id) else {
+        return;
+    };
+
+    // Đánh dấu retiring để không bao giờ autostart/restart/nhận lệnh nữa
+    acc.retiring = true;
+    acc.desired_state = "stopped".to_string();
+
+    let (has_process, is_alive) = acc
+        .process
+        .as_ref()
+        .map(|p| (true, p.pgid_alive()))
+        .unwrap_or((false, false));
+
+    let outcome = if is_alive {
+        if let Some(ref child) = acc.process {
+            eprintln!("[retire] account={} slot={}: stopping process group", acc.id, acc.slot_index);
+            let res = process_unix::stop(child, Duration::from_secs(5));
+            Some(res)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match evaluate_stop_transition(has_process, is_alive, outcome) {
+        StopTransition::ConfirmedStopped => {
+            eprintln!("[retire] account={}: process proven stopped, cleaning local state", account_id);
+            let slot_index = acc.slot_index;
+            let paths = AccountPaths::for_slot(slot_index);
+            if let Err(e) = clear_credentials(&paths.home) {
+                eprintln!("[retire] account={}: clear_credentials failed: {e}", account_id);
+            }
+            if let Err(e) = clear_snapshot(&paths.home) {
+                eprintln!("[retire] account={}: clear_snapshot failed: {e}", account_id);
+            }
+            acc.process = None;
+            accounts.remove(account_id);
+        }
+        StopTransition::FailedStillAlive => {
+            eprintln!(
+                "[retire] account={}: stop failed or process group still alive; retaining handle for retry",
+                account_id
+            );
+            // Invariant C & Rust ownership guard: acc.process được giữ nguyên, account giữ trong accounts
+        }
+    }
+}
+
+/// Reconcile authoritative cloud accounts với local runtime accounts.
+///
+/// Invariant B: Snapshot rỗng thành công LÀ authoritative (tất cả local account bị xóa trên cloud).
+#[cfg(unix)]
+fn reconcile_cloud_accounts(
+    accounts: &mut HashMap<String, AccountState>,
+    fresh_rows: Vec<crate::supabase_rest::AccountRow>,
+    rest: &SupabaseRest,
+    identity: &crate::crypto::DeviceIdentity,
+    jar_ctl_version: i32,
+) {
+    let fresh_map = account_states_from_rows(fresh_rows);
+    let fresh_ids: std::collections::HashSet<String> = fresh_map.keys().cloned().collect();
+
+    // 1. Retire an toàn các account local không còn tồn tại trên cloud
+    let local_ids: Vec<String> = accounts.keys().cloned().collect();
+    for id in local_ids {
+        if !fresh_ids.contains(&id) {
+            eprintln!("[reconcile] account {id} no longer in cloud set, retiring safely");
+            retire_account_safely(accounts, &id);
+        }
+    }
+
+    // 2. Merge các account mới / cập nhật metadata các account hiện có
+    merge_account_states(accounts, fresh_map, rest, identity, jar_ctl_version);
+}
+
 // ── boot helpers ──────────────────────────────────────────────────────────────
 
 #[cfg(unix)]
-fn boot_fetch_accounts(rest: &SupabaseRest, device_id: &str) -> HashMap<String, AccountState> {
+fn boot_fetch_accounts(rest: &SupabaseRest, device_id: &str) -> Result<HashMap<String, AccountState>, RestError> {
     match rest.fetch_accounts(device_id) {
-        Ok(rows) => account_states_from_rows(rows),
+        Ok(rows) => Ok(account_states_from_rows(rows)),
         Err(e) => {
             eprintln!("[boot] fetch_accounts failed: {e}");
-            HashMap::new()
+            Err(e)
         }
     }
 }
@@ -1362,6 +1460,7 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
                 last_snapshot: None,
                 last_telemetry_push: Instant::now(),
                 restarts: 0,
+                retiring: false,
             };
             (id, state)
         })
@@ -1390,6 +1489,7 @@ fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountS
         last_snapshot: None,
         last_telemetry_push: Instant::now(),
         restarts: 0,
+        retiring: false,
     })
 }
 
@@ -1403,6 +1503,7 @@ fn merge_account_states(
 ) {
     for (id, fresh_acc) in fresh {
         if let Some(existing) = accounts.get_mut(&id) {
+            existing.retiring = false;
             existing.control_version = fresh_acc.control_version;
             existing.control = fresh_acc.control;
             existing.config_version = fresh_acc.config_version;
@@ -1449,19 +1550,10 @@ fn recover_queued_commands(
         }
     };
 
-    if cmds.is_empty() {
-        return;
-    }
-
-    eprintln!("[recovery] drained {} queued command(s)", cmds.len());
-
-    // State barrier: fetch fresh account snapshot AFTER drain to guarantee
-    // account state reflects any creation/update that happened before or with the commands.
-    match rest.fetch_accounts(device_id) {
-        Ok(rows) => {
-            let fresh = account_states_from_rows(rows);
-            merge_account_states(accounts, fresh, rest, identity, jar_ctl_version);
-        }
+    // State barrier: fetch authoritative fresh account snapshot AFTER drain to guarantee
+    // account state reflects any creation/update/deletion that happened before or with the commands.
+    let fresh_rows = match rest.fetch_accounts(device_id) {
+        Ok(rows) => rows,
         Err(e) => {
             // Post-drain account refresh failed: do NOT dispatch account commands against stale state.
             // Leave commands queued in database for future recovery; do not record them in dedupe.
@@ -1470,7 +1562,16 @@ fn recover_queued_commands(
             );
             return;
         }
+    };
+
+    // Reconcile cloud accounts authoritatively
+    reconcile_cloud_accounts(accounts, fresh_rows, rest, identity, jar_ctl_version);
+
+    if cmds.is_empty() {
+        return;
     }
+
+    eprintln!("[recovery] drained {} queued command(s)", cmds.len());
 
     for cmd in cmds {
         if !dedupe.record_if_new(&cmd.id) {
