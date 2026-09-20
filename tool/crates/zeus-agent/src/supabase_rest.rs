@@ -856,12 +856,11 @@ pub fn evaluate_account_admission(
 /// Ensures Tombstone invariant: tombstoned account IDs are permanently excluded from `to_insert` and `to_update`.
 pub fn evaluate_account_reconciliation<'a, I, E, T>(
     local_accounts: I,
-    cloud_result: Result<&[AccountRow], &E>,
+    cloud_result: Result<&[AccountRow], E>,
     tombstoned_ids: T,
 ) -> ReconciliationPlan
 where
     I: IntoIterator<Item = (&'a str, bool)>,
-    E: ?Sized,
     T: IntoIterator<Item = &'a str>,
 {
     match cloud_result {
