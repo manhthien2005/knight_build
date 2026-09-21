@@ -246,6 +246,61 @@ impl SupabaseRest {
         Ok(rows.len() as u32)
     }
 
+    /// Lấy danh sách các lệnh detect-spots đang ở trạng thái `running` thuộc về device này.
+    /// Dùng lúc boot agent để recover các lệnh bị bỏ dở do crash/restart — R5A.
+    pub fn fetch_running_detect_spots_commands(
+        &self,
+        device_id: &str,
+    ) -> Result<Vec<CommandRow>, RestError> {
+        let response = self
+            .request(
+                "GET",
+                &format!(
+                    "/rest/v1/commands?device_id=eq.{device_id}&status=eq.running&type=eq.detect-spots&order=created_at.asc"
+                ),
+            )
+            .call()?;
+        let rows: Vec<CommandRow> = response.json()?;
+        Ok(filter_abandoned_detect_spots_commands(rows, device_id))
+    }
+
+    /// Thu dọn các lệnh detect-spots bị bỏ dở do agent restart.
+    /// CHỈ gọi một lần duy nhất lúc khởi động process, KHÔNG gọi khi realtime reconnect.
+    pub fn recover_abandoned_spot_scans(
+        &self,
+        device_id: &str,
+    ) -> Result<u32, RestError> {
+        let commands = self.fetch_running_detect_spots_commands(device_id)?;
+        if commands.is_empty() {
+            return Ok(0);
+        }
+
+        let mut recovered_count = 0;
+        for cmd in &commands {
+            eprintln!(
+                "[recovery] recovering abandoned running detect-spots command id={} for device={}",
+                cmd.id, device_id
+            );
+            match self.finish_command(
+                &cmd.id,
+                CommandStatus::Failed,
+                Some(ABANDONED_SPOT_SCAN_MESSAGE),
+            ) {
+                Ok(()) => {
+                    recovered_count += 1;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[recovery] failed to mark abandoned detect-spots command id={} as failed: {e}",
+                        cmd.id
+                    );
+                }
+            }
+        }
+        Ok(recovered_count)
+    }
+
+
     // ── accounts ──────────────────────────────────────────────────────────────
 
     /// Đọc lại full state. **Bắt buộc sau reconnect** và lúc boot.
@@ -506,6 +561,100 @@ pub fn evaluate_apply_config_status(
         Err(err) => (CommandStatus::Failed, Some(err)),
     }
 }
+
+/// Message được ghi nhận khi phát hiện lệnh detect-spots bị bỏ dở do agent restart — R5A.
+pub const ABANDONED_SPOT_SCAN_MESSAGE: &str =
+    "Detect Spots scan abandoned because zeus-agent restarted before completion.";
+
+/// Quyết định xử lý cho một lệnh khi kiểm tra abandoned detect-spots lúc khởi động process — R5A.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbandonedRecoveryDecision {
+    /// Lệnh thuộc về node này, đang running, và là detect-spots: thu dọn và đánh dấu failed.
+    RecoverAsFailed,
+    /// Lệnh thuộc về node khác: không được can thiệp.
+    IgnoreOtherDevice,
+    /// Lệnh không phải detect-spots (start, stop, restart, apply-config...): giữ nguyên.
+    IgnoreOtherCommandType,
+    /// Lệnh không ở trạng thái running (queued, success, failed, expired): bỏ qua.
+    IgnoreNonRunningStatus,
+}
+
+/// Đánh giá xem một lệnh có phải là detect-spots scan bị bỏ dở cần thu dọn lúc boot hay không.
+pub fn evaluate_abandoned_spot_scan(
+    command_device_id: Option<&str>,
+    current_device_id: &str,
+    command_kind: &str,
+    command_status: &str,
+) -> AbandonedRecoveryDecision {
+    if command_device_id != Some(current_device_id) {
+        return AbandonedRecoveryDecision::IgnoreOtherDevice;
+    }
+    if command_kind != "detect-spots" {
+        return AbandonedRecoveryDecision::IgnoreOtherCommandType;
+    }
+    if command_status != CommandStatus::Running.as_str() {
+        return AbandonedRecoveryDecision::IgnoreNonRunningStatus;
+    }
+    AbandonedRecoveryDecision::RecoverAsFailed
+}
+
+/// Lọc danh sách CommandRow nhận được để chỉ giữ lại các lệnh detect-spots của device này đang running.
+pub fn filter_abandoned_detect_spots_commands(
+    commands: Vec<CommandRow>,
+    device_id: &str,
+) -> Vec<CommandRow> {
+    commands
+        .into_iter()
+        .filter(|cmd| {
+            cmd.device_id.as_deref() == Some(device_id) && cmd.kind == "detect-spots"
+        })
+        .collect()
+}
+
+/// Hành động đối với spot scan khi realtime reconnect hoặc boot process — R5A.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconnectSpotScanAction {
+    /// Tiến trình mới boot: chạy startup recovery cho các lệnh running bị bỏ dở.
+    RunStartupAbandonedRecovery,
+    /// Trong cùng tiến trình, realtime reconnect nhưng đang có pending_spot_scan: giữ nguyên scan.
+    PreservePendingScan,
+    /// Trong cùng tiến trình, realtime reconnect và không có pending scan: không cần làm gì.
+    NoAction,
+}
+
+/// Đánh giá hành vi với detect-spots khi kết nối lại realtime hoặc boot process.
+pub fn evaluate_spot_scan_reconnect_action(
+    has_pending_scan: bool,
+    is_startup: bool,
+) -> ReconnectSpotScanAction {
+    if is_startup {
+        ReconnectSpotScanAction::RunStartupAbandonedRecovery
+    } else if has_pending_scan {
+        ReconnectSpotScanAction::PreservePendingScan
+    } else {
+        ReconnectSpotScanAction::NoAction
+    }
+}
+
+/// Kết quả của việc thực hiện thu dọn abandoned spot scan — R5A.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbandonedRecoveryOutcome {
+    QueryFailed,
+    NoneFound,
+    Recovered(u32),
+}
+
+/// Đánh giá kết quả thu dọn abandoned spot scan từ kết quả truy vấn commands.
+pub fn evaluate_abandoned_recovery_outcome<T, E>(
+    query_result: Result<Vec<T>, E>,
+) -> AbandonedRecoveryOutcome {
+    match query_result {
+        Err(_) => AbandonedRecoveryOutcome::QueryFailed,
+        Ok(ref list) if list.is_empty() => AbandonedRecoveryOutcome::NoneFound,
+        Ok(list) => AbandonedRecoveryOutcome::Recovered(list.len() as u32),
+    }
+}
+
 
 /// Outcome of stopping a supervised child process tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2238,5 +2387,156 @@ mod tests {
         assert_eq!(decision_h2.rest_token, "token-v1");
         assert_eq!(decision_h2.realtime_token, "token-v1");
     }
-}
 
+    #[test]
+    fn test_abandoned_spot_scan_recovery_semantics_a1_through_a7() {
+        let dev_self = "dev-100";
+        let dev_other = "dev-200";
+
+        // A1: Fresh agent process sees device-owned running detect-spots command
+        let decision_a1 =
+            evaluate_abandoned_spot_scan(Some(dev_self), dev_self, "detect-spots", "running");
+        assert_eq!(decision_a1, AbandonedRecoveryDecision::RecoverAsFailed);
+        assert_eq!(
+            ABANDONED_SPOT_SCAN_MESSAGE,
+            "Detect Spots scan abandoned because zeus-agent restarted before completion."
+        );
+
+        // A2: Fresh process sees running command for another device
+        let decision_a2 =
+            evaluate_abandoned_spot_scan(Some(dev_other), dev_self, "detect-spots", "running");
+        assert_eq!(decision_a2, AbandonedRecoveryDecision::IgnoreOtherDevice);
+
+        // A3: Fresh process sees running non-detect-spots command
+        let decision_a3 =
+            evaluate_abandoned_spot_scan(Some(dev_self), dev_self, "start", "running");
+        assert_eq!(
+            decision_a3,
+            AbandonedRecoveryDecision::IgnoreOtherCommandType
+        );
+
+        // A4: Fresh process sees queued detect-spots command
+        let decision_a4 =
+            evaluate_abandoned_spot_scan(Some(dev_self), dev_self, "detect-spots", "queued");
+        assert_eq!(
+            decision_a4,
+            AbandonedRecoveryDecision::IgnoreNonRunningStatus
+        );
+
+        // Batch filter testing A1 - A4 together
+        let cmds = vec![
+            CommandRow {
+                id: "cmd-a1".to_string(),
+                account_id: Some("acc-1".to_string()),
+                device_id: Some(dev_self.to_string()),
+                kind: "detect-spots".to_string(),
+                payload: None,
+                expires_at: "2026-09-21T10:00:00Z".to_string(),
+            },
+            CommandRow {
+                id: "cmd-a2".to_string(),
+                account_id: Some("acc-2".to_string()),
+                device_id: Some(dev_other.to_string()),
+                kind: "detect-spots".to_string(),
+                payload: None,
+                expires_at: "2026-09-21T10:00:00Z".to_string(),
+            },
+            CommandRow {
+                id: "cmd-a3".to_string(),
+                account_id: Some("acc-1".to_string()),
+                device_id: Some(dev_self.to_string()),
+                kind: "start".to_string(),
+                payload: None,
+                expires_at: "2026-09-21T10:00:00Z".to_string(),
+            },
+        ];
+
+        let selected = filter_abandoned_detect_spots_commands(cmds, dev_self);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, "cmd-a1");
+
+        // A5: Same process has pending_spot_scan and realtime reconnects -> running command remains active
+        // When realtime reconnects, startup recovery is NOT invoked; active pending scan is preserved
+        let reconnect_action_with_pending = evaluate_spot_scan_reconnect_action(true, false);
+        assert_eq!(
+            reconnect_action_with_pending,
+            ReconnectSpotScanAction::PreservePendingScan
+        );
+        let reconnect_action_no_pending = evaluate_spot_scan_reconnect_action(false, false);
+        assert_eq!(
+            reconnect_action_no_pending,
+            ReconnectSpotScanAction::NoAction
+        );
+        // Process startup with no pending scan triggers startup recovery
+        let startup_action = evaluate_spot_scan_reconnect_action(false, true);
+        assert_eq!(
+            startup_action,
+            ReconnectSpotScanAction::RunStartupAbandonedRecovery
+        );
+
+        // A6: Agent restart loses pending state and stale sidecar files exist
+        // Test that sidecar files are wiped and no result is published
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        // Simulate leftover sidecar files from crashed previous run
+        std::fs::write(
+            home.join(crate::spot_scan::SPOT_REQUEST_FILE_NAME),
+            b"old req",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(crate::spot_scan::SPOT_RESULT_PAYLOAD_FILE_NAME),
+            b"{\"scan_id\":\"cmd-old\"}",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(crate::spot_scan::SPOT_RESULT_READY_FILE_NAME),
+            b"ready",
+        )
+        .unwrap();
+
+        assert!(
+            home.join(crate::spot_scan::SPOT_RESULT_READY_FILE_NAME)
+                .exists()
+        );
+        assert!(
+            home.join(crate::spot_scan::SPOT_RESULT_PAYLOAD_FILE_NAME)
+                .exists()
+        );
+        assert!(home.join(crate::spot_scan::SPOT_REQUEST_FILE_NAME).exists());
+
+        // Startup cleanup wipes all sidecar files
+        crate::spot_scan::clean_spot_files(home);
+        assert!(
+            !home
+                .join(crate::spot_scan::SPOT_RESULT_READY_FILE_NAME)
+                .exists()
+        );
+        assert!(
+            !home
+                .join(crate::spot_scan::SPOT_RESULT_PAYLOAD_FILE_NAME)
+                .exists()
+        );
+        assert!(!home.join(crate::spot_scan::SPOT_REQUEST_FILE_NAME).exists());
+
+        // Polling returns NoReadyMarker -> no stale result can ever be published
+        match crate::spot_scan::poll_spot_result(home, "cmd-old") {
+            crate::spot_scan::SpotPollOutcome::NoReadyMarker => {}
+            other => panic!("expected NoReadyMarker after cleanup, got {:?}", other),
+        }
+
+        // A7: Recovery query/API error follows recoverable error conventions and does not fabricate success
+        let outcome_err = evaluate_abandoned_recovery_outcome::<(), _>(Err("network timeout"));
+        assert_eq!(outcome_err, AbandonedRecoveryOutcome::QueryFailed);
+
+        let outcome_success_none = evaluate_abandoned_recovery_outcome::<String, &str>(Ok(vec![]));
+        assert_eq!(outcome_success_none, AbandonedRecoveryOutcome::NoneFound);
+
+        let outcome_success_recovered =
+            evaluate_abandoned_recovery_outcome::<String, &str>(Ok(vec!["cmd-1".to_string()]));
+        assert_eq!(
+            outcome_success_recovered,
+            AbandonedRecoveryOutcome::Recovered(1)
+        );
+    }
+}

@@ -255,6 +255,12 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
         reconcile_desired_state(acc, &rest, &identity);
     }
 
+    // Recover abandoned running detect-spots commands once on fresh process startup (R5A).
+    // Stale sidecar files were purged in the account loop above before marking abandoned scans failed.
+    if let Err(e) = rest.recover_abandoned_spot_scans(&cfg.device_id) {
+        eprintln!("[recovery] recover_abandoned_spot_scans failed: {e}");
+    }
+
     // Spawn thread realtime.
     let (tx, rx) = mpsc::channel::<CloudEvent>();
     spawn_realtime_thread(
