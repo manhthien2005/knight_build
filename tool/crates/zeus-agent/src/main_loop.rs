@@ -255,10 +255,45 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
         reconcile_desired_state(acc, &rest, &identity);
     }
 
-    // Recover abandoned running detect-spots commands once on fresh process startup (R5A).
-    // Stale sidecar files were purged in the account loop above before marking abandoned scans failed.
-    if let Err(e) = rest.recover_abandoned_spot_scans(&cfg.device_id) {
-        eprintln!("[recovery] recover_abandoned_spot_scans failed: {e}");
+    // Startup Barrier (R5A.1):
+    // Stale sidecar files were purged in the account loop above.
+    // Realtime thread must NOT be spawned and command consumption must NOT begin
+    // until abandoned detect-spots recovery has completed successfully.
+    let max_barrier_attempts = 5;
+    let mut attempt = 1;
+    loop {
+        let recovery_res = rest.recover_abandoned_spot_scans(&cfg.device_id);
+        match crate::supabase_rest::evaluate_startup_barrier_step(
+            &recovery_res,
+            attempt,
+            max_barrier_attempts,
+        ) {
+            crate::supabase_rest::StartupBarrierAction::ProceedToRealtime { recovered_count } => {
+                if recovered_count > 0 {
+                    eprintln!(
+                        "[recovery] startup barrier resolved: {recovered_count} abandoned detect-spots command(s) recovered"
+                    );
+                } else {
+                    eprintln!("[recovery] startup barrier resolved: no abandoned detect-spots commands");
+                }
+                break;
+            }
+            crate::supabase_rest::StartupBarrierAction::Retry { attempt: cur_attempt, max_retries } => {
+                let err_msg = recovery_res.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+                eprintln!(
+                    "[recovery] startup barrier unresolved (attempt {cur_attempt}/{max_retries}): {err_msg}; retrying in 2s"
+                );
+                attempt += 1;
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            crate::supabase_rest::StartupBarrierAction::FatalAbort { attempts_exhausted } => {
+                let err_msg = recovery_res.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+                eprintln!(
+                    "[recovery] FATAL: startup barrier failed after {attempts_exhausted} attempts: {err_msg}; aborting startup"
+                );
+                std::process::exit(1);
+            }
+        }
     }
 
     // Spawn thread realtime.

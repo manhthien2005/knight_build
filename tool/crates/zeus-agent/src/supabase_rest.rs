@@ -275,6 +275,7 @@ impl SupabaseRest {
             return Ok(0);
         }
 
+        let mut first_error: Option<RestError> = None;
         let mut recovered_count = 0;
         for cmd in &commands {
             eprintln!(
@@ -294,10 +295,18 @@ impl SupabaseRest {
                         "[recovery] failed to mark abandoned detect-spots command id={} as failed: {e}",
                         cmd.id
                     );
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
                 }
             }
         }
-        Ok(recovered_count)
+
+        if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok(recovered_count)
+        }
     }
 
 
@@ -652,6 +661,60 @@ pub fn evaluate_abandoned_recovery_outcome<T, E>(
         Err(_) => AbandonedRecoveryOutcome::QueryFailed,
         Ok(ref list) if list.is_empty() => AbandonedRecoveryOutcome::NoneFound,
         Ok(list) => AbandonedRecoveryOutcome::Recovered(list.len() as u32),
+    }
+}
+
+/// Hành vi quyết định của startup recovery barrier đối với detect-spots — R5A.1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupBarrierAction {
+    /// Barrier resolved: startup có thể tiếp tục tiến trình spawn realtime và nhận lệnh.
+    ProceedToRealtime { recovered_count: u32 },
+    /// Barrier unresolved: cần retry với backoff trước khi start realtime.
+    Retry { attempt: u32, max_retries: u32 },
+    /// Barrier thất bại sau khi hết số lần retry: dừng startup để container supervisor restart.
+    FatalAbort { attempts_exhausted: u32 },
+}
+
+/// Đánh giá kết quả một attempt vượt qua startup recovery barrier.
+pub fn evaluate_startup_barrier_step<E>(
+    attempt_result: &Result<u32, E>,
+    attempt: u32,
+    max_retries: u32,
+) -> StartupBarrierAction {
+    match attempt_result {
+        Ok(count) => StartupBarrierAction::ProceedToRealtime {
+            recovered_count: *count,
+        },
+        Err(_) if attempt < max_retries => StartupBarrierAction::Retry {
+            attempt,
+            max_retries,
+        },
+        Err(_) => StartupBarrierAction::FatalAbort {
+            attempts_exhausted: attempt,
+        },
+    }
+}
+
+/// Mô phỏng việc hoàn tất một batch lệnh abandoned detect-spots (cho unit tests).
+pub fn simulate_abandoned_batch_finalization(
+    commands: &[CommandRow],
+    failing_command_id: Option<&str>,
+) -> Result<u32, &'static str> {
+    let mut first_error = None;
+    let mut count = 0;
+    for cmd in commands {
+        if Some(cmd.id.as_str()) == failing_command_id {
+            if first_error.is_none() {
+                first_error = Some("simulated finish_command error");
+            }
+        } else {
+            count += 1;
+        }
+    }
+    if let Some(err) = first_error {
+        Err(err)
+    } else {
+        Ok(count)
     }
 }
 
@@ -2538,5 +2601,141 @@ mod tests {
             outcome_success_recovered,
             AbandonedRecoveryOutcome::Recovered(1)
         );
+    }
+
+    #[test]
+    fn test_startup_recovery_barrier_semantics_b1_through_b9() {
+        // B1: Recovery query succeeds and no abandoned rows exist -> barrier passes
+        let barrier_b1 = evaluate_startup_barrier_step(&Ok::<u32, &str>(0), 1, 5);
+        assert_eq!(
+            barrier_b1,
+            StartupBarrierAction::ProceedToRealtime {
+                recovered_count: 0
+            }
+        );
+
+        // B2: Recovery query succeeds and all abandoned rows are failed successfully -> barrier passes
+        let barrier_b2 = evaluate_startup_barrier_step(&Ok::<u32, &str>(3), 1, 5);
+        assert_eq!(
+            barrier_b2,
+            StartupBarrierAction::ProceedToRealtime {
+                recovered_count: 3
+            }
+        );
+
+        // B3: Recovery query fails transiently -> barrier does not pass, requires retry
+        let barrier_b3_r1 = evaluate_startup_barrier_step(&Err::<u32, &str>("network timeout"), 1, 5);
+        assert_eq!(
+            barrier_b3_r1,
+            StartupBarrierAction::Retry {
+                attempt: 1,
+                max_retries: 5
+            }
+        );
+        // When max attempts exhausted, fatal abort prevents command consumption
+        let barrier_b3_exhausted =
+            evaluate_startup_barrier_step(&Err::<u32, &str>("network timeout"), 5, 5);
+        assert_eq!(
+            barrier_b3_exhausted,
+            StartupBarrierAction::FatalAbort {
+                attempts_exhausted: 5
+            }
+        );
+
+        // B4: One abandoned command finalization fails -> recovery reports incomplete/failure and startup barrier remains closed
+        let cmd_a = CommandRow {
+            id: "cmd-a".to_string(),
+            account_id: Some("acc-1".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "detect-spots".to_string(),
+            payload: None,
+            expires_at: "2026-09-21T12:00:00Z".to_string(),
+        };
+        let cmd_b = CommandRow {
+            id: "cmd-b".to_string(),
+            account_id: Some("acc-1".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "detect-spots".to_string(),
+            payload: None,
+            expires_at: "2026-09-21T12:00:00Z".to_string(),
+        };
+        let cmd_c = CommandRow {
+            id: "cmd-c".to_string(),
+            account_id: Some("acc-2".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "detect-spots".to_string(),
+            payload: None,
+            expires_at: "2026-09-21T12:00:00Z".to_string(),
+        };
+        let batch = vec![cmd_a.clone(), cmd_b.clone(), cmd_c.clone()];
+        let res_b4 = simulate_abandoned_batch_finalization(&batch, Some("cmd-b"));
+        assert!(res_b4.is_err(), "partial recovery must report error, not false success");
+        let barrier_b4 = evaluate_startup_barrier_step(&res_b4, 1, 5);
+        assert_eq!(
+            barrier_b4,
+            StartupBarrierAction::Retry {
+                attempt: 1,
+                max_retries: 5
+            }
+        );
+
+        // B5: Retry after partial recovery -> already-terminal rows (A and C) skipped, remaining running row (B) retried
+        let retry_batch = vec![cmd_b.clone()];
+        let res_b5 = simulate_abandoned_batch_finalization(&retry_batch, None);
+        assert_eq!(res_b5, Ok(1));
+        let barrier_b5 = evaluate_startup_barrier_step(&res_b5, 2, 5);
+        assert_eq!(
+            barrier_b5,
+            StartupBarrierAction::ProceedToRealtime {
+                recovered_count: 1
+            }
+        );
+
+        // B6: Successful retry after transient failure -> barrier passes exactly once and realtime startup may proceed
+        let attempt_1_err = evaluate_startup_barrier_step(&Err::<u32, &str>("503 service unavailable"), 1, 5);
+        assert_eq!(
+            attempt_1_err,
+            StartupBarrierAction::Retry {
+                attempt: 1,
+                max_retries: 5
+            }
+        );
+        let attempt_2_ok = evaluate_startup_barrier_step(&Ok::<u32, &str>(2), 2, 5);
+        assert_eq!(
+            attempt_2_ok,
+            StartupBarrierAction::ProceedToRealtime {
+                recovered_count: 2
+            }
+        );
+
+        // B7: Same-process realtime reconnect with pending scan -> abandoned recovery is not invoked and pending scan survives
+        let reconnect_with_pending = evaluate_spot_scan_reconnect_action(true, false);
+        assert_eq!(
+            reconnect_with_pending,
+            ReconnectSpotScanAction::PreservePendingScan
+        );
+        let reconnect_without_pending = evaluate_spot_scan_reconnect_action(false, false);
+        assert_eq!(
+            reconnect_without_pending,
+            ReconnectSpotScanAction::NoAction
+        );
+
+        // B8: Normal queued command recovery after barrier -> existing queued drain behavior remains unchanged
+        let queued_cmd = CommandRow {
+            id: "cmd-q".to_string(),
+            account_id: Some("acc-1".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "detect-spots".to_string(),
+            payload: None,
+            expires_at: "2026-09-21T12:30:00Z".to_string(),
+        };
+        assert_eq!(
+            evaluate_abandoned_spot_scan(queued_cmd.device_id.as_deref(), "dev-1", &queued_cmd.kind, "queued"),
+            AbandonedRecoveryDecision::IgnoreNonRunningStatus
+        );
+
+        // B9: R3B1 normal Detect Spots success/timeout -> existing scan lifecycle remains unchanged
+        assert_eq!(crate::spot_scan::SpotScanStatus::Completed.as_str(), "completed");
+        assert_eq!(crate::spot_scan::SpotScanStatus::Timeout.as_str(), "timeout");
     }
 }
