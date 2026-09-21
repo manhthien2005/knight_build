@@ -43,6 +43,10 @@ mod supabase_realtime;
 #[allow(dead_code)]
 mod pairing;
 
+/// Detect spots command and sidecar protocol (R3B1). Cross-platform.
+#[allow(dead_code)]
+mod spot_scan;
+
 /// Main loop — B5+B6+B7+B8 (AGENT-SPEC §4.2).
 /// unix-only: reads /proc, /sys/fs/cgroup, runs ss, calls waitpid.
 #[cfg(unix)]

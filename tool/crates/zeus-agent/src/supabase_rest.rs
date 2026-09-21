@@ -192,6 +192,16 @@ impl SupabaseRest {
         Ok(())
     }
 
+    /// Cập nhật command sang trạng thái `running` khi bắt đầu xử lý lệnh kéo dài (như detect-spots).
+    pub fn mark_command_running(&self, command_id: &str) -> Result<(), RestError> {
+        self.request("PATCH", &format!("/rest/v1/commands?id=eq.{command_id}"))
+            .prefer("return=minimal")
+            .send_json(serde_json::json!({
+                "status": CommandStatus::Running.as_str(),
+            }))?;
+        Ok(())
+    }
+
     /// Drain hàng đợi. Gọi lúc boot **và sau mỗi lần reconnect** — realtime có thể đã miss
     /// event trong lúc đứt, và một command queued không được thấy là một command không bao giờ
     /// chạy.

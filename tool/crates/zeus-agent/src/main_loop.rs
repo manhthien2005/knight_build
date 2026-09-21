@@ -122,6 +122,10 @@ struct AccountState {
     restarts: u32,
     /// Cờ đánh dấu account đã bị xóa trên cloud và đang trong quá trình dừng JVM an toàn.
     retiring: bool,
+    /// Pending Detect Spots scan, if any.
+    pending_spot_scan: Option<crate::spot_scan::PendingSpotScan>,
+    /// Retained latest Detect Spots scan result.
+    last_spot_scan: Option<crate::spot_scan::RetainedSpotScan>,
 }
 
 /// Cấu hình môi trường agent. Đọc từ biến môi trường lúc boot.
@@ -244,6 +248,7 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
         // Dọn sạch snapshot/control rác của phiên trước — Issue #82
         let paths = AccountPaths::for_slot(acc.slot_index);
         let _ = clear_snapshot(&paths.home);
+        crate::spot_scan::clean_spot_files(&paths.home);
         // prepare_directories trước khi spawn — Issue #16
         let _ = crate::launch::prepare_directories(&paths);
         try_apply_config(acc, jar_ctl_version, &rest);
@@ -312,8 +317,8 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
             }
         }
 
-        // ── receive realtime event (với timeout 1s) ───────────────────────
-        match rx.recv_timeout(Duration::from_secs(1)) {
+        // ── receive realtime event (với timeout 250ms để poll sidecar nhạy) ──────
+        match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(event) => handle_cloud_event(
                 event,
                 &mut accounts,
@@ -337,6 +342,9 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
                 );
             }
         }
+
+        // ── poll pending spot scans (non-blocking) ─────────────────────────
+        poll_pending_spot_scans(&mut accounts, &rest);
 
         let now = Instant::now();
 
@@ -522,6 +530,7 @@ fn handle_cloud_event(
                 let paths = AccountPaths::for_slot(acc.slot_index);
                 let _ = crate::launch::prepare_directories(&paths);
                 let _ = clear_snapshot(&paths.home);
+                crate::spot_scan::clean_spot_files(&paths.home);
                 let mut acc = acc;
                 try_apply_config(&mut acc, jar_ctl_version, rest);
                 reconcile_desired_state(&mut acc, rest, identity);
@@ -1070,6 +1079,77 @@ fn dispatch_command(
                 eprintln!("[command] finish_command failed: {e}");
             }
         }
+        "detect-spots" => {
+            // 1. JVM/process phải đang chạy
+            let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+            if !is_alive {
+                eprintln!("[command] detect-spots: account {account_id} JVM is not running");
+                if let Err(e) = rest.finish_command(
+                    &cmd.id,
+                    CommandStatus::Failed,
+                    Some("account process is not running"),
+                ) {
+                    eprintln!("[command] finish_command failed: {e}");
+                }
+                return;
+            }
+
+            // 2. Reject nếu đã có scan đang pending
+            if let Err(msg) = crate::spot_scan::can_accept_spot_scan(&acc.pending_spot_scan) {
+                eprintln!("[command] detect-spots: account {account_id} already has pending scan");
+                if let Err(e) = rest.finish_command(
+                    &cmd.id,
+                    CommandStatus::Failed,
+                    Some(msg),
+                ) {
+                    eprintln!("[command] finish_command failed: {e}");
+                }
+                return;
+            }
+
+            // 3. Mark command running trên database
+            let _ = rest.mark_command_running(&cmd.id);
+
+            // 4. Dọn stale request/payload/ready files của riêng account này
+            let paths = AccountPaths::for_slot(acc.slot_index);
+            crate::spot_scan::clean_spot_files(&paths.home);
+
+            // 5. Ghi zeus-spot.req
+            let scan_id = cmd.id.clone();
+            let now_rfc = crate::supabase_rest::now_rfc3339();
+            if let Err(e) = crate::spot_scan::write_spot_request_file(&paths.home, &scan_id, Some(&now_rfc)) {
+                eprintln!("[command] detect-spots: write_spot_request_file failed: {e}");
+                if let Err(fe) = rest.finish_command(
+                    &cmd.id,
+                    CommandStatus::Failed,
+                    Some("failed to write spot request file"),
+                ) {
+                    eprintln!("[command] finish_command failed: {fe}");
+                }
+                return;
+            }
+
+            // 6. Lưu PendingSpotScan vào AccountState
+            acc.pending_spot_scan = Some(crate::spot_scan::PendingSpotScan {
+                scan_id: scan_id.clone(),
+                command_id: cmd.id.clone(),
+                started_at: Instant::now(),
+            });
+
+            // 7. Cập nhật last_spot_scan sang pending để publish telemetry
+            acc.last_spot_scan = Some(crate::spot_scan::RetainedSpotScan {
+                scan_id,
+                status: crate::spot_scan::SpotScanStatus::Pending,
+                detected_at: Some(now_rfc),
+                completed_at: None,
+                map_id: None,
+                captured_zone: None,
+                candidates: None,
+            });
+
+            // 8. Publish telemetry snapshot ngay lập tức
+            push_account_runtime_telemetry(acc, rest);
+        }
         other => {
             eprintln!("[command] unknown command type: {other}");
             if let Err(e) = rest.finish_command(
@@ -1078,6 +1158,155 @@ fn dispatch_command(
                 Some(&format!("unknown command type: {other}")),
             ) {
                 eprintln!("[command] finish_command failed: {e}");
+            }
+        }
+    }
+}
+
+// ── detect spots sidecar polling & immediate telemetry ────────────────────────
+
+#[cfg(unix)]
+fn push_account_runtime_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
+    let paths = AccountPaths::for_slot(acc.slot_index);
+    let now = crate::supabase_rest::now_rfc3339();
+    let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+    let process_state = if is_alive { "running" } else { "stopped" };
+
+    let mut snap_json = read_snapshot_as_json(&paths.snapshot_file())
+        .or_else(|| acc.last_snapshot.clone())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let current_map = snap_json.get("map").and_then(|v| v.as_u64()).map(|v| v as u8);
+    crate::spot_scan::merge_spot_scan_into_snapshot(
+        &mut snap_json,
+        &acc.last_spot_scan,
+        current_map,
+        Instant::now(),
+    );
+
+    let pid = acc.process.as_ref().map(|p| p.pid);
+    acc.last_snapshot = Some(snap_json.clone());
+    acc.last_telemetry_push = Instant::now();
+
+    if let Err(e) = rest.push_runtime(
+        &acc.id,
+        &RuntimePayload {
+            process_state: process_state.into(),
+            pid,
+            ram_mb: None,
+            cpu_pct: None,
+            snapshot_version: Some(SUPPORTED_VERSION as u32),
+            snapshot: Some(snap_json),
+            restarts: Some(acc.restarts),
+            updated_at: now,
+        },
+    ) {
+        eprintln!("[telemetry] account={} immediate push_runtime failed: {e}", acc.id);
+    }
+}
+
+#[cfg(unix)]
+fn poll_pending_spot_scans(
+    accounts: &mut HashMap<String, AccountState>,
+    rest: &SupabaseRest,
+) {
+    let now = Instant::now();
+    for acc in accounts.values_mut() {
+        let pending = match acc.pending_spot_scan.take() {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let paths = AccountPaths::for_slot(acc.slot_index);
+
+        if crate::spot_scan::is_pending_scan_timed_out(&pending, now) {
+            eprintln!(
+                "[spot_scan] account {} scan {} timed out after {}s",
+                acc.id, pending.scan_id, crate::spot_scan::SPOT_SCAN_TIMEOUT_SECS
+            );
+            crate::spot_scan::clean_spot_files(&paths.home);
+            acc.last_spot_scan = Some(crate::spot_scan::RetainedSpotScan {
+                scan_id: pending.scan_id.clone(),
+                status: crate::spot_scan::SpotScanStatus::Timeout,
+                detected_at: None,
+                completed_at: Some(now),
+                map_id: None,
+                captured_zone: None,
+                candidates: None,
+            });
+            if let Err(e) = rest.finish_command(
+                &pending.command_id,
+                CommandStatus::Failed,
+                Some("detect-spots scan timed out waiting for JVM result"),
+            ) {
+                eprintln!("[spot_scan] finish_command (timeout) failed: {e}");
+            }
+            push_account_runtime_telemetry(acc, rest);
+            continue;
+        }
+
+        match crate::spot_scan::poll_spot_result(&paths.home, &pending.scan_id) {
+            crate::spot_scan::SpotPollOutcome::NoReadyMarker => {
+                acc.pending_spot_scan = Some(pending);
+            }
+            crate::spot_scan::SpotPollOutcome::Success(result) => {
+                eprintln!(
+                    "[spot_scan] account {} scan {} succeeded: map={} zone={} candidates={}",
+                    acc.id, result.scan_id, result.map_id, result.captured_zone, result.candidates.len()
+                );
+                crate::spot_scan::clean_spot_files(&paths.home);
+
+                let is_empty = result.candidates.is_empty();
+                let status = if is_empty {
+                    crate::spot_scan::SpotScanStatus::Empty
+                } else {
+                    crate::spot_scan::SpotScanStatus::Completed
+                };
+
+                acc.last_spot_scan = Some(crate::spot_scan::RetainedSpotScan {
+                    scan_id: result.scan_id.clone(),
+                    status,
+                    detected_at: Some(crate::supabase_rest::now_rfc3339()),
+                    completed_at: Some(now),
+                    map_id: Some(result.map_id),
+                    captured_zone: Some(result.captured_zone),
+                    candidates: Some(result.candidates),
+                });
+
+                if let Err(e) = rest.finish_command(
+                    &pending.command_id,
+                    CommandStatus::Success,
+                    None,
+                ) {
+                    eprintln!("[spot_scan] finish_command (success) failed: {e}");
+                }
+                push_account_runtime_telemetry(acc, rest);
+            }
+            crate::spot_scan::SpotPollOutcome::InvalidPayload(err_msg) => {
+                eprintln!(
+                    "[spot_scan] account {} scan {} invalid payload: {err_msg}",
+                    acc.id, pending.scan_id
+                );
+                crate::spot_scan::clean_spot_files(&paths.home);
+
+                acc.last_spot_scan = Some(crate::spot_scan::RetainedSpotScan {
+                    scan_id: pending.scan_id.clone(),
+                    status: crate::spot_scan::SpotScanStatus::Error,
+                    detected_at: None,
+                    completed_at: Some(now),
+                    map_id: None,
+                    captured_zone: None,
+                    candidates: None,
+                });
+
+                if let Err(e) = rest.finish_command(
+                    &pending.command_id,
+                    CommandStatus::Failed,
+                    Some(&format!("invalid spot scan result: {err_msg}")),
+                ) {
+                    eprintln!("[spot_scan] finish_command (error) failed: {e}");
+                }
+                push_account_runtime_telemetry(acc, rest);
             }
         }
     }
@@ -1118,10 +1347,25 @@ fn tick_snapshot_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
     }
 
     // Single-pass I/O: đọc file một lần, vừa validate vừa parse — Issue #106
-    let snap_json = match read_snapshot_as_json(&paths.snapshot_file()) {
+    let mut snap_json = match read_snapshot_as_json(&paths.snapshot_file()) {
         Some(v) => v,
         None => return, // snapshot chưa được publish (trước khi char vào game)
     };
+
+    let current_map = snap_json.get("map").and_then(|v| v.as_u64()).map(|v| v as u8);
+    crate::spot_scan::merge_spot_scan_into_snapshot(
+        &mut snap_json,
+        &acc.last_spot_scan,
+        current_map,
+        Instant::now(),
+    );
+
+    // Prune retained spot_scan if it has expired or map has changed
+    if let Some(ref scan) = acc.last_spot_scan {
+        if !crate::spot_scan::is_valid_retained_scan(scan, current_map, Instant::now()) {
+            acc.last_spot_scan = None;
+        }
+    }
 
     // B6.2: chỉ push khi thay đổi có nghĩa.
     if !has_meaningful_change(&acc.last_snapshot, &snap_json) {
@@ -1149,7 +1393,7 @@ fn tick_snapshot_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
     }
 }
 
-/// Thay đổi có nghĩa — Issues #55: bổ sung state, map, zone, quota, dungeonstate, enhancedone
+/// Thay đổi có nghĩa — Issues #55: bổ sung state, map, zone, quota, dungeonstate, enhancedone, spot_scan
 #[cfg(unix)]
 fn has_meaningful_change(old: &Option<serde_json::Value>, new: &serde_json::Value) -> bool {
     let old = match old {
@@ -1157,7 +1401,7 @@ fn has_meaningful_change(old: &Option<serde_json::Value>, new: &serde_json::Valu
         Some(v) => v,
     };
     // So sánh các field quan trọng — Issue #55
-    for key in ["ctl", "atkstate", "stuck", "lv", "state", "map", "zone", "quota", "dungeonstate", "enhancedone"] {
+    for key in ["ctl", "atkstate", "stuck", "lv", "state", "map", "zone", "quota", "dungeonstate", "enhancedone", "spot_scan"] {
         if old.get(key) != new.get(key) {
             return true;
         }
@@ -1244,7 +1488,14 @@ fn tick_heartbeat(
     for acc in accounts.values_mut() {
         let paths = AccountPaths::for_slot(acc.slot_index);
         // Force re-read snapshot từ đĩa để đồng bộ XP/gold — Issue #54
-        if let Some(snap_json) = read_snapshot_as_json(&paths.snapshot_file()) {
+        if let Some(mut snap_json) = read_snapshot_as_json(&paths.snapshot_file()) {
+            let current_map = snap_json.get("map").and_then(|v| v.as_u64()).map(|v| v as u8);
+            crate::spot_scan::merge_spot_scan_into_snapshot(
+                &mut snap_json,
+                &acc.last_spot_scan,
+                current_map,
+                Instant::now(),
+            );
             acc.last_snapshot = Some(snap_json.clone());
             let pid = acc.process.as_ref().map(|p| p.pid);
             let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
@@ -1524,6 +1775,8 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
                 last_telemetry_push: Instant::now(),
                 restarts: 0,
                 retiring: false,
+                pending_spot_scan: None,
+                last_spot_scan: None,
             };
             (id, state)
         })
@@ -1553,6 +1806,8 @@ fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountS
         last_telemetry_push: Instant::now(),
         restarts: 0,
         retiring: false,
+        pending_spot_scan: None,
+        last_spot_scan: None,
     })
 }
 
@@ -1596,6 +1851,7 @@ fn merge_account_states(
             let paths = AccountPaths::for_slot(fresh_acc.slot_index);
             let _ = crate::launch::prepare_directories(&paths);
             let _ = clear_snapshot(&paths.home);
+            crate::spot_scan::clean_spot_files(&paths.home);
             let mut acc = fresh_acc;
             try_apply_config(&mut acc, jar_ctl_version, rest);
             reconcile_desired_state(&mut acc, rest, identity);

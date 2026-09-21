@@ -75,6 +75,15 @@ impl AccountPaths {
     pub fn potato_file(&self) -> PathBuf {
         self.home.join(POTATO_FILE_NAME)
     }
+    pub fn spot_request_file(&self) -> PathBuf {
+        self.home.join(crate::spot_scan::SPOT_REQUEST_FILE_NAME)
+    }
+    pub fn spot_result_payload_file(&self) -> PathBuf {
+        self.home.join(crate::spot_scan::SPOT_RESULT_PAYLOAD_FILE_NAME)
+    }
+    pub fn spot_result_ready_file(&self) -> PathBuf {
+        self.home.join(crate::spot_scan::SPOT_RESULT_READY_FILE_NAME)
+    }
 }
 
 /// Heap and GC settings. Defaults are the ones measured in `docker-build/README.md`.
