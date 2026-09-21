@@ -679,6 +679,7 @@ public final class Zeus {
             }
         }
 
+        int prevGoal = goal();
         // A new spot means walk to it, whatever state the fight was in. atkState starts at FIGHTING
         // and only became TO_SPOT after drifting too far, so arming auto for the first time fought
         // wherever the character happened to stand — the recorded spot was never approached at all.
@@ -781,7 +782,10 @@ public final class Zeus {
         // new one.
         if (value[K_NAVTARGET] != navTarget) {
             navTarget = value[K_NAVTARGET];
-            navReset();
+            navDone = false;
+        }
+        if (goal() != prevGoal) {
+            travelReset();
         }
         ringOn = value[K_RING] == 1;
         atkFarmOnArrival = value[K_FARM] == 1;
@@ -3152,8 +3156,16 @@ public final class Zeus {
         travelReset();
     }
 
+    /** True when Auto Farm is armed with a valid attack spot. */
+    private static boolean autoFarmActive() {
+        return (atkMode == 1 || atkMode == 2) && atkX >= 0 && atkY >= 0 && atkMap >= 0;
+    }
+
     /** The destination in force, or -1 when the walker has nowhere to be. */
     private static int goal() {
+        if (atkMode != 0) {
+            return autoFarmActive() ? atkMap : -1;
+        }
         return navDone ? -1 : navTarget;
     }
 
@@ -3237,9 +3249,12 @@ public final class Zeus {
                     trace("TRAVEL arrived at map " + here + " in " + travelHops + " hops");
                     // A named destination is a one-shot errand: latch it, or the walker keeps dragging
                     // the character back every time the operator moves on.
-                    if (navTarget == here) {
+                    if (atkMode == 0 && navTarget == here) {
                         navDone = true;
                         trace("NAV arrived at map " + here + ", switching itself off");
+                    }
+                    if (autoFarmActive()) {
+                        atkState = TO_SPOT;
                     }
                 }
                 return;
