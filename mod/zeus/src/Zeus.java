@@ -50,6 +50,18 @@ public final class Zeus {
     }
 
     private static boolean armed = false;   // one-shot per char-select visit
+    private static final int AUTH_RETRY_INTERVAL_TICKS = 75; // 3.0s at 25 t/s
+    private static final int AUTH_MAX_ATTEMPTS = 3;
+    private static int authAttempts = 0;
+    private static int authWaitTicks = 0;
+    private static boolean authExhaustedTraced = false;
+
+    public static void authReset() {
+        armed = false;
+        authAttempts = 0;
+        authWaitTicks = 0;
+        authExhaustedTraced = false;
+    }
 
     /** Called at the end of fu.b() every tick. */
     public static void tick() {
@@ -116,18 +128,33 @@ public final class Zeus {
     private static void auth() {
         try {
             if (fu.a == fu.i) {
-                // Character-select screen. Enter the configured slot once.
-                if (!armed) {
+                // Character-select screen. Bounded retry to prevent permanent stalls.
+                if (authAttempts == 0) {
                     // x.k is private in vanilla; PatchZeus widens it to public.
                     // Access through the live screen instance fu.i.
                     fu.i.k = clampSlot(slot());
                     // ah.k makes x.a() select the slot and enter the game.
                     ah.k = true;
                     armed = true;
+                    authAttempts = 1;
+                    authWaitTicks = 0;
+                } else if (authAttempts < AUTH_MAX_ATTEMPTS) {
+                    if (++authWaitTicks >= AUTH_RETRY_INTERVAL_TICKS) {
+                        authWaitTicks = 0;
+                        ++authAttempts;
+                        fu.i.k = clampSlot(slot());
+                        ah.k = true;
+                        trace("AUTH retry character select slot=" + fu.i.k + " attempt=" + authAttempts);
+                    }
+                } else {
+                    if (!authExhaustedTraced) {
+                        authExhaustedTraced = true;
+                        trace("AUTH character select retry exhausted attempts=" + authAttempts);
+                    }
                 }
             } else if (fu.a != fu.i) {
                 // Any other screen: re-arm for the next visit.
-                armed = false;
+                authReset();
             }
         } catch (Throwable t) {
             // Never let a mod failure stall the client tick.
@@ -3125,6 +3152,22 @@ public final class Zeus {
     private static int readySettleTicks = 0;
     private static int lastScreenId = -1;
 
+    /** Map stability gate for travel/routing (10 ticks = 400ms at 25t/s). */
+    private static final int MAP_STABLE_TICKS = 10;
+    private static int stableMapId = -1;
+    private static int mapStableTicks = 0;
+
+    /** True when the client has observed one stable authoritative map for the consecutive threshold. */
+    public static boolean mapStable() {
+        return inGame() && sceneReady() && fu.q != null && fu.q.d >= 0
+                && fu.q.d == stableMapId && mapStableTicks >= MAP_STABLE_TICKS;
+    }
+
+    public static void mapStableReset() {
+        stableMapId = -1;
+        mapStableTicks = 0;
+    }
+
     /**
      * Internal game-readiness gate.
      * Prevents automation from resuming during login, loading, or dialog settling.
@@ -3147,6 +3190,9 @@ public final class Zeus {
         dialogStableTicks = 0;
         dialogTries = 0;
         dialogLastTracedFingerprint = "";
+        authReset();
+        mapStableReset();
+        navSessionReset();
     }
 
     private static void sessionTick() {
@@ -3161,8 +3207,22 @@ public final class Zeus {
             if (readySettleTicks < GAME_READY_SETTLE_TICKS) {
                 ++readySettleTicks;
             }
+            if (fu.q != null && fu.q.d >= 0) {
+                int curMap = fu.q.d;
+                if (curMap == stableMapId) {
+                    if (mapStableTicks < MAP_STABLE_TICKS) {
+                        ++mapStableTicks;
+                    }
+                } else {
+                    stableMapId = curMap;
+                    mapStableTicks = 1;
+                }
+            } else {
+                mapStableReset();
+            }
         } else {
             readySettleTicks = 0;
+            mapStableReset();
         }
     }
 
@@ -3343,6 +3403,32 @@ public final class Zeus {
         return navDone ? -1 : navTarget;
     }
 
+    /**
+     * Resets session-local travel, movement lock, and path buffers on a new world session.
+     * Preserves durable control settings (atkMap/X/Y, atkMode, atkFarmOnArrival, navTarget, navDone).
+     */
+    public static void navSessionReset() {
+        travelMapSeen = Integer.MIN_VALUE;
+        travelHops = 0;
+        travelStoneTried = 0;
+        travelStoneGaveUp = false;
+        travelStoneAsked = -1;
+        travelMenu = null;
+        travelMenuNpc = Integer.MIN_VALUE;
+        travelMazeKnown = false;
+        travelMazeAt = 0;
+        travelStallTicks = 0;
+        travelLastX = Integer.MIN_VALUE;
+        travelLastY = Integer.MIN_VALUE;
+        travelWait = 0;
+        travelWhy = 0;
+        travelState = (goal() >= 0) ? TV_IDLE : TV_OFF;
+        bq.m = false;
+        if (cn.g != null) {
+            cn.g.cO = null;
+        }
+    }
+
     private static void travelReset() {
         travelState = goal() >= 0 ? TV_IDLE : TV_OFF;
         travelWait = 0;
@@ -3383,14 +3469,15 @@ public final class Zeus {
             }
             // Deliberately NOT ready(): that requires no dialog, and an open menu is exactly the
             // state a stone reply arrives in. Gating on it here would deadlock — the menu blocks
-            // travel, and only travel closes the menu.
-            if (travelState != TV_STONE_WAIT && !gameReady()) {
+            // travel, and only travel closes the menu. Route decisions additionally require mapStable().
+            if (travelState != TV_STONE_WAIT && (!gameReady() || !mapStable())) {
                 return;
             }
             int here = fu.q.d;
             if (here != travelMapSeen) {
                 // A new map resets the per-map attempts, and counts a hop. The hop cap is what
                 // stops a two-map loop from running until the operator notices.
+                boolean isInitialSessionMap = (travelMapSeen == Integer.MIN_VALUE);
                 travelMapSeen = here;
                 travelStoneTried = 0;
                 travelStoneGaveUp = false;
@@ -3408,7 +3495,7 @@ public final class Zeus {
                 if (cn.g != null) {
                     cn.g.cO = null;
                 }
-                if (travelState != TV_OFF && travelState != TV_ARRIVED) {
+                if (!isInitialSessionMap && travelState != TV_OFF && travelState != TV_ARRIVED) {
                     ++travelHops;
                 }
                 travelWait = 12;    // let the scene settle before reading it
