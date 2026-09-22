@@ -54,10 +54,13 @@ public final class Zeus {
     /** Called at the end of fu.b() every tick. */
     public static void tick() {
         if (fu.a == null) {
+            sessionReset();
             return;
         }
+        sessionTick();
         auth();
         control();
+        dialogRecovery();
         travel();
         // ---- ENHANCE ----------------------------------------------------------
         // After travel() and before drops(): like travel it walks to an NPC and drives a menu,
@@ -3107,6 +3110,177 @@ public final class Zeus {
         return inGame() && sceneReady() && alive() && noDialog() && !captcha();
     }
 
+    // ---- GAME READY & SESSION LIFECYCLE ---------------------------------------
+
+    private static final int DIALOG_DEBOUNCE_TICKS = 3;
+    private static final int DIALOG_MAX_TRIES = 3;
+
+    private static String dialogLastFingerprint = "";
+    private static int dialogStableTicks = 0;
+    private static int dialogTries = 0;
+    private static String dialogLastTracedFingerprint = "";
+
+    /** Settle ticks required in-world before gameReady() becomes true (10 ticks = 400ms at 25t/s). */
+    private static final int GAME_READY_SETTLE_TICKS = 10;
+    private static int readySettleTicks = 0;
+    private static int lastScreenId = -1;
+
+    /**
+     * Internal game-readiness gate.
+     * Prevents automation from resuming during login, loading, or dialog settling.
+     */
+    public static boolean gameReady() {
+        if (!inGame() || !sceneReady() || !alive() || captcha() || !noDialog()
+                || cn.g == null || cn.g.cx < 0 || cn.g.cy < 0 || fu.q == null || fu.q.d < 0) {
+            return false;
+        }
+        return readySettleTicks >= GAME_READY_SETTLE_TICKS;
+    }
+
+    /**
+     * Resets session-local settling and dialog recovery state.
+     * Called on character-select / world entry transitions.
+     */
+    public static void sessionReset() {
+        readySettleTicks = 0;
+        dialogLastFingerprint = "";
+        dialogStableTicks = 0;
+        dialogTries = 0;
+        dialogLastTracedFingerprint = "";
+    }
+
+    private static void sessionTick() {
+        int screenId = (fu.a == null) ? -1 : ((fu.a == fu.i) ? 1 : ((fu.a == fu.c) ? 2 : 0));
+        if (screenId != lastScreenId) {
+            if (screenId == 1 || screenId == 2) {
+                sessionReset();
+            }
+            lastScreenId = screenId;
+        }
+        if (inGame() && sceneReady()) {
+            if (readySettleTicks < GAME_READY_SETTLE_TICKS) {
+                ++readySettleTicks;
+            }
+        } else {
+            readySettleTicks = 0;
+        }
+    }
+
+    /**
+     * Strict allowlist for harmless informational server notices and announcements.
+     * Transport/disconnect dialogs and specialized material drop dialogs are excluded.
+     */
+    private static boolean isAllowlistedInformational(String text) {
+        if (text == null || text.length() == 0) {
+            return false;
+        }
+        if (text.indexOf("mat ket noi") >= 0 || text.indexOf("ket noi that bai") >= 0
+                || text.indexOf("vui long dang nhap lai") >= 0) {
+            return false;
+        }
+        if (text.indexOf("chuc nang rot") >= 0 || text.indexOf("nguyen lieu me day") >= 0) {
+            return false;
+        }
+        if (text.indexOf("thong bao") >= 0
+                || text.indexOf("chao mung") >= 0
+                || text.indexOf("su kien") >= 0
+                || text.indexOf("chuc cac hiep si") >= 0
+                || text.indexOf("tips:") >= 0
+                || text.indexOf("huong dan") >= 0) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Validates that the dialog has exactly one button and that it is an acknowledge/close button.
+     * Never confirms single buttons with "Đồng ý" (dong y) or multi-button choice dialogs.
+     */
+    private static bt findDismissButton(et buttons) {
+        if (buttons == null || buttons.c() != 1) {
+            return null;
+        }
+        Object entry = buttons.a(0);
+        if (!(entry instanceof bt)) {
+            return null;
+        }
+        bt btn = (bt) entry;
+        String cap = norm(btn.a).trim();
+        if (cap.equals("dong") || cap.equals("ok") || cap.equals("dong tab nay")
+                || cap.equals("tro ve") || cap.equals("da hieu")) {
+            return btn;
+        }
+        return null;
+    }
+
+    /**
+     * Dedicated safe dialog recovery path. Runs ahead of normal automation readiness checks.
+     * Safe informational dialogs are debounced and dismissed via their close button.
+     * Unknown or dangerous dialogs fail closed, remain untouched, and emit deduplicated trace evidence.
+     */
+    private static void dialogRecovery() {
+        if (fu.s == null) {
+            if (dialogStableTicks > 0 || dialogLastFingerprint.length() > 0) {
+                dialogLastFingerprint = "";
+                dialogStableTicks = 0;
+                dialogTries = 0;
+            }
+            return;
+        }
+        if (!(fu.s instanceof ah)) {
+            return;
+        }
+        ah dialog = (ah) fu.s;
+        String rawText = dialogText(dialog);
+        String text = norm(rawText);
+        et buttons = dialog.C;
+        int btnCount = (buttons != null) ? buttons.c() : 0;
+
+        String fingerprint = text + "|" + btnCount;
+        if (fingerprint.equals(dialogLastFingerprint)) {
+            ++dialogStableTicks;
+        } else {
+            dialogLastFingerprint = fingerprint;
+            dialogStableTicks = 1;
+            dialogTries = 0;
+        }
+
+        // Bounded debounce: require dialog identity/state stability before acting
+        if (dialogStableTicks < DIALOG_DEBOUNCE_TICKS) {
+            return;
+        }
+
+        boolean allowlisted = isAllowlistedInformational(text);
+        bt dismissBtn = allowlisted ? findDismissButton(buttons) : null;
+
+        if (dismissBtn != null) {
+            if (dialogTries < DIALOG_MAX_TRIES) {
+                ++dialogTries;
+                trace("DIALOG dismissed try=" + dialogTries + " text=" + clean(text));
+                dismissBtn.a();
+            }
+        } else {
+            // Unknown or non-dismissible dialog: fail closed and emit deduplicated diagnostic trace
+            if (!fingerprint.equals(dialogLastTracedFingerprint)) {
+                dialogLastTracedFingerprint = fingerprint;
+                StringBuffer caps = new StringBuffer();
+                if (buttons != null) {
+                    for (int i = 0; i < buttons.c(); i++) {
+                        Object b = buttons.a(i);
+                        if (b instanceof bt) {
+                            if (caps.length() > 0) caps.append(',');
+                            caps.append(clean(((bt) b).a));
+                        }
+                    }
+                }
+                trace("DIALOG unresolved class=" + dialog.getClass().getName()
+                        + " buttons=" + btnCount
+                        + " captions=[" + caps.toString() + "]"
+                        + " text=" + clean(text));
+            }
+        }
+    }
+
     // ---- TRAVEL ---------------------------------------------------------------
     //
     // Gets the character to the anchor's map. Two moves only, and the probe of 2026-09-03
@@ -3210,7 +3384,7 @@ public final class Zeus {
             // Deliberately NOT ready(): that requires no dialog, and an open menu is exactly the
             // state a stone reply arrives in. Gating on it here would deadlock — the menu blocks
             // travel, and only travel closes the menu.
-            if (travelState != TV_STONE_WAIT && !noDialog()) {
+            if (travelState != TV_STONE_WAIT && !gameReady()) {
                 return;
             }
             int here = fu.q.d;
@@ -4572,7 +4746,7 @@ public final class Zeus {
                 combatOff();
                 return;
             }
-            if (!ready() || cn.g == null) {
+            if (!gameReady() || cn.g == null) {
                 return;             // keep the intent; just do nothing this tick
             }
             // A different map is out of scope this round: the character stays put rather
@@ -5138,7 +5312,7 @@ public final class Zeus {
 
     private static void items() {
         try {
-            if (!ready()) {
+            if (!gameReady()) {
                 return;
             }
             medalDialog();
