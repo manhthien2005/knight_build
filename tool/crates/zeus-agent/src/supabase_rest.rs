@@ -111,17 +111,27 @@ impl SupabaseRest {
     ///
     /// Nguồn là `/opt/knight/game/zeus-jar.json` — **không parse bytecode**. Build script đã
     /// biết các con số; đọc lại từ class file là tự tạo thêm một nguồn có thể sai.
+    /// Tạo payload PATCH cho devices lúc boot, công bố contract và version.
+    pub fn build_device_patch_payload(manifest: &JarManifest) -> serde_json::Value {
+        serde_json::json!({
+            "jar_sha256": manifest.jar_sha256,
+            "jar_ctl_version": manifest.ctl_version,
+            "jar_snapshot_version": manifest.snapshot_version,
+            "jar_ctl_key_count": manifest.ctl_key_count,
+            "agent_version": manifest.advertised_agent_version(),
+            "status": "online",
+        })
+    }
+
+    /// Công bố hợp đồng jar lúc boot. Web đọc hai cột version này để quyết định render form
+    /// nào; agent đọc chúng để quyết định có được ghi control file hay không.
+    ///
+    /// Nguồn là `/opt/knight/game/zeus-jar.json` — **không parse bytecode**. Build script đã
+    /// biết các con số; đọc lại từ class file là tự tạo thêm một nguồn có thể sai.
     pub fn announce_jar_contract(&self, device_id: &str, manifest: &JarManifest) -> Result<(), RestError> {
         self.request("PATCH", &format!("/rest/v1/devices?id=eq.{device_id}"))
             .prefer("return=minimal")
-            .send_json(serde_json::json!({
-                "jar_sha256": manifest.jar_sha256,
-                "jar_ctl_version": manifest.ctl_version,
-                "jar_snapshot_version": manifest.snapshot_version,
-                "jar_ctl_key_count": manifest.ctl_key_count,
-                "agent_version": manifest.agent_version,
-                "status": "online",
-            }))?;
+            .send_json(Self::build_device_patch_payload(manifest))?;
         Ok(())
     }
 
@@ -455,6 +465,64 @@ pub struct JarManifest {
     /// `#[serde(default)]` để không fail khi field này vắng mặt trong zeus-jar.json — Issue #09.
     #[serde(default)]
     pub agent_version: String,
+}
+
+impl JarManifest {
+    pub const CHARACTER_SLOT_CAPABILITY_TOKEN: &'static str = "character-slot-v1";
+    pub const CHARACTER_SLOT_COMPATIBLE_JAR_SHA256: &'static str =
+        "0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd";
+
+    pub fn read_from_file(path: &str) -> Option<Self> {
+        let data = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&data).ok()
+    }
+
+    pub fn is_character_slot_compatible(&self) -> bool {
+        self.jar_sha256 == Self::CHARACTER_SLOT_COMPATIBLE_JAR_SHA256
+            && self.ctl_version == 13
+            && self.snapshot_version >= 6
+    }
+
+    pub fn canonical_agent_version(&self) -> &str {
+        let trimmed = self.agent_version.trim();
+        if trimmed.is_empty() {
+            env!("CARGO_PKG_VERSION")
+        } else {
+            trimmed
+        }
+    }
+
+    pub fn advertised_agent_version(&self) -> String {
+        let base = self.canonical_agent_version();
+        if self.is_character_slot_compatible() {
+            if base.contains(Self::CHARACTER_SLOT_CAPABILITY_TOKEN) {
+                base.to_string()
+            } else if let Some((ver, meta)) = base.split_once('+') {
+                format!("{ver}+{meta}.{}", Self::CHARACTER_SLOT_CAPABILITY_TOKEN)
+            } else {
+                format!("{base}+{}", Self::CHARACTER_SLOT_CAPABILITY_TOKEN)
+            }
+        } else {
+            // Strip capability token if present but JAR is not compatible
+            if let Some((ver, meta)) = base.split_once('+') {
+                let filtered: Vec<&str> = meta
+                    .split('.')
+                    .filter(|part| *part != Self::CHARACTER_SLOT_CAPABILITY_TOKEN)
+                    .collect();
+                if filtered.is_empty() {
+                    ver.to_string()
+                } else {
+                    format!("{ver}+{}", filtered.join("."))
+                }
+            } else {
+                base.to_string()
+            }
+        }
+    }
+}
+
+pub fn read_jar_manifest(path: &str) -> Option<JarManifest> {
+    JarManifest::read_from_file(path)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2822,6 +2890,84 @@ mod tests {
         assert!(validate_character_slot(0).is_err(), "character_slot=0 must be rejected");
         assert!(validate_character_slot(4).is_err(), "character_slot=4 must be rejected");
         assert!(validate_character_slot(-1).is_err(), "negative character_slot must be rejected");
+    }
+
+    #[test]
+    fn test_character_slot_runtime_capability_advertisement() {
+        let compatible_manifest = JarManifest {
+            jar_sha256: "0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd".to_string(),
+            jar_size: 1137800,
+            ctl_version: 13,
+            snapshot_version: 6,
+            ctl_key_count: 35,
+            snapshot_key_count: 48,
+            built_at: "2026-09-22T16:51:38Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+
+        // 1. Valid compatible JAR does advertise capability with the stable token
+        assert!(compatible_manifest.is_character_slot_compatible());
+        let advertised = compatible_manifest.advertised_agent_version();
+        assert_eq!(advertised, "0.1.0+character-slot-v1");
+        assert!(advertised.contains(JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN));
+
+        // 2. Old runtime JAR SHA (5048b590...) lacks the capability
+        let old_manifest = JarManifest {
+            jar_sha256: "5048b590a98f23989291f7e87985ca2e77616273bdfec703fdc3827d519ca127".to_string(),
+            jar_size: 1137406,
+            ctl_version: 13,
+            snapshot_version: 6,
+            ctl_key_count: 35,
+            snapshot_key_count: 48,
+            built_at: "2026-09-22T15:34:49Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(!old_manifest.is_character_slot_compatible());
+        let old_advertised = old_manifest.advertised_agent_version();
+        assert_eq!(old_advertised, "0.1.0");
+        assert!(!old_advertised.contains(JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN));
+
+        // 3. Invalid JAR SHA does not advertise capability
+        let mut invalid_jar = compatible_manifest.clone();
+        invalid_jar.jar_sha256 = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        assert!(!invalid_jar.is_character_slot_compatible());
+        assert!(!invalid_jar.advertised_agent_version().contains(JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN));
+
+        // 4. Invalid ctl_version does not advertise capability
+        let mut invalid_ctl = compatible_manifest.clone();
+        invalid_ctl.ctl_version = 12;
+        assert!(!invalid_ctl.is_character_slot_compatible());
+        assert!(!invalid_ctl.advertised_agent_version().contains(JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN));
+
+        // 5. No duplicate token across repeated announcements (deterministic)
+        let mut already_advertised = compatible_manifest.clone();
+        already_advertised.agent_version = "0.1.0+character-slot-v1".to_string();
+        assert_eq!(already_advertised.advertised_agent_version(), "0.1.0+character-slot-v1");
+        assert_eq!(already_advertised.advertised_agent_version().matches(JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN).count(), 1);
+
+        // 6. devices PATCH payload uses ONLY existing columns and preserves jar_sha256
+        let patch_payload = SupabaseRest::build_device_patch_payload(&compatible_manifest);
+        let patch_obj = patch_payload.as_object().expect("payload must be a JSON object");
+        let allowed_columns = [
+            "id", "pair_code", "pubkey", "agent_version", "status", "last_seen",
+            "jar_sha256", "jar_ctl_version", "jar_snapshot_version", "jar_ctl_key_count",
+            "viewer_url", "viewer_expires_at"
+        ];
+        for key in patch_obj.keys() {
+            assert!(allowed_columns.contains(&key.as_str()), "Key {key} is not an existing devices column");
+        }
+        assert_eq!(patch_obj.get("jar_sha256").and_then(|v| v.as_str()), Some("0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd"));
+        assert_eq!(patch_obj.get("agent_version").and_then(|v| v.as_str()), Some("0.1.0+character-slot-v1"));
+        assert_eq!(patch_obj.get("status").and_then(|v| v.as_str()), Some("online"));
+
+        // 7. Test loading actual repository zeus-jar.json
+        if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
+            assert_eq!(loaded_manifest.jar_sha256, "0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd");
+            assert!(loaded_manifest.is_character_slot_compatible());
+            assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1");
+        }
     }
 }
 

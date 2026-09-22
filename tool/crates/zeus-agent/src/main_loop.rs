@@ -2046,8 +2046,7 @@ fn write_potato_ctl_for_path(paths: &AccountPaths, mode: &str) {
 
 #[cfg(unix)]
 fn read_jar_manifest(path: &str) -> Option<JarManifest> {
-    let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
+    crate::supabase_rest::read_jar_manifest(path)
 }
 
 // ── system metrics (B6.4) ─────────────────────────────────────────────────────
