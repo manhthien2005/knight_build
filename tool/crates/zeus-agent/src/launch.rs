@@ -132,6 +132,8 @@ pub struct LaunchSpec {
     /// calls `paintDisplayable` into an offscreen image with no early return. Use
     /// `potato.ctl` for that. See docs/full_spec/build-docker/RUNTIME-SPEC.md §4.
     pub headless: bool,
+    /// 1-based account character slot (1, 2, or 3).
+    pub character_slot: i16,
 }
 
 impl LaunchSpec {
@@ -149,6 +151,7 @@ impl LaunchSpec {
             device_height: 480,
             heap: HeapConfig::default(),
             headless: false,
+            character_slot: 1,
         }
     }
 
@@ -177,6 +180,10 @@ impl LaunchSpec {
             .arg(format!(
                 "-Dpotato.ctl={}",
                 self.paths.potato_file().display()
+            ))
+            .arg(format!(
+                "-Dzeus.auth.slot={}",
+                self.character_slot - 1
             ));
 
         if self.headless {
@@ -295,6 +302,7 @@ mod tests {
             device_height: 480,
             heap: HeapConfig::default(),
             headless: false,
+            character_slot: 1,
         }
     }
 
@@ -391,4 +399,43 @@ mod tests {
         assert_eq!(with.len(), without.len() + 1);
         assert!(with.contains(&"-Djava.awt.headless=true".to_string()));
     }
+
+    #[test]
+    fn launch_spec_sets_zeus_auth_slot_correctly() {
+        let mut s1 = spec();
+        s1.character_slot = 1;
+        let args1 = argv(&s1);
+        assert!(args1.contains(&"-Dzeus.auth.slot=0".to_string()), "Slot 1 -> -Dzeus.auth.slot=0");
+        assert_eq!(
+            args1.iter().filter(|a| a.starts_with("-Dzeus.auth.slot=")).count(),
+            1,
+            "No duplicate -Dzeus.auth.slot"
+        );
+
+        let mut s2 = spec();
+        s2.character_slot = 2;
+        let args2 = argv(&s2);
+        assert!(args2.contains(&"-Dzeus.auth.slot=1".to_string()), "Slot 2 -> -Dzeus.auth.slot=1");
+        assert_eq!(
+            args2.iter().filter(|a| a.starts_with("-Dzeus.auth.slot=")).count(),
+            1,
+            "No duplicate -Dzeus.auth.slot"
+        );
+
+        let mut s3 = spec();
+        s3.character_slot = 3;
+        let args3 = argv(&s3);
+        assert!(args3.contains(&"-Dzeus.auth.slot=2".to_string()), "Slot 3 -> -Dzeus.auth.slot=2");
+        assert_eq!(
+            args3.iter().filter(|a| a.starts_with("-Dzeus.auth.slot=")).count(),
+            1,
+            "No duplicate -Dzeus.auth.slot"
+        );
+
+        // Verify position: system property must appear before -cp and MAIN_CLASS
+        let slot_pos = args1.iter().position(|a| a == "-Dzeus.auth.slot=0").unwrap();
+        let cp_pos = args1.iter().position(|a| a == "-cp").unwrap();
+        assert!(slot_pos < cp_pos, "System property must precede -cp");
+    }
 }
+

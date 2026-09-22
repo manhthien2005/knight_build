@@ -213,6 +213,12 @@ public class ReconnectTravelTest {
         if (fu.i == null) {
             fu.i = new x();
         }
+        if (x.a == null) {
+            x.a = new et("chars");
+        }
+        if (x.a.c() == 0) {
+            x.a.a(new bm(1, (byte) 0, "hero", 0, 0));
+        }
         fu.a = fu.i;
         ah.k = false;
         set("armed", Boolean.FALSE);

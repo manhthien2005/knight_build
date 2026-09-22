@@ -110,6 +110,7 @@ struct AccountState {
     // Credentials — cần để unseal và seed JVM khi start/restart
     username: String,
     server_index: u8,
+    character_slot: i16,
     secret_sealed: serde_json::Value,
     runtime_config: serde_json::Value, // heap_max_mib, headless, autostart
     /// JVM đang chạy, nếu có.
@@ -831,8 +832,24 @@ fn reconcile_desired_state(
                 return;
             }
 
+            // Validate character_slot before JVM process spawn — CHAR-SLOT-02
+            if let Err(err_msg) = crate::supabase_rest::validate_character_slot(acc.character_slot) {
+                eprintln!(
+                    "[reconcile] account={} invalid character_slot={}: {}, aborting spawn",
+                    acc.id, acc.character_slot, err_msg
+                );
+                let _ = rest.set_config_status(
+                    &acc.id,
+                    crate::supabase_rest::ConfigStatus::Error,
+                    Some(&format!("invalid character_slot: {}", acc.character_slot)),
+                    None,
+                );
+                return;
+            }
+
             // Đọc runtime config — Issue #49
             let mut spec = crate::launch::LaunchSpec::default_for_paths(paths.clone());
+            spec.character_slot = acc.character_slot;
 
             // Áp dụng heap_max_mib và headless từ acc.runtime_config
             if let Some(heap_mib) = acc.runtime_config["heap_max_mib"].as_u64() {
@@ -1809,6 +1826,7 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
                 applied_version: 0,
                 username: row.username,
                 server_index,
+                character_slot: row.character_slot,
                 secret_sealed: row.secret_sealed,
                 runtime_config: row.runtime,
                 process: None,
@@ -1830,6 +1848,11 @@ fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountS
     let id = record["id"].as_str()?.to_string();
     let slot_index = record["slot_index"].as_i64()? as i32;
     let server_index = (record["server_index"].as_i64().unwrap_or(0) as i32).clamp(0, 7) as u8;
+    let character_slot = record
+        .get("character_slot")
+        .and_then(|v| v.as_i64())
+        .map(|n| n as i16)
+        .unwrap_or(1);
     Some(AccountState {
         id,
         slot_index,
@@ -1840,6 +1863,7 @@ fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountS
         applied_version: 0,
         username: record["username"].as_str().unwrap_or("").to_string(),
         server_index,
+        character_slot,
         secret_sealed: record.get("secret_sealed").cloned().unwrap_or(serde_json::json!({})),
         runtime_config: record.get("runtime").cloned().unwrap_or(serde_json::json!({})),
         process: None,
@@ -1882,6 +1906,7 @@ fn merge_account_states(
             existing.desired_state = fresh_acc.desired_state;
             existing.secret_sealed = fresh_acc.secret_sealed;
             existing.server_index = fresh_acc.server_index;
+            existing.character_slot = fresh_acc.character_slot;
             existing.username = fresh_acc.username;
             existing.runtime_config = fresh_acc.runtime_config;
             // Preserves existing.process (supervised Child), existing.last_snapshot, existing.restarts, etc.

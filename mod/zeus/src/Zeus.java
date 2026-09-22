@@ -44,9 +44,25 @@
  */
 public final class Zeus {
 
-    /** Character slot to enter (0..2). Override with -Dzeus.auth.slot. */
+    /** Character slot to enter (0..2). Override with -Dzeus.auth.slot. Returns -1 if malformed or outside 0..2. */
     private static int slot() {
-        return intProp("zeus.auth.slot", 0);
+        try {
+            String v = System.getProperty("zeus.auth.slot");
+            if (v == null) {
+                return 0; // legacy default is Slot 1 (internal index 0)
+            }
+            v = v.trim();
+            if (v.length() == 0) {
+                return -1;
+            }
+            int val = Integer.parseInt(v);
+            if (val >= 0 && val <= 2) {
+                return val;
+            }
+            return -1;
+        } catch (Throwable t) {
+            return -1;
+        }
     }
 
     private static boolean armed = false;   // one-shot per char-select visit
@@ -55,12 +71,14 @@ public final class Zeus {
     private static int authAttempts = 0;
     private static int authWaitTicks = 0;
     private static boolean authExhaustedTraced = false;
+    private static boolean authRefusalTraced = false;
 
     public static void authReset() {
         armed = false;
         authAttempts = 0;
         authWaitTicks = 0;
         authExhaustedTraced = false;
+        authRefusalTraced = false;
     }
 
     /** Called at the end of fu.b() every tick. */
@@ -128,21 +146,57 @@ public final class Zeus {
     private static void auth() {
         try {
             if (fu.a == fu.i) {
-                // Character-select screen. Bounded retry to prevent permanent stalls.
+                // Character-select screen. Strict positional validation — CHAR-SLOT-02.
+                int targetSlot = slot();
+                if (targetSlot < 0 || targetSlot > 2) {
+                    if (!authRefusalTraced) {
+                        authRefusalTraced = true;
+                        trace("AUTH character slot invalid internal=" + targetSlot + " reason=MALFORMED_OR_OUT_OF_RANGE");
+                    }
+                    return;
+                }
+
+                if (x.a == null) {
+                    if (!authRefusalTraced) {
+                        authRefusalTraced = true;
+                        trace("AUTH character slot refused internal=" + targetSlot + " visual=" + (targetSlot + 1) + " count=0 reason=LIST_NULL");
+                    }
+                    return;
+                }
+
+                int count = x.a.c();
+                if (targetSlot >= count) {
+                    if (!authRefusalTraced) {
+                        authRefusalTraced = true;
+                        trace("AUTH character slot refused internal=" + targetSlot + " visual=" + (targetSlot + 1) + " count=" + count + " reason=INDEX_OUT_OF_BOUNDS");
+                    }
+                    return;
+                }
+
+                if (x.a.a(targetSlot) == null) {
+                    if (!authRefusalTraced) {
+                        authRefusalTraced = true;
+                        trace("AUTH character slot refused internal=" + targetSlot + " visual=" + (targetSlot + 1) + " count=" + count + " reason=NULL_CHARACTER_OBJECT");
+                    }
+                    return;
+                }
+
+                // fu.a == fu.i && x.a != null && targetSlot >= 0 && targetSlot < x.a.c() && x.a.a(targetSlot) != null
                 if (authAttempts == 0) {
                     // x.k is private in vanilla; PatchZeus widens it to public.
                     // Access through the live screen instance fu.i.
-                    fu.i.k = clampSlot(slot());
+                    fu.i.k = targetSlot;
                     // ah.k makes x.a() select the slot and enter the game.
                     ah.k = true;
                     armed = true;
                     authAttempts = 1;
                     authWaitTicks = 0;
+                    trace("AUTH select character slot internal=" + targetSlot + " visual=" + (targetSlot + 1) + " count=" + count + " attempt=1");
                 } else if (authAttempts < AUTH_MAX_ATTEMPTS) {
                     if (++authWaitTicks >= AUTH_RETRY_INTERVAL_TICKS) {
                         authWaitTicks = 0;
                         ++authAttempts;
-                        fu.i.k = clampSlot(slot());
+                        fu.i.k = targetSlot;
                         ah.k = true;
                         trace("AUTH retry character select slot=" + fu.i.k + " attempt=" + authAttempts);
                     }
@@ -5665,21 +5719,6 @@ public final class Zeus {
     /** Dialog hook (reserved; unused in round 1). */
     public static boolean dialog(String text) {
         return false;
-    }
-
-    private static int clampSlot(int slot) {
-        try {
-            int count = x.a.c();          // et.c() = number of characters
-            if (count <= 0) {
-                return 0;
-            }
-            if (slot < 0) {
-                return 0;
-            }
-            return Math.min(slot, count - 1);
-        } catch (Throwable t) {
-            return 0;
-        }
     }
 
     private static int intProp(String key, int fallback) {

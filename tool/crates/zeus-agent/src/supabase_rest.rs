@@ -471,6 +471,18 @@ pub struct RuntimePayload {
     pub updated_at: String,
 }
 
+fn default_character_slot() -> i16 {
+    1
+}
+
+pub fn validate_character_slot(slot: i16) -> Result<i16, &'static str> {
+    if (1..=3).contains(&slot) {
+        Ok(slot)
+    } else {
+        Err("character_slot must be 1, 2, or 3")
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AccountRow {
     pub id: String,
@@ -484,6 +496,8 @@ pub struct AccountRow {
     pub control: serde_json::Value,
     pub config_version: i32,
     pub runtime: serde_json::Value,
+    #[serde(default = "default_character_slot")]
+    pub character_slot: i16,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1852,6 +1866,7 @@ mod tests {
             control: serde_json::json!({"opt": 1}),
             config_version: 1,
             runtime: serde_json::json!({}),
+            character_slot: 1,
         };
         assert!(!in_memory_accounts.contains_key(&row_a.id));
 
@@ -1887,6 +1902,7 @@ mod tests {
             control: serde_json::json!({}),
             config_version: 1,
             runtime: serde_json::json!({}),
+            character_slot: 1,
         };
         acc_b.merge_cloud_fields(&row_b_updated);
         assert_eq!(acc_b.username, "updated_user");
@@ -1906,6 +1922,7 @@ mod tests {
             control: serde_json::json!({"speed": 10}),
             config_version: 4,
             runtime: serde_json::json!({}),
+            character_slot: 1,
         };
         acc_b.merge_cloud_fields(&row_c_updated);
         assert_eq!(acc_b.control_version, 5);
@@ -1969,6 +1986,7 @@ mod tests {
                 control: serde_json::json!({}),
                 config_version: 1,
                 runtime: serde_json::json!({}),
+                character_slot: 1,
             },
             AccountRow {
                 id: "acc-c".to_string(),
@@ -1982,6 +2000,7 @@ mod tests {
                 control: serde_json::json!({}),
                 config_version: 1,
                 runtime: serde_json::json!({}),
+                character_slot: 1,
             },
         ];
         let ok_res: Result<&[AccountRow], &str> = Ok(&cloud_rows);
@@ -2080,6 +2099,7 @@ mod tests {
             control: serde_json::json!({}),
             config_version: 1,
             runtime: serde_json::json!({}),
+            character_slot: 1,
         };
         let row_b = AccountRow {
             id: "acc-b".to_string(),
@@ -2093,6 +2113,7 @@ mod tests {
             control: serde_json::json!({}),
             config_version: 1,
             runtime: serde_json::json!({}),
+            character_slot: 1,
         };
 
         // F1: local A is retiring, stale snapshot contains A, Stop fails
@@ -2273,6 +2294,7 @@ mod tests {
             control: serde_json::json!({}),
             config_version: 1,
             runtime: serde_json::json!({}),
+            character_slot: 1,
         };
         live_acc.merge_cloud_fields(&row_a_new);
         assert_eq!(live_acc.username, "user_a_updated");
@@ -2356,6 +2378,7 @@ mod tests {
             control: serde_json::json!({}),
             config_version: 1,
             runtime: serde_json::json!({}),
+            character_slot: 1,
         };
         let cloud_only_a = vec![row_a.clone()];
         let ok_e: Result<&[AccountRow], &str> = Ok(&cloud_only_a);
@@ -2383,6 +2406,7 @@ mod tests {
             control: serde_json::json!({}),
             config_version: 1,
             runtime: serde_json::json!({}),
+            character_slot: 1,
         };
         let cloud_stale_both = vec![row_a.clone(), row_b.clone()];
         let plan_f = evaluate_account_reconciliation(
@@ -2432,6 +2456,7 @@ mod tests {
             control: serde_json::json!({}),
             config_version: 1,
             runtime: serde_json::json!({}),
+            character_slot: 1,
         };
         live_acc.merge_cloud_fields(&row_a_update);
         assert_eq!(live_acc.username, "user_a_new");
@@ -2738,4 +2763,65 @@ mod tests {
         assert_eq!(crate::spot_scan::SpotScanStatus::Completed.as_str(), "completed");
         assert_eq!(crate::spot_scan::SpotScanStatus::Timeout.as_str(), "timeout");
     }
+
+    #[test]
+    fn test_character_slot_deserialization_and_validation() {
+        let legacy_json = serde_json::json!({
+            "id": "acc-legacy",
+            "slot_index": 0,
+            "label": "bot1",
+            "username": "user1",
+            "secret_sealed": {},
+            "server_index": 0,
+            "desired_state": "running",
+            "control_version": 13,
+            "control": {},
+            "config_version": 1,
+            "runtime": {}
+        });
+        let parsed_legacy: AccountRow = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(parsed_legacy.character_slot, 1, "legacy/missing character_slot deserializes to 1");
+
+        let slot2_json = serde_json::json!({
+            "id": "acc-slot2",
+            "slot_index": 0,
+            "label": "bot2",
+            "username": "user2",
+            "secret_sealed": {},
+            "server_index": 0,
+            "desired_state": "running",
+            "control_version": 13,
+            "control": {},
+            "config_version": 1,
+            "runtime": {},
+            "character_slot": 2
+        });
+        let parsed_slot2: AccountRow = serde_json::from_value(slot2_json).unwrap();
+        assert_eq!(parsed_slot2.character_slot, 2, "character_slot=2 is accepted");
+
+        let slot3_json = serde_json::json!({
+            "id": "acc-slot3",
+            "slot_index": 0,
+            "label": "bot3",
+            "username": "user3",
+            "secret_sealed": {},
+            "server_index": 0,
+            "desired_state": "running",
+            "control_version": 13,
+            "control": {},
+            "config_version": 1,
+            "runtime": {},
+            "character_slot": 3
+        });
+        let parsed_slot3: AccountRow = serde_json::from_value(slot3_json).unwrap();
+        assert_eq!(parsed_slot3.character_slot, 3, "character_slot=3 is accepted");
+
+        assert!(validate_character_slot(1).is_ok());
+        assert!(validate_character_slot(2).is_ok());
+        assert!(validate_character_slot(3).is_ok());
+        assert!(validate_character_slot(0).is_err(), "character_slot=0 must be rejected");
+        assert!(validate_character_slot(4).is_err(), "character_slot=4 must be rejected");
+        assert!(validate_character_slot(-1).is_err(), "negative character_slot must be rejected");
+    }
 }
+
