@@ -432,6 +432,11 @@ public final class Zeus {
         dungeonEnabled = false;
         dungeonReset();
         // ---- end DUNGEON ------------------------------------------------------
+        // ---- VISUAL QOL (v14) -------------------------------------------------
+        desiredEffects = 1;
+        desiredHidePlayers = 0;
+        reconcileVisualQoL();
+        // ---- end VISUAL QOL ---------------------------------------------------
     }
 
     private static void control() {
@@ -526,6 +531,9 @@ public final class Zeus {
         // ---- DUNGEON ----------------------------------------------------------
         "dungeon.on", "dungeon.max", "dungeon.schedule",
         // ---- end DUNGEON ------------------------------------------------------
+        // ---- VISUAL QOL (v14) -------------------------------------------------
+        "ui.effects", "ui.hidePlayers",
+        // ---- end VISUAL QOL ---------------------------------------------------
     };
     private static final int K_V = 0, K_MODE = 1, K_MAP = 2, K_ZONE = 3, K_X = 4, K_Y = 5;
     private static final int K_RADIUS = 6, K_HPON = 7, K_HP = 8, K_MPON = 9, K_MP = 10, K_REVIVEMODE = 11;
@@ -574,8 +582,52 @@ public final class Zeus {
     private static final int K_DUNGEON_MAX = 33;
     private static final int K_DUNGEON_SCHED = 34;
     // ---- end DUNGEON ----------------------------------------------------------
+    // ---- VISUAL QOL (v14) -----------------------------------------------------
+    private static final int K_UI_EFFECTS = 35;
+    private static final int K_UI_HIDE_PLAYERS = 36;
+    // ---- end VISUAL QOL -------------------------------------------------------
     /** Format version this jar accepts. Bumped when the key set changed shape. */
-    private static final int CTL_VERSION = 13;
+    private static final int CTL_VERSION = 14;
+
+    /** Desired state for ui.effects: 1 (enabled, default), 0 (disabled). */
+    private static int desiredEffects = 1;
+    /** Desired state for ui.hidePlayers: 0 (show all, default), 1 (hide others), 2 (hide all). */
+    private static int desiredHidePlayers = 0;
+
+    /**
+     * Reconciles desired visual QoL settings directly into native client static fields.
+     * Change-only application prevents redundant writes.
+     * Guaranteed never to produce cn.aN=true && cn.aO=true simultaneously.
+     */
+    private static void reconcileVisualQoL() {
+        try {
+            // ui.effects: 1 -> fa.ch = 0, 0 -> fa.ch = 1
+            byte targetCh = (byte) (desiredEffects == 1 ? 0 : 1);
+            if (fa.ch != targetCh) {
+                fa.ch = targetCh;
+            }
+
+            // ui.hidePlayers:
+            // 0 -> cn.aN=false, cn.aO=false
+            // 1 -> cn.aN=true,  cn.aO=false
+            // 2 -> cn.aN=false, cn.aO=true
+            boolean targetN = (desiredHidePlayers == 1);
+            boolean targetO = (desiredHidePlayers == 2);
+            if (cn.aN != targetN || cn.aO != targetO) {
+                // Clear the opposite flag first so both are never true simultaneously
+                if (!targetN) {
+                    cn.aN = false;
+                }
+                if (!targetO) {
+                    cn.aO = false;
+                }
+                cn.aN = targetN;
+                cn.aO = targetO;
+            }
+        } catch (Throwable t) {
+            // Visual QoL reconciliation must never throw or interrupt tick execution
+        }
+    }
 
     /**
      * Parses one control body, returning false the moment anything is wrong.
@@ -762,6 +814,12 @@ public final class Zeus {
                 return false;
             }
         }
+        if (value[K_UI_EFFECTS] < 0 || value[K_UI_EFFECTS] > 1) {
+            return false;
+        }
+        if (value[K_UI_HIDE_PLAYERS] < 0 || value[K_UI_HIDE_PLAYERS] > 2) {
+            return false;
+        }
 
         int prevGoal = goal();
         // A new spot means walk to it, whatever state the fight was in. atkState starts at FIGHTING
@@ -878,6 +936,9 @@ public final class Zeus {
         if (value[K_DETECT] == 1) {
             spotArmed = true;
         }
+        desiredEffects = value[K_UI_EFFECTS];
+        desiredHidePlayers = value[K_UI_HIDE_PLAYERS];
+        reconcileVisualQoL();
         return true;
     }
 
@@ -3257,6 +3318,7 @@ public final class Zeus {
             }
             lastScreenId = screenId;
         }
+        reconcileVisualQoL();
         if (inGame() && sceneReady()) {
             if (readySettleTicks < GAME_READY_SETTLE_TICKS) {
                 ++readySettleTicks;

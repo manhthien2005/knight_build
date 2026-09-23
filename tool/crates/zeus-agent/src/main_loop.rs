@@ -62,9 +62,11 @@ use crate::{
 
 #[cfg(unix)]
 use zeus_core::wire::{
-    clear_credentials, clear_snapshot, parse_settings, read_snapshot, write_settings,
-    ControlSettings, CONTROL_VERSION, SNAPSHOT_FILE_NAME, SUPPORTED_VERSION,
+    clear_credentials, clear_settings, clear_snapshot, write_settings, SUPPORTED_VERSION,
 };
+
+#[cfg(any(unix, test))]
+use zeus_core::wire::{parse_settings, ControlSettings};
 
 // ── SIGTERM/SIGINT signal flag ─────────────────────────────────────────────────
 
@@ -192,11 +194,11 @@ impl AgentConfig {
 ///
 /// Gọi từ `main()` sau khi pairing xong và `device_id` đã có.
 #[cfg(unix)]
-pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -> ! {
+pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -> ! {
     // Đăng ký SIGTERM/SIGINT handler để PID 1 không bị kernel drop tín hiệu
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = handle_signal as libc::sighandler_t;
+        sa.sa_sigaction = handle_signal as *const () as libc::sighandler_t;
         libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
         libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
     }
@@ -249,10 +251,11 @@ pub fn run(mut cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32
         // Dọn sạch snapshot/control rác của phiên trước — Issue #82
         let paths = AccountPaths::for_slot(acc.slot_index);
         let _ = clear_snapshot(&paths.home);
+        let _ = clear_settings(&paths.home);
         crate::spot_scan::clean_spot_files(&paths.home);
         // prepare_directories trước khi spawn — Issue #16
         let _ = crate::launch::prepare_directories(&paths);
-        try_apply_config(acc, jar_ctl_version, &rest);
+        let _ = try_apply_config(acc, jar_ctl_version, &rest);
         reconcile_desired_state(acc, &rest, &identity);
     }
 
@@ -527,7 +530,7 @@ fn handle_cloud_event(
                 }
 
                 // Apply config nếu version mới (B5)
-                try_apply_config(acc, jar_ctl_version, rest);
+                let _ = try_apply_config(acc, jar_ctl_version, rest);
                 // Reconcile desired_state (B7.3)
                 reconcile_desired_state(acc, rest, identity);
             } else {
@@ -543,7 +546,7 @@ fn handle_cloud_event(
                     let _ = crate::launch::prepare_directories(&paths);
                     let _ = clear_snapshot(&paths.home);
                     let mut acc = acc;
-                    try_apply_config(&mut acc, jar_ctl_version, rest);
+                    let _ = try_apply_config(&mut acc, jar_ctl_version, rest);
                     reconcile_desired_state(&mut acc, rest, identity);
                     accounts.insert(account_id, acc);
                 }
@@ -574,7 +577,7 @@ fn handle_cloud_event(
                 let _ = clear_snapshot(&paths.home);
                 crate::spot_scan::clean_spot_files(&paths.home);
                 let mut acc = acc;
-                try_apply_config(&mut acc, jar_ctl_version, rest);
+                let _ = try_apply_config(&mut acc, jar_ctl_version, rest);
                 reconcile_desired_state(&mut acc, rest, identity);
                 accounts.insert(account_id, acc);
             }
@@ -627,6 +630,15 @@ fn handle_cloud_event(
 
 // ── config apply (B5) ─────────────────────────────────────────────────────────
 
+#[cfg(any(unix, test))]
+pub(crate) fn evaluate_control_version_gate(acc_control_version: i32, jar_ctl_version: i32) -> bool {
+    if jar_ctl_version == 14 {
+        acc_control_version == 13 || acc_control_version == 14
+    } else {
+        acc_control_version == jar_ctl_version
+    }
+}
+
 #[cfg(unix)]
 fn try_apply_config(
     acc: &mut AccountState,
@@ -639,7 +651,10 @@ fn try_apply_config(
     }
 
     // Version gate (CLOUD-SPEC §3, B5.1).
-    if acc.control_version != jar_ctl_version {
+    // New zeus-agent accepts database account control_version 13 and 14 when jar is 14.
+    let version_compatible = evaluate_control_version_gate(acc.control_version, jar_ctl_version);
+
+    if !version_compatible {
         eprintln!(
             "[config] account={} version_mismatch: control_version={} != jar_ctl_version={}",
             acc.id, acc.control_version, jar_ctl_version
@@ -651,7 +666,7 @@ fn try_apply_config(
     }
 
     // Dựng ControlSettings từ JSONB — Issues #04, #52
-    let settings = match build_control_settings(&acc.control) {
+    let settings = match build_control_settings(&acc.control, acc.control_version) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[config] account={} build_settings failed: {e}", acc.id);
@@ -705,10 +720,15 @@ fn try_apply_config(
 ///
 /// Nếu control là {} hoặc thiếu key, dùng ControlSettings::default() làm nền.
 /// Parse từ in-memory string thay vì NamedTempFile.
-#[cfg(unix)]
-fn build_control_settings(
+#[cfg(any(unix, test))]
+pub(crate) fn build_control_settings(
     control: &serde_json::Value,
+    control_version: i32,
 ) -> Result<ControlSettings, String> {
+    if control_version != 13 && control_version != 14 {
+        return Err(format!("unsupported control_version={control_version}"));
+    }
+
     // Dùng ControlSettings::default() làm nền — fix Issue #52
     let default_settings = ControlSettings::default();
 
@@ -725,11 +745,10 @@ fn build_control_settings(
         return Ok(default_settings);
     }
 
-    // Serialize thành text format mà zeus-control.txt dùng, dùng CONTROL_VERSION
+    // Serialize thành text format mà zeus-control.txt dùng, dùng control_version
     use std::fmt::Write as FmtWrite;
     let mut text = String::new();
-    // Thêm dòng v= với CONTROL_VERSION đúng — fix Issue #04
-    writeln!(text, "v={}", CONTROL_VERSION).unwrap();
+    writeln!(text, "v={}", control_version).unwrap();
     for (k, v) in map {
         if k == "v" { continue; }
         let val = match v {
@@ -742,15 +761,8 @@ fn build_control_settings(
         writeln!(text, "{k}={val}").unwrap();
     }
 
-    // Parse bằng parse_settings của zeus-core — không dùng NamedTempFile
-    match parse_settings(&text).map_err(|e| format!("parse_settings: {e}")) {
-        Ok(s) => Ok(s),
-        Err(e) => {
-            // Nếu parse fail (thiếu key), fallback về default
-            eprintln!("[config] parse_settings failed ({e}), using default ControlSettings");
-            Ok(default_settings)
-        }
-    }
+    // Parse bằng parse_settings của zeus-core — fails closed on unknown keys or invalid values
+    parse_settings(&text).map_err(|e| format!("parse_settings: {e}"))
 }
 
 #[cfg(unix)]
@@ -1910,7 +1922,7 @@ fn merge_account_states(
             existing.username = fresh_acc.username;
             existing.runtime_config = fresh_acc.runtime_config;
             // Preserves existing.process (supervised Child), existing.last_snapshot, existing.restarts, etc.
-            try_apply_config(existing, jar_ctl_version, rest);
+            let _ = try_apply_config(existing, jar_ctl_version, rest);
             reconcile_desired_state(existing, rest, identity);
         } else {
             // New account: initialize directories and clear old snapshot
@@ -1919,7 +1931,7 @@ fn merge_account_states(
             let _ = clear_snapshot(&paths.home);
             crate::spot_scan::clean_spot_files(&paths.home);
             let mut acc = fresh_acc;
-            try_apply_config(&mut acc, jar_ctl_version, rest);
+            let _ = try_apply_config(&mut acc, jar_ctl_version, rest);
             reconcile_desired_state(&mut acc, rest, identity);
             accounts.insert(id, acc);
         }
@@ -2113,4 +2125,130 @@ fn read_meminfo_total_mb() -> u32 {
         })
         .map(|kb| (kb / 1024) as u32)
         .unwrap_or(1024) // fallback 1GB
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_v13_control_json() -> serde_json::Value {
+        serde_json::json!({
+            "atk.mode": 0,
+            "atk.map": 0,
+            "atk.zone": -1,
+            "atk.x": -1,
+            "atk.y": -1,
+            "atk.radius": 100,
+            "atk.hpOn": 0,
+            "atk.hpPct": 50,
+            "atk.mpOn": 0,
+            "atk.mpPct": 50,
+            "revive.mode": 1,
+            "atk.buffs": "000",
+            "atk.zoneMode": 0,
+            "atk.zonePick": 1,
+            "item.rank": 5,
+            "item.mphp": 3,
+            "item.gold": 1,
+            "mount.on": 0,
+            "mount.id": 0,
+            "item.medalDialog": 0,
+            "item.dropsOn": 0,
+            "item.drops": "000000",
+            "nav.target": -1,
+            "ui.ring": 0,
+            "atk.farmOnArrival": 0,
+            "nav.detectSpots": 0,
+            "revive.delay": 0,
+            "revive.on": 0,
+            "enhance.on": 0,
+            "enhance.maxLv": 10,
+            "enhance.charm": 0,
+            "dungeon.on": 0,
+            "dungeon.max": -1,
+            "dungeon.schedule": -1
+        })
+    }
+
+    #[test]
+    fn test_control_version_gate_evaluation() {
+        // When jar is v14:
+        assert!(evaluate_control_version_gate(13, 14));
+        assert!(evaluate_control_version_gate(14, 14));
+        assert!(!evaluate_control_version_gate(12, 14));
+        assert!(!evaluate_control_version_gate(15, 14));
+
+        // When jar is v13:
+        assert!(evaluate_control_version_gate(13, 13));
+        assert!(!evaluate_control_version_gate(14, 13));
+    }
+
+    #[test]
+    fn test_v13_account_normalizes_to_v14_wire_with_neutral_defaults() {
+        let v13_json = sample_v13_control_json();
+        let settings = build_control_settings(&v13_json, 13).expect("v13 control parses successfully");
+        assert_eq!(settings.effects, 1);
+        assert_eq!(settings.hide_players, 0);
+
+        let wire = settings.to_wire();
+        assert!(wire.starts_with("v=14\n"));
+        assert!(wire.contains("ui.effects=1\n"));
+        assert!(wire.contains("ui.hidePlayers=0\n"));
+        let line_count = wire.lines().count();
+        assert_eq!(line_count, 37, "canonical v14 wire must have exactly 37 keys");
+    }
+
+    #[test]
+    fn test_v14_account_preserves_configured_qol_values() {
+        let mut v14_json = sample_v13_control_json();
+        v14_json["ui.effects"] = serde_json::json!(0);
+        v14_json["ui.hidePlayers"] = serde_json::json!(2);
+
+        let settings = build_control_settings(&v14_json, 14).expect("v14 control parses successfully");
+        assert_eq!(settings.effects, 0);
+        assert_eq!(settings.hide_players, 2);
+
+        let wire = settings.to_wire();
+        assert!(wire.starts_with("v=14\n"));
+        assert!(wire.contains("ui.effects=0\n"));
+        assert!(wire.contains("ui.hidePlayers=2\n"));
+        assert_eq!(wire.lines().count(), 37);
+    }
+
+    #[test]
+    fn test_unsupported_versions_fail_closed() {
+        let json = sample_v13_control_json();
+        assert!(build_control_settings(&json, 12).is_err());
+        assert!(build_control_settings(&json, 15).is_err());
+    }
+
+    #[test]
+    fn test_unknown_keys_fail_closed() {
+        let mut json = sample_v13_control_json();
+        json["unknown.field"] = serde_json::json!(1);
+        assert!(build_control_settings(&json, 13).is_err());
+        assert!(build_control_settings(&json, 14).is_err());
+    }
+
+    #[test]
+    fn test_invalid_qol_values_fail_closed_in_v14() {
+        let mut invalid_effects = sample_v13_control_json();
+        invalid_effects["ui.effects"] = serde_json::json!(2);
+        invalid_effects["ui.hidePlayers"] = serde_json::json!(0);
+        assert!(build_control_settings(&invalid_effects, 14).is_err());
+
+        let mut invalid_hide = sample_v13_control_json();
+        invalid_hide["ui.effects"] = serde_json::json!(1);
+        invalid_hide["ui.hidePlayers"] = serde_json::json!(3);
+        assert!(build_control_settings(&invalid_hide, 14).is_err());
+    }
+
+    #[test]
+    fn test_empty_account_control_uses_defaults() {
+        let empty = serde_json::json!({});
+        let settings = build_control_settings(&empty, 13).expect("empty control uses default");
+        assert_eq!(settings.effects, 1);
+        assert_eq!(settings.hide_players, 0);
+        assert_eq!(settings.to_wire().lines().count(), 37);
+    }
 }

@@ -467,20 +467,64 @@ pub struct JarManifest {
     pub agent_version: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeContract {
+    pub name: &'static str,
+    pub jar_sha256: &'static str,
+    pub ctl_version: u32,
+    pub capabilities: &'static [&'static str],
+}
+
+pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
+    RuntimeContract {
+        name: "CHARACTER_SLOT_ONLY_V13",
+        jar_sha256: JarManifest::CHARACTER_SLOT_COMPATIBLE_JAR_SHA256,
+        ctl_version: 13,
+        capabilities: &[JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN],
+    },
+    RuntimeContract {
+        name: "VISUAL_QOL_V14",
+        jar_sha256: JarManifest::VISUAL_QOL_COMPATIBLE_JAR_SHA256,
+        ctl_version: 14,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+        ],
+    },
+];
+
 impl JarManifest {
     pub const CHARACTER_SLOT_CAPABILITY_TOKEN: &'static str = "character-slot-v1";
+    pub const VISUAL_QOL_CAPABILITY_TOKEN: &'static str = "visual-qol-v1";
+
     pub const CHARACTER_SLOT_COMPATIBLE_JAR_SHA256: &'static str =
         "0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd";
+    pub const VISUAL_QOL_COMPATIBLE_JAR_SHA256: &'static str =
+        "0298b431804ffe33c481a662e4be64cfa2a1409d247a54a7714038be6db91fbd";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
         serde_json::from_str(&data).ok()
     }
 
+    pub fn capabilities(&self) -> &'static [&'static str] {
+        if self.snapshot_version < 6 {
+            return &[];
+        }
+        for contract in KNOWN_RUNTIME_CONTRACTS {
+            if self.jar_sha256 == contract.jar_sha256 && self.ctl_version == contract.ctl_version {
+                return contract.capabilities;
+            }
+        }
+        &[]
+    }
+
     pub fn is_character_slot_compatible(&self) -> bool {
-        self.jar_sha256 == Self::CHARACTER_SLOT_COMPATIBLE_JAR_SHA256
-            && self.ctl_version == 13
-            && self.snapshot_version >= 6
+        self.capabilities().contains(&Self::CHARACTER_SLOT_CAPABILITY_TOKEN)
+    }
+
+    pub fn is_visual_qol_compatible(&self) -> bool {
+        self.capabilities().contains(&Self::VISUAL_QOL_CAPABILITY_TOKEN)
     }
 
     pub fn canonical_agent_version(&self) -> &str {
@@ -494,29 +538,42 @@ impl JarManifest {
 
     pub fn advertised_agent_version(&self) -> String {
         let base = self.canonical_agent_version();
-        if self.is_character_slot_compatible() {
-            if base.contains(Self::CHARACTER_SLOT_CAPABILITY_TOKEN) {
-                base.to_string()
-            } else if let Some((ver, meta)) = base.split_once('+') {
-                format!("{ver}+{meta}.{}", Self::CHARACTER_SLOT_CAPABILITY_TOKEN)
-            } else {
-                format!("{base}+{}", Self::CHARACTER_SLOT_CAPABILITY_TOKEN)
-            }
-        } else {
-            // Strip capability token if present but JAR is not compatible
-            if let Some((ver, meta)) = base.split_once('+') {
-                let filtered: Vec<&str> = meta
-                    .split('.')
-                    .filter(|part| *part != Self::CHARACTER_SLOT_CAPABILITY_TOKEN)
-                    .collect();
-                if filtered.is_empty() {
-                    ver.to_string()
-                } else {
-                    format!("{ver}+{}", filtered.join("."))
+        let (ver, meta) = match base.split_once('+') {
+            Some((v, m)) => (v, Some(m)),
+            None => (base, None),
+        };
+
+        let caps = self.capabilities();
+        let mut tokens: Vec<&str> = Vec::new();
+
+        if let Some(m) = meta {
+            for token in m.split('.') {
+                if token == Self::CHARACTER_SLOT_CAPABILITY_TOKEN
+                    || token == Self::VISUAL_QOL_CAPABILITY_TOKEN
+                {
+                    continue;
                 }
-            } else {
-                base.to_string()
+                if !token.is_empty() && !tokens.contains(&token) {
+                    tokens.push(token);
+                }
             }
+        }
+
+        if caps.contains(&Self::CHARACTER_SLOT_CAPABILITY_TOKEN)
+            && !tokens.contains(&Self::CHARACTER_SLOT_CAPABILITY_TOKEN)
+        {
+            tokens.push(Self::CHARACTER_SLOT_CAPABILITY_TOKEN);
+        }
+        if caps.contains(&Self::VISUAL_QOL_CAPABILITY_TOKEN)
+            && !tokens.contains(&Self::VISUAL_QOL_CAPABILITY_TOKEN)
+        {
+            tokens.push(Self::VISUAL_QOL_CAPABILITY_TOKEN);
+        }
+
+        if tokens.is_empty() {
+            ver.to_string()
+        } else {
+            format!("{ver}+{}", tokens.join("."))
         }
     }
 }
@@ -2964,10 +3021,87 @@ mod tests {
 
         // 7. Test loading actual repository zeus-jar.json
         if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
-            assert_eq!(loaded_manifest.jar_sha256, "0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd");
+            assert_eq!(loaded_manifest.jar_sha256, JarManifest::VISUAL_QOL_COMPATIBLE_JAR_SHA256);
+            assert_eq!(loaded_manifest.ctl_version, 14);
+            assert_eq!(loaded_manifest.ctl_key_count, 37);
             assert!(loaded_manifest.is_character_slot_compatible());
-            assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1");
+            assert!(loaded_manifest.is_visual_qol_compatible());
+            assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
         }
+    }
+
+    #[test]
+    fn test_visual_qol_capability_advertisement() {
+        let v14_manifest = JarManifest {
+            jar_sha256: JarManifest::VISUAL_QOL_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1137800,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-23T00:00:00Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        // 1. QoL v14 JAR advertises both tokens
+        assert!(v14_manifest.is_visual_qol_compatible());
+        assert!(v14_manifest.is_character_slot_compatible());
+        assert_eq!(
+            v14_manifest.advertised_agent_version(),
+            "0.1.0+character-slot-v1.visual-qol-v1"
+        );
+
+        // 2. Exact known v13 JAR advertises character-slot-v1 ONLY, never visual-qol-v1
+        let v13_manifest = JarManifest {
+            jar_sha256: JarManifest::CHARACTER_SLOT_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1137800,
+            ctl_version: 13,
+            snapshot_version: 6,
+            ctl_key_count: 35,
+            snapshot_key_count: 48,
+            built_at: "2026-09-22T16:51:38Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(v13_manifest.is_character_slot_compatible());
+        assert!(!v13_manifest.is_visual_qol_compatible());
+        assert_eq!(
+            v13_manifest.advertised_agent_version(),
+            "0.1.0+character-slot-v1"
+        );
+        assert!(!v13_manifest.advertised_agent_version().contains("visual-qol-v1"));
+
+        // 3. Unknown JAR SHA never advertises either capability even if ctl_version matches
+        let unknown_manifest = JarManifest {
+            jar_sha256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string(),
+            jar_size: 1137800,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-23T00:00:00Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(!unknown_manifest.is_character_slot_compatible());
+        assert!(!unknown_manifest.is_visual_qol_compatible());
+        assert_eq!(unknown_manifest.advertised_agent_version(), "0.1.0");
+
+        // 4. Deterministic multi-token serialization without duplicate tokens
+        let mut already_advertised = v14_manifest.clone();
+        already_advertised.agent_version = "0.1.0+visual-qol-v1.character-slot-v1".to_string();
+        assert_eq!(
+            already_advertised.advertised_agent_version(),
+            "0.1.0+character-slot-v1.visual-qol-v1"
+        );
+        assert_eq!(
+            already_advertised.advertised_agent_version().matches("character-slot-v1").count(),
+            1
+        );
+        assert_eq!(
+            already_advertised.advertised_agent_version().matches("visual-qol-v1").count(),
+            1
+        );
     }
 }
 

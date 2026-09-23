@@ -64,7 +64,8 @@ pub use crate::player::SNAPSHOT_FILE_NAME;
 // `../ZEUS-CORE-CHANGES.md` §4 asserts. The rule they encode: the version number is a
 // FUNCTION OF THE KEY SET. Change any key, bump the version, in the same commit.
 pub use crate::control::{
-    CONTROL_VERSION, CTL_KEY_COUNT, CTL_KEY_NAMES, MAX_CONTROL_BYTES,
+    CONTROL_VERSION, CONTROL_VERSION_V13, CTL_KEY_COUNT, CTL_KEY_COUNT_V13, CTL_KEY_NAMES,
+    CTL_KEY_NAMES_V13, MAX_CONTROL_BYTES,
 };
 pub use crate::player::{MAX_SNAPSHOT_BYTES, SUPPORTED_VERSION};
 
@@ -127,11 +128,15 @@ mod tests {
     /// compares. If any of these moves without the contract doc moving with it, this is the
     /// cheapest place to notice.
     #[test]
-    fn contract_numbers_match_the_documented_v13_v6() {
-        assert_eq!(CONTROL_VERSION, 13);
-        assert_eq!(CTL_KEY_COUNT, 35);
+    fn contract_numbers_match_the_documented_v14_v6() {
+        assert_eq!(CONTROL_VERSION, 14);
+        assert_eq!(CTL_KEY_COUNT, 37);
+        assert_eq!(CONTROL_VERSION_V13, 13);
+        assert_eq!(CTL_KEY_COUNT_V13, 35);
         assert_eq!(SUPPORTED_VERSION, 6);
         assert_eq!(CTL_KEY_NAMES.len(), CTL_KEY_COUNT);
         assert_eq!(CTL_KEY_NAMES[0], "v");
+        assert_eq!(CTL_KEY_NAMES[35], "ui.effects");
+        assert_eq!(CTL_KEY_NAMES[36], "ui.hidePlayers");
     }
 }

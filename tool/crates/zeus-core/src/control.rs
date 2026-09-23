@@ -45,10 +45,27 @@ pub const CONTROL_FILE_NAME: &str = "zeus-control.txt";
 /// well. Their bump is deliberately deferred to a batch step, so the three ship under a version
 /// the mod already accepts; a jar that has not learned them refuses the whole file and turns every
 /// module off, which is the failure this constant exists to make legible.
-pub const CONTROL_VERSION: u32 = 13;
+pub const CONTROL_VERSION: u32 = 14;
+
+/// Previous Control version supported for backward-compatible ingestion.
+pub const CONTROL_VERSION_V13: u32 = 13;
 
 /// Number of lines `to_wire()` emits, including the `v=` line.
-pub const CTL_KEY_COUNT: usize = 35;
+pub const CTL_KEY_COUNT: usize = 37;
+
+/// Canonical key count for legacy Control v13.
+pub const CTL_KEY_COUNT_V13: usize = 35;
+
+/// Key names for legacy Control v13 in canonical wire order.
+pub const CTL_KEY_NAMES_V13: [&str; CTL_KEY_COUNT_V13] = [
+    "v", "atk.mode", "atk.map", "atk.zone", "atk.x", "atk.y", "atk.radius",
+    "atk.hpOn", "atk.hpPct", "atk.mpOn", "atk.mpPct", "revive.mode", "atk.buffs",
+    "atk.zoneMode", "atk.zonePick", "item.rank", "item.mphp", "item.gold",
+    "mount.on", "mount.id", "item.medalDialog", "item.dropsOn", "item.drops",
+    "nav.target", "ui.ring", "atk.farmOnArrival", "nav.detectSpots",
+    "revive.delay", "revive.on", "enhance.on", "enhance.maxLv", "enhance.charm",
+    "dungeon.on", "dungeon.max", "dungeon.schedule",
+];
 
 /// Key names in the exact order `to_wire()` emits them. The jar's parser is order-insensitive
 /// (it `take()`s by name), but the CI test asserts order so that a drift in either direction —
@@ -61,6 +78,7 @@ pub const CTL_KEY_NAMES: [&str; CTL_KEY_COUNT] = [
     "nav.target", "ui.ring", "atk.farmOnArrival", "nav.detectSpots",
     "revive.delay", "revive.on", "enhance.on", "enhance.maxLv", "enhance.charm",
     "dungeon.on", "dungeon.max", "dungeon.schedule",
+    "ui.effects", "ui.hidePlayers",
 ];
 
 /// Buff slots the operator can address. The client's own count is `ah.b`.
@@ -528,6 +546,12 @@ pub struct ControlSettings {
     /// timer, so the loop starts as soon as it is armed.
     pub dungeon_schedule: i8,
     // ---- end DUNGEON ----
+    // ---- QOL --------------------------------------------------------------
+    /// Visual effects rendering switch: 1 = enabled (client fa.ch = 0), 0 = disabled (fa.ch = 1).
+    pub effects: u8,
+    /// Player rendering mode: 0 = show all (cn.aN=false, cn.aO=false), 1 = hide other players (cn.aN=true, cn.aO=false), 2 = hide all players (cn.aN=false, cn.aO=true).
+    pub hide_players: u8,
+    // ---- end QOL ----------------------------------------------------------
 }
 
 impl Default for ControlSettings {
@@ -578,6 +602,10 @@ impl Default for ControlSettings {
             dungeon_max: -1,
             dungeon_schedule: -1,
             // ---- end DUNGEON ----
+            // ---- QOL --------------------------------------------------------------
+            effects: 1,
+            hide_players: 0,
+            // ---- end QOL ----------------------------------------------------------
         }
     }
 }
@@ -611,11 +639,13 @@ impl ControlSettings {
         if self.spot.is_none() {
             self.mode = AttackMode::Off;
         }
+        self.effects = self.effects.min(1);
+        self.hide_players = self.hide_players.min(2);
         self
     }
 
     /// Renders the exact body the mod parses.
-    pub(crate) fn to_wire(&self) -> String {
+    pub fn to_wire(&self) -> String {
         let settings = self.clone().clamped();
         // An absent spot is written as the client's own not-known values rather than omitted:
         // a missing key turns every module off, which would hide the real reason.
@@ -691,6 +721,10 @@ impl ControlSettings {
         body.push_str(&format!("dungeon.max={}\n", settings.dungeon_max));
         body.push_str(&format!("dungeon.schedule={}\n", settings.dungeon_schedule));
         // ---- end DUNGEON ----
+        // ---- QOL --------------------------------------------------------------
+        body.push_str(&format!("ui.effects={}\n", settings.effects));
+        body.push_str(&format!("ui.hidePlayers={}\n", settings.hide_players));
+        // ---- end QOL ----------------------------------------------------------
         body
     }
 }
@@ -789,7 +823,8 @@ pub fn parse_settings(text: &str) -> CoreResult<ControlSettings> {
             .ok_or_else(|| control_error("control_settings_key_missing"))
     };
 
-    if number::<u32>(take("v")?)? != CONTROL_VERSION {
+    let version = number::<u32>(take("v")?)?;
+    if version != CONTROL_VERSION && version != CONTROL_VERSION_V13 {
         return Err(control_error("control_settings_version_unsupported"));
     }
     let mode = AttackMode::from_wire(number(take("atk.mode")?)?)
@@ -895,6 +930,20 @@ pub fn parse_settings(text: &str) -> CoreResult<ControlSettings> {
         ));
     }
     // ---- end DUNGEON ----
+    let (effects, hide_players) = if version == CONTROL_VERSION_V13 {
+        (1u8, 0u8)
+    } else {
+        let eff = number::<u8>(take("ui.effects")?)?;
+        if eff > 1 {
+            return Err(control_error("control_settings_effects_invalid"));
+        }
+        let hp = number::<u8>(take("ui.hidePlayers")?)?;
+        if hp > 2 {
+            return Err(control_error("control_settings_hide_players_invalid"));
+        }
+        (eff, hp)
+    };
+
     let settings = ControlSettings {
         mode,
         spot,
@@ -934,51 +983,24 @@ pub fn parse_settings(text: &str) -> CoreResult<ControlSettings> {
         dungeon_max,
         dungeon_schedule,
         // ---- end DUNGEON ----
+        // ---- QOL --------------------------------------------------------------
+        effects,
+        hide_players,
+        // ---- end QOL ----------------------------------------------------------
     };
 
-    // Every key must be one this parser knows: an unrecognised key means the tool and the mod
-    // disagree about the format, and the mod turns everything off when that happens.
-    const KNOWN_KEYS: &[&str] = &[
-        "v",
-        "atk.mode",
-        "atk.map",
-        "atk.zone",
-        "atk.x",
-        "atk.y",
-        "atk.radius",
-        "atk.hpOn",
-        "atk.hpPct",
-        "atk.mpOn",
-        "atk.mpPct",
-        "revive.mode",
-        "atk.buffs",
-        "atk.zoneMode",
-        "atk.zonePick",
-        "item.rank",
-        "item.mphp",
-        "item.gold",
-        "mount.on",
-        "mount.id",
-        "item.medalDialog",
-        "item.dropsOn",
-        "item.drops",
-        "nav.target",
-        "ui.ring",
-        "atk.farmOnArrival",
-        "nav.detectSpots",
-        "revive.delay",
-        "revive.on",
-        "enhance.on",
-        "enhance.maxLv",
-        "enhance.charm",
-        // ---- DUNGEON ----
-        "dungeon.on",
-        "dungeon.max",
-        "dungeon.schedule",
-        // ---- end DUNGEON ----
-    ];
-    if fields.iter().any(|(key, _)| !KNOWN_KEYS.contains(key)) {
+    // Every key must be one this parser knows for the respective version: an unrecognised key
+    // means the tool and the mod disagree about the format, and the mod turns everything off.
+    let known_keys: &[&str] = if version == CONTROL_VERSION_V13 {
+        &CTL_KEY_NAMES_V13
+    } else {
+        &CTL_KEY_NAMES
+    };
+    if fields.iter().any(|(key, _)| !known_keys.contains(key)) {
         return Err(control_error("control_settings_unknown_key"));
+    }
+    if fields.len() != known_keys.len() {
+        return Err(control_error("control_settings_key_missing"));
     }
     Ok(settings)
 }
@@ -1017,7 +1039,7 @@ mod wire_shape {
     #[test]
     fn control_body_is_the_exact_shape_the_mod_parses() {
         let body = spotted().to_wire();
-        assert!(body.starts_with("v=13\n"));
+        assert!(body.starts_with("v=14\n"));
         for line in [
             "atk.mode=1",
             "atk.map=43",
@@ -1051,13 +1073,15 @@ mod wire_shape {
             "dungeon.max=-1",
             "dungeon.schedule=-1",
             // ---- end DUNGEON ----
+            "ui.effects=1",
+            "ui.hidePlayers=0",
         ] {
             assert!(body.contains(&format!("{line}\n")), "missing {line}");
         }
         for line in body.lines() {
             assert!(line.contains('='), "unparsable line {line}");
         }
-        // 35 keys, asserted so an added key cannot ship without the mod learning it: an unknown
+        // 37 keys, asserted so an added key cannot ship without the mod learning it: an unknown
         // key turns every module off.
         assert_eq!(body.lines().count(), CTL_KEY_COUNT);
     }
@@ -1173,6 +1197,8 @@ mod settings {
             dungeon_max: 7,
             dungeon_schedule: 25,
             // ---- end DUNGEON ----
+            effects: 0,
+            hide_players: 2,
         };
         assert_eq!(
             parse_settings(&written.to_wire()).expect("the body this crate wrote parses"),
@@ -1277,7 +1303,7 @@ mod settings {
     fn a_reader_refuses_every_malformed_body_rather_than_half_reading_it() {
         let body = spotted().to_wire();
         let cases: &[(&str, String)] = &[
-            ("unsupported version", body.replace("v=13", "v=12")),
+            ("unsupported version", body.replace("v=14", "v=12")),
             ("missing key", body.replace("atk.radius=120\n", "")),
             ("unknown key", format!("{body}nav.mode=1\n")),
             ("duplicate key", format!("{body}atk.mode=0\n")),
@@ -1390,6 +1416,21 @@ mod settings {
                 body.replace("dungeon.schedule=-1", "dungeon.schedule=48"),
             ),
             // ---- end DUNGEON ----
+            // ---- QOL ----
+            (
+                "effects past the ceiling",
+                body.replace("ui.effects=1", "ui.effects=2"),
+            ),
+            (
+                "hide players past the ceiling",
+                body.replace("ui.hidePlayers=0", "ui.hidePlayers=3"),
+            ),
+            ("missing effects", body.replace("ui.effects=1\n", "")),
+            (
+                "missing hide players",
+                body.replace("ui.hidePlayers=0\n", ""),
+            ),
+            // ---- end QOL ----
         ];
         for (label, malformed) in cases {
             // A replace that matched nothing leaves a valid body, and the case would then be
@@ -1513,5 +1554,60 @@ mod contract {
         assert_eq!(wild.dungeon_max, DUNGEON_RUNS_MAX);
         assert_eq!(wild.dungeon_schedule, DUNGEON_SCHEDULE_SLOTS - 1);
         assert_eq!(wild.mount_template_id, MOUNT_ANY);
+    }
+
+    #[test]
+    fn v14_control_contract_and_v13_compatibility() {
+        assert_eq!(CONTROL_VERSION, 14);
+        assert_eq!(CTL_KEY_COUNT, 37);
+        assert_eq!(CTL_KEY_NAMES.len(), 37);
+        assert_eq!(CTL_KEY_NAMES[35], "ui.effects");
+        assert_eq!(CTL_KEY_NAMES[36], "ui.hidePlayers");
+        assert_eq!(CONTROL_VERSION_V13, 13);
+        assert_eq!(CTL_KEY_COUNT_V13, 35);
+        assert_eq!(CTL_KEY_NAMES_V13.len(), 35);
+        assert!(!CTL_KEY_NAMES_V13.contains(&"ui.effects"));
+        assert!(!CTL_KEY_NAMES_V13.contains(&"ui.hidePlayers"));
+
+        // v13 body with neutral defaults
+        let v13_body = ControlSettings::default()
+            .to_wire()
+            .replace("v=14\n", "v=13\n")
+            .replace("ui.effects=1\n", "")
+            .replace("ui.hidePlayers=0\n", "");
+        assert_eq!(v13_body.lines().count(), 35);
+        let parsed_v13 = parse_settings(&v13_body).expect("v13 body parses under compatibility");
+        assert_eq!(parsed_v13.effects, 1);
+        assert_eq!(parsed_v13.hide_players, 0);
+
+        // Normalized v13 emits canonical v14 wire
+        let v14_from_v13 = parsed_v13.to_wire();
+        assert_eq!(v14_from_v13.lines().count(), 37);
+        assert!(v14_from_v13.starts_with("v=14\n"));
+        assert!(v14_from_v13.contains("ui.effects=1\n"));
+        assert!(v14_from_v13.contains("ui.hidePlayers=0\n"));
+
+        // v13 schema rejects v14 keys as unknown
+        let malformed_v13 = format!("{v13_body}ui.effects=1\n");
+        assert!(parse_settings(&malformed_v13).is_err());
+        let malformed_v13_hp = format!("{v13_body}ui.hidePlayers=0\n");
+        assert!(parse_settings(&malformed_v13_hp).is_err());
+
+        // v14 round-trip preserves configured QoL values
+        let mut custom = ControlSettings::default();
+        custom.effects = 0;
+        custom.hide_players = 2;
+        let custom_wire = custom.to_wire();
+        assert!(custom_wire.contains("ui.effects=0\n"));
+        assert!(custom_wire.contains("ui.hidePlayers=2\n"));
+        let parsed_custom = parse_settings(&custom_wire).expect("custom v14 round-trip");
+        assert_eq!(parsed_custom.effects, 0);
+        assert_eq!(parsed_custom.hide_players, 2);
+
+        // invalid QoL values fail
+        assert!(parse_settings(&custom_wire.replace("ui.effects=0", "ui.effects=2")).is_err());
+        assert!(parse_settings(&custom_wire.replace("ui.effects=0", "ui.effects=-1")).is_err());
+        assert!(parse_settings(&custom_wire.replace("ui.hidePlayers=2", "ui.hidePlayers=3")).is_err());
+        assert!(parse_settings(&custom_wire.replace("ui.hidePlayers=2", "ui.hidePlayers=-1")).is_err());
     }
 }
