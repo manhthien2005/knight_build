@@ -704,6 +704,10 @@ mod windows_adapter {
                 .copied()
                 .unwrap_or(-1),
             // ---- end DUNGEON ----
+            // ---- QOL --------------------------------------------------------------
+            effects: 1,
+            hide_players: 0,
+            // ---- end QOL ----------------------------------------------------------
         }
     }
 
@@ -1361,6 +1365,13 @@ mod windows_adapter {
             assert_eq!(core.gold, GoldPickup::Skip);
             assert_eq!(core.revive, ReviveMode::Town);
             assert_eq!(core.zone_mode, ZoneMode::Pick);
+        }
+
+        #[test]
+        fn ui_port_initializes_neutral_visual_qol_defaults() {
+            let core = to_core_settings(UiControl::default());
+            assert_eq!(core.effects, 1);
+            assert_eq!(core.hide_players, 0);
         }
     }
 }
