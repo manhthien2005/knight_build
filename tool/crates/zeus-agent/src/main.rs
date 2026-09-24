@@ -47,6 +47,10 @@ mod pairing;
 #[allow(dead_code)]
 mod spot_scan;
 
+/// Read-only inventory catalog ingest and merge (ENHANCE-01). Cross-platform.
+#[allow(dead_code)]
+pub mod inventory;
+
 /// Main loop — B5+B6+B7+B8 (AGENT-SPEC §4.2).
 /// unix-only: reads /proc, /sys/fs/cgroup, runs ss, calls waitpid.
 #[cfg(unix)]

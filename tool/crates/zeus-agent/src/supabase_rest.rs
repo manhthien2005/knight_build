@@ -491,6 +491,15 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
             JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
         ],
     },
+    RuntimeContract {
+        name: "INVENTORY_CATALOG_V14",
+        jar_sha256: JarManifest::INVENTORY_CATALOG_COMPATIBLE_JAR_SHA256,
+        ctl_version: 14,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+        ],
+    },
 ];
 
 impl JarManifest {
@@ -501,6 +510,8 @@ impl JarManifest {
         "0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd";
     pub const VISUAL_QOL_COMPATIBLE_JAR_SHA256: &'static str =
         "0298b431804ffe33c481a662e4be64cfa2a1409d247a54a7714038be6db91fbd";
+    pub const INVENTORY_CATALOG_COMPATIBLE_JAR_SHA256: &'static str =
+        "f06e4fa973c882c1be359f8fa6db609eba78b33d8fe134874ab7b11488ee5762";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -3021,7 +3032,7 @@ mod tests {
 
         // 7. Test loading actual repository zeus-jar.json
         if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
-            assert_eq!(loaded_manifest.jar_sha256, JarManifest::VISUAL_QOL_COMPATIBLE_JAR_SHA256);
+            assert_eq!(loaded_manifest.jar_sha256, JarManifest::INVENTORY_CATALOG_COMPATIBLE_JAR_SHA256);
             assert_eq!(loaded_manifest.ctl_version, 14);
             assert_eq!(loaded_manifest.ctl_key_count, 37);
             assert!(loaded_manifest.is_character_slot_compatible());
@@ -3050,6 +3061,26 @@ mod tests {
             v14_manifest.advertised_agent_version(),
             "0.1.0+character-slot-v1.visual-qol-v1"
         );
+
+        // 1b. Inventory Catalog v14 JAR also advertises both tokens and neither advertises enhancement-queue-v1
+        let inventory_manifest = JarManifest {
+            jar_sha256: JarManifest::INVENTORY_CATALOG_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1139652,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-24T04:14:20Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(inventory_manifest.is_visual_qol_compatible());
+        assert!(inventory_manifest.is_character_slot_compatible());
+        assert_eq!(
+            inventory_manifest.advertised_agent_version(),
+            "0.1.0+character-slot-v1.visual-qol-v1"
+        );
+        assert!(!inventory_manifest.advertised_agent_version().contains("enhancement-queue"));
 
         // 2. Exact known v13 JAR advertises character-slot-v1 ONLY, never visual-qol-v1
         let v13_manifest = JarManifest {

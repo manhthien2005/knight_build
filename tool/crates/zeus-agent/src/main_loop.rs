@@ -1253,6 +1253,10 @@ fn push_account_runtime_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
         current_map,
         Instant::now(),
     );
+    crate::inventory::merge_inventory_into_snapshot(
+        &mut snap_json,
+        &paths.inventory_file(),
+    );
 
     let pid = acc.process.as_ref().map(|p| p.pid);
     acc.last_snapshot = Some(snap_json.clone());
@@ -1397,6 +1401,7 @@ fn tick_snapshot_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
         // Chỉ push nếu chưa push stopped.
         if acc.last_snapshot.is_some() {
             acc.last_snapshot = None;
+            crate::inventory::clear_inventory(&paths.home);
             if let Err(e) = rest.push_runtime(
                 &acc.id,
                 &RuntimePayload {
@@ -1428,6 +1433,10 @@ fn tick_snapshot_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
         &acc.last_spot_scan,
         current_map,
         Instant::now(),
+    );
+    crate::inventory::merge_inventory_into_snapshot(
+        &mut snap_json,
+        &paths.inventory_file(),
     );
 
     // Prune retained spot_scan if it has expired or map has changed
@@ -1471,7 +1480,7 @@ fn has_meaningful_change(old: &Option<serde_json::Value>, new: &serde_json::Valu
         Some(v) => v,
     };
     // So sánh các field quan trọng — Issue #55
-    for key in ["ctl", "atkstate", "stuck", "lv", "state", "map", "zone", "quota", "dungeonstate", "enhancedone", "spot_scan"] {
+    for key in ["ctl", "atkstate", "stuck", "lv", "state", "map", "zone", "quota", "dungeonstate", "enhancedone", "spot_scan", "inventory"] {
         if old.get(key) != new.get(key) {
             return true;
         }
@@ -1565,6 +1574,10 @@ fn tick_heartbeat(
                 &acc.last_spot_scan,
                 current_map,
                 Instant::now(),
+            );
+            crate::inventory::merge_inventory_into_snapshot(
+                &mut snap_json,
+                &paths.inventory_file(),
             );
             acc.last_snapshot = Some(snap_json.clone());
             let pid = acc.process.as_ref().map(|p| p.pid);

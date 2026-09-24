@@ -247,6 +247,7 @@ public final class Zeus {
     private static final String SPOT_REQ_FILE = "zeus-spot.req";
     private static final String SPOT_RESULT_PAYLOAD_FILE = "zeus-spot-result.tmp";
     private static final String SPOT_RESULT_READY_FILE = "zeus-spot-result.ready";
+    private static final String INVENTORY_FILE = "zeus-inventory.json";
 
     /**
      * Derived paths for the two above, declared here for a sharper reason: a static field with an
@@ -261,6 +262,9 @@ public final class Zeus {
     private static String spotReqPath;
     private static String spotPayloadPath;
     private static String spotReadyPath;
+    private static String inventoryPath;
+    private static long lastInventoryHash = Long.MIN_VALUE;
+    private static boolean inventoryWritten = false;
 
     /** Settings source, or null to keep every module off. Set by -Dzeus.ctl.in. */
     private static String ctlPath = null;
@@ -1033,6 +1037,7 @@ public final class Zeus {
             spotReqPath = home + SPOT_REQ_FILE;
             spotPayloadPath = home + SPOT_RESULT_PAYLOAD_FILE;
             spotReadyPath = home + SPOT_RESULT_READY_FILE;
+            inventoryPath = home + INVENTORY_FILE;
         }
         writeEveryMs = (long) intProp("zeus.player.writeMs", 1000);
         if (writeEveryMs < 200L) {
@@ -2990,6 +2995,7 @@ public final class Zeus {
             if (now - wroteAt >= writeEveryMs) {
                 wroteAt = now;
                 publish(now);
+                publishInventory(now);
             }
         } catch (Throwable t) {
             // A sensor must never stall the client tick.
@@ -3216,6 +3222,152 @@ public final class Zeus {
             }
         }
     }
+
+    // ---- INVENTORY TELEMETRY (ENHANCE-01) -------------------------------------
+    /**
+     * Serializes the current bag inventory (bw.V) in stable slot order.
+     * Zero-mutation: reads fields, sends no packets, never mutates bw.V items.
+     */
+    public static String formatInventoryCatalogJson() {
+        StringBuffer out = new StringBuffer(512);
+        int capacity = bq.x > 0 ? bq.x : 0;
+        out.append("{\n");
+        out.append("  \"version\": 1,\n");
+        out.append("  \"bag_capacity\": ").append(capacity).append(",\n");
+        out.append("  \"items\": [");
+        if (bw.V != null && bw.V.c() > 0) {
+            boolean first = true;
+            for (int slot = 0; slot < bw.V.c(); slot++) {
+                Object entry = bw.V.a(slot);
+                if (entry == null || !(entry instanceof bw)) {
+                    continue;
+                }
+                bw it = (bw) entry;
+                if (!first) {
+                    out.append(",");
+                }
+                first = false;
+                out.append("\n    {\n");
+                out.append("      \"slot\": ").append(slot).append(",\n");
+                out.append("      \"template_id\": ").append(it.O).append(",\n");
+                out.append("      \"category\": ").append(it.u).append(",\n");
+                out.append("      \"base_name\": ");
+                String baseName = (it.i != null && it.i.length() > 0) ? it.i : (it.g != null ? it.g : "");
+                escapeJsonString(baseName, out);
+                out.append(",\n");
+                out.append("      \"display_name\": ");
+                escapeJsonString(it.g != null ? it.g : "", out);
+                out.append(",\n");
+                out.append("      \"level\": ").append((int) it.z).append(",\n");
+                out.append("      \"tier\": ").append(it.N).append(",\n");
+                out.append("      \"count\": ").append(it.K > 0 ? it.K : 1).append(",\n");
+                out.append("      \"durability\": ");
+                if (it.v >= 0) {
+                    out.append(it.v);
+                } else {
+                    out.append("null");
+                }
+                out.append(",\n");
+                out.append("      \"bind\": ");
+                if (it.B >= 0) {
+                    out.append((int) it.B);
+                } else {
+                    out.append("null");
+                }
+                out.append(",\n");
+                out.append("      \"icon\": ");
+                if (it.t >= 0) {
+                    out.append(it.t);
+                } else {
+                    out.append("null");
+                }
+                out.append(",\n");
+                out.append("      \"candidate_for_enhancement\": ").append(it.u == 3 ? "true" : "false").append("\n");
+                out.append("    }");
+            }
+            if (!first) {
+                out.append("\n  ");
+            }
+        }
+        out.append("]\n");
+        out.append("}\n");
+        return out.toString();
+    }
+
+    /** Fast deterministic hash for change suppression. */
+    public static long computeInventoryHash() {
+        long hash = 17L;
+        hash = 31L * hash + (long) (bq.x > 0 ? bq.x : 0);
+        int count = bw.V != null ? bw.V.c() : 0;
+        hash = 31L * hash + (long) count;
+        if (bw.V != null) {
+            for (int i = 0; i < count; i++) {
+                Object entry = bw.V.a(i);
+                if (entry instanceof bw) {
+                    bw it = (bw) entry;
+                    hash = 31L * hash + (long) i;
+                    hash = 31L * hash + (long) it.O;
+                    hash = 31L * hash + (long) it.u;
+                    hash = 31L * hash + (long) it.z;
+                    hash = 31L * hash + (long) it.N;
+                    hash = 31L * hash + (long) it.K;
+                    hash = 31L * hash + (long) it.v;
+                    hash = 31L * hash + (long) it.B;
+                    hash = 31L * hash + (long) it.t;
+                    if (it.g != null) {
+                        hash = 31L * hash + (long) it.g.hashCode();
+                    }
+                }
+            }
+        }
+        return hash;
+    }
+
+    /** Publishes inventory sidecar with change suppression. */
+    private static void publishInventory(long now) {
+        if (inventoryPath == null || bw.V == null) {
+            return;
+        }
+        try {
+            long currentHash = computeInventoryHash();
+            if (inventoryWritten && currentHash == lastInventoryHash) {
+                return;
+            }
+            String body = formatInventoryCatalogJson();
+            writeInventory(body);
+            lastInventoryHash = currentHash;
+            inventoryWritten = true;
+        } catch (Throwable t) {
+            // A sensor must never stall the client tick.
+        }
+    }
+
+    /** Atomically writes the inventory sidecar file. */
+    private static void writeInventory(String body) {
+        java.io.OutputStream stream = null;
+        try {
+            java.io.File target = new java.io.File(inventoryPath);
+            java.io.File temp = new java.io.File(inventoryPath + ".tmp");
+            stream = new java.io.FileOutputStream(temp);
+            stream.write(body.getBytes("UTF-8"));
+            stream.close();
+            stream = null;
+            if (target.exists() && !target.delete()) {
+                return;
+            }
+            temp.renameTo(target);
+        } catch (Throwable t) {
+            // Unwritable path: stay silent rather than spamming.
+        } finally {
+            if (stream != null) {
+                try {
+                    stream.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+    // ---- end INVENTORY TELEMETRY ----------------------------------------------
 
     // ---- GUARDS ---------------------------------------------------------------
     //

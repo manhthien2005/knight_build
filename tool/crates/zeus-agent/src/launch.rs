@@ -84,6 +84,9 @@ impl AccountPaths {
     pub fn spot_result_ready_file(&self) -> PathBuf {
         self.home.join(crate::spot_scan::SPOT_RESULT_READY_FILE_NAME)
     }
+    pub fn inventory_file(&self) -> PathBuf {
+        self.home.join(crate::inventory::INVENTORY_FILE_NAME)
+    }
 }
 
 /// Heap and GC settings. Defaults are the ones measured in `docker-build/README.md`.
