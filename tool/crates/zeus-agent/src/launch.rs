@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use zeus_core::wire::{CONTROL_FILE_NAME, SNAPSHOT_FILE_NAME, suite_directory};
+use zeus_core::wire::{CONTROL_FILE_NAME, SNAPSHOT_FILE_NAME};
 
 /// MicroEmulator's entry point. From `runtime-descriptor.json`: `"main_class"`.
 pub const MAIN_CLASS: &str = "org.microemu.app.Main";
@@ -86,6 +86,15 @@ impl AccountPaths {
     }
     pub fn inventory_file(&self) -> PathBuf {
         self.home.join(crate::inventory::INVENTORY_FILE_NAME)
+    }
+    pub fn enhancement_request_file(&self) -> PathBuf {
+        self.home.join(crate::enhancement::ENHANCE_REQUEST_FILE_NAME)
+    }
+    pub fn enhancement_status_file(&self) -> PathBuf {
+        self.home.join(crate::enhancement::ENHANCE_STATUS_FILE_NAME)
+    }
+    pub fn enhancement_cancel_file(&self) -> PathBuf {
+        self.home.join(crate::enhancement::ENHANCE_CANCEL_FILE_NAME)
     }
 }
 

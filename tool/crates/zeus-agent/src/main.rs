@@ -51,6 +51,10 @@ mod spot_scan;
 #[allow(dead_code)]
 pub mod inventory;
 
+/// Safe single-item enhancement sidecar protocol and telemetry (ENHANCE-04). Cross-platform.
+#[allow(dead_code)]
+pub mod enhancement;
+
 /// Main loop — B5+B6+B7+B8 (AGENT-SPEC §4.2).
 /// unix-only: reads /proc, /sys/fs/cgroup, runs ss, calls waitpid.
 #[cfg(unix)]

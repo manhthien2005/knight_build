@@ -129,6 +129,8 @@ struct AccountState {
     pending_spot_scan: Option<crate::spot_scan::PendingSpotScan>,
     /// Retained latest Detect Spots scan result.
     last_spot_scan: Option<crate::spot_scan::RetainedSpotScan>,
+    /// Pending single-item enhancement, if any.
+    pending_enhancement: Option<crate::enhancement::PendingEnhancement>,
 }
 
 /// Cấu hình môi trường agent. Đọc từ biến môi trường lúc boot.
@@ -253,6 +255,7 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
         let _ = clear_snapshot(&paths.home);
         let _ = clear_settings(&paths.home);
         crate::spot_scan::clean_spot_files(&paths.home);
+        crate::enhancement::clean_enhancement_files(&paths.home);
         // prepare_directories trước khi spawn — Issue #16
         let _ = crate::launch::prepare_directories(&paths);
         let _ = try_apply_config(acc, jar_ctl_version, &rest);
@@ -388,8 +391,9 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
             }
         }
 
-        // ── poll pending spot scans (non-blocking) ─────────────────────────
+        // ── poll pending spot scans & enhancements (non-blocking) ─────────
         poll_pending_spot_scans(&mut accounts, &rest);
+        poll_pending_enhancements(&mut accounts, &rest);
 
         let now = Instant::now();
 
@@ -1220,6 +1224,107 @@ fn dispatch_command(
             // 8. Publish telemetry snapshot ngay lập tức
             push_account_runtime_telemetry(acc, rest);
         }
+        "enhance-item" | "enhance-single-item" => {
+            // 1. JVM/process phải đang chạy
+            let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+            if !is_alive {
+                eprintln!("[command] enhance-item: account {account_id} JVM is not running");
+                if let Err(e) = rest.finish_command(
+                    &cmd.id,
+                    CommandStatus::Failed,
+                    Some("account process is not running"),
+                ) {
+                    eprintln!("[command] finish_command failed: {e}");
+                }
+                return;
+            }
+
+            // 2. Reject nếu đã có enhancement đang pending
+            if acc.pending_enhancement.is_some() {
+                eprintln!("[command] enhance-item: account {account_id} already has pending enhancement");
+                if let Err(e) = rest.finish_command(
+                    &cmd.id,
+                    CommandStatus::Failed,
+                    Some("account already has an enhancement attempt in flight"),
+                ) {
+                    eprintln!("[command] finish_command failed: {e}");
+                }
+                return;
+            }
+
+            // 3. Parse and validate command payload strictly
+            let payload: crate::enhancement::SingleItemEnhanceCommandPayload = match cmd.payload {
+                Some(ref p) => match serde_json::from_value(p.clone()) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        eprintln!("[command] enhance-item: payload parse error: {e}");
+                        let _ = rest.finish_command(&cmd.id, CommandStatus::Failed, Some("malformed enhancement payload"));
+                        return;
+                    }
+                },
+                None => {
+                    eprintln!("[command] enhance-item: missing payload");
+                    let _ = rest.finish_command(&cmd.id, CommandStatus::Failed, Some("missing enhancement payload"));
+                    return;
+                }
+            };
+
+            if let Err(e) = crate::enhancement::validate_single_item_payload(&payload) {
+                eprintln!("[command] enhance-item: invalid payload: {e}");
+                let err_str = e.to_string();
+                let _ = rest.finish_command(&cmd.id, CommandStatus::Failed, Some(&err_str));
+                return;
+            }
+
+            // 4. Mark command running trên database
+            let _ = rest.mark_command_running(&cmd.id);
+
+            // 5. Clean stale enhancement files for this account
+            let paths = AccountPaths::for_slot(acc.slot_index);
+            crate::enhancement::clean_enhancement_files(&paths.home);
+
+            // 6. Write zeus-enhance.req
+            let now_rfc = crate::supabase_rest::now_rfc3339();
+            let req_payload = crate::enhancement::EnhancementRequestPayload {
+                request_id: cmd.id.clone(),
+                captured_slot: payload.captured_slot,
+                template_id: payload.template_id,
+                category: payload.category,
+                base_name: payload.base_name,
+                tier: payload.tier,
+                expected_level: payload.expected_level,
+                target_level: payload.target_level,
+                charm_mode: payload.charm_mode,
+                payment_type: payload.payment_type,
+                max_attempts: payload.max_attempts,
+                requested_at: Some(now_rfc),
+            };
+
+            if let Err(e) = crate::enhancement::write_enhancement_request_file(&paths.home, &req_payload) {
+                eprintln!("[command] enhance-item: write_enhancement_request_file failed: {e}");
+                if let Err(fe) = rest.finish_command(
+                    &cmd.id,
+                    CommandStatus::Failed,
+                    Some("failed to write enhancement request file"),
+                ) {
+                    eprintln!("[command] finish_command failed: {fe}");
+                }
+                return;
+            }
+
+            // 7. Track PendingEnhancement in AccountState
+            acc.pending_enhancement = Some(crate::enhancement::PendingEnhancement {
+                command_id: cmd.id.clone(),
+                request_id: cmd.id.clone(),
+                started_at: Instant::now(),
+                template_id: payload.template_id,
+                category: payload.category,
+                target_level: payload.target_level,
+            });
+
+            // 8. Publish telemetry snapshot ngay lập tức
+            push_account_runtime_telemetry(acc, rest);
+        }
         other => {
             eprintln!("[command] unknown command type: {other}");
             if let Err(e) = rest.finish_command(
@@ -1256,6 +1361,10 @@ fn push_account_runtime_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
     crate::inventory::merge_inventory_into_snapshot(
         &mut snap_json,
         &paths.inventory_file(),
+    );
+    crate::enhancement::merge_enhancement_into_snapshot(
+        &mut snap_json,
+        &paths.enhancement_status_file(),
     );
 
     let pid = acc.process.as_ref().map(|p| p.pid);
@@ -1386,6 +1495,110 @@ fn poll_pending_spot_scans(
     }
 }
 
+#[cfg(unix)]
+fn poll_pending_enhancements(
+    accounts: &mut HashMap<String, AccountState>,
+    rest: &SupabaseRest,
+) {
+    let now = Instant::now();
+    for acc in accounts.values_mut() {
+        let pending = match acc.pending_enhancement.take() {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let paths = AccountPaths::for_slot(acc.slot_index);
+
+        let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+        if !is_alive {
+            eprintln!(
+                "[enhancement] account {} process died while command {} in flight",
+                acc.id, pending.command_id
+            );
+            crate::enhancement::clean_enhancement_files(&paths.home);
+            if let Err(e) = rest.finish_command(
+                &pending.command_id,
+                CommandStatus::Failed,
+                Some("account process died during enhancement"),
+            ) {
+                eprintln!("[enhancement] finish_command (process died) failed: {e}");
+            }
+            push_account_runtime_telemetry(acc, rest);
+            continue;
+        }
+
+        if crate::enhancement::is_pending_enhancement_timed_out(&pending, now) {
+            eprintln!(
+                "[enhancement] account {} command {} timed out after {}s",
+                acc.id, pending.command_id, crate::enhancement::ENHANCEMENT_TIMEOUT_SECS
+            );
+            crate::enhancement::clean_enhancement_files(&paths.home);
+            if let Err(e) = rest.finish_command(
+                &pending.command_id,
+                CommandStatus::Failed,
+                Some("enhancement attempt timed out waiting for JVM completion"),
+            ) {
+                eprintln!("[enhancement] finish_command (timeout) failed: {e}");
+            }
+            push_account_runtime_telemetry(acc, rest);
+            continue;
+        }
+
+        match crate::enhancement::poll_enhancement_status(&paths.home, &pending.request_id) {
+            crate::enhancement::EnhancementPollOutcome::NoStatusYet => {
+                acc.pending_enhancement = Some(pending);
+            }
+            crate::enhancement::EnhancementPollOutcome::TerminalSuccess(status) => {
+                eprintln!(
+                    "[enhancement] account {} command {} finished with state: {}",
+                    acc.id, pending.command_id, status.state
+                );
+                crate::enhancement::clean_enhancement_request_file(&paths.home);
+                if let Err(e) = rest.finish_command(
+                    &pending.command_id,
+                    CommandStatus::Success,
+                    None,
+                ) {
+                    eprintln!("[enhancement] finish_command (success) failed: {e}");
+                }
+                push_account_runtime_telemetry(acc, rest);
+            }
+            crate::enhancement::EnhancementPollOutcome::TerminalFailure { state, error_message } => {
+                eprintln!(
+                    "[enhancement] account {} command {} failed: state={} err={:?}",
+                    acc.id, pending.command_id, state, error_message
+                );
+                crate::enhancement::clean_enhancement_request_file(&paths.home);
+                let err_desc = error_message
+                    .unwrap_or_else(|| format!("enhancement ended in failure state: {state}"));
+                if let Err(e) = rest.finish_command(
+                    &pending.command_id,
+                    CommandStatus::Failed,
+                    Some(&err_desc),
+                ) {
+                    eprintln!("[enhancement] finish_command (failed) failed: {e}");
+                }
+                push_account_runtime_telemetry(acc, rest);
+            }
+            crate::enhancement::EnhancementPollOutcome::InvalidPayload(err_msg) => {
+                eprintln!(
+                    "[enhancement] account {} command {} invalid payload: {err_msg}",
+                    acc.id, pending.command_id
+                );
+                crate::enhancement::clean_enhancement_files(&paths.home);
+                if let Err(e) = rest.finish_command(
+                    &pending.command_id,
+                    CommandStatus::Failed,
+                    Some(&format!("invalid enhancement status file: {err_msg}")),
+                ) {
+                    eprintln!("[enhancement] finish_command (error) failed: {e}");
+                }
+                push_account_runtime_telemetry(acc, rest);
+            }
+        }
+    }
+}
+
 // ── telemetry tick (B6) ───────────────────────────────────────────────────────
 
 #[cfg(unix)]
@@ -1402,6 +1615,7 @@ fn tick_snapshot_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
         if acc.last_snapshot.is_some() {
             acc.last_snapshot = None;
             crate::inventory::clear_inventory(&paths.home);
+            crate::enhancement::clean_enhancement_files(&paths.home);
             if let Err(e) = rest.push_runtime(
                 &acc.id,
                 &RuntimePayload {
@@ -1438,6 +1652,10 @@ fn tick_snapshot_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
         &mut snap_json,
         &paths.inventory_file(),
     );
+    crate::enhancement::merge_enhancement_into_snapshot(
+        &mut snap_json,
+        &paths.enhancement_status_file(),
+    );
 
     // Prune retained spot_scan if it has expired or map has changed
     if let Some(ref scan) = acc.last_spot_scan {
@@ -1472,7 +1690,7 @@ fn tick_snapshot_telemetry(acc: &mut AccountState, rest: &SupabaseRest) {
     }
 }
 
-/// Thay đổi có nghĩa — Issues #55: bổ sung state, map, zone, quota, dungeonstate, enhancedone, spot_scan
+/// Thay đổi có nghĩa — Issues #55: bổ sung state, map, zone, quota, dungeonstate, enhancedone, spot_scan, enhancement
 #[cfg(unix)]
 fn has_meaningful_change(old: &Option<serde_json::Value>, new: &serde_json::Value) -> bool {
     let old = match old {
@@ -1480,7 +1698,7 @@ fn has_meaningful_change(old: &Option<serde_json::Value>, new: &serde_json::Valu
         Some(v) => v,
     };
     // So sánh các field quan trọng — Issue #55
-    for key in ["ctl", "atkstate", "stuck", "lv", "state", "map", "zone", "quota", "dungeonstate", "enhancedone", "spot_scan", "inventory"] {
+    for key in ["ctl", "atkstate", "stuck", "lv", "state", "map", "zone", "quota", "dungeonstate", "enhancedone", "spot_scan", "inventory", "enhancement"] {
         if old.get(key) != new.get(key) {
             return true;
         }
@@ -1763,6 +1981,8 @@ fn retire_account_safely(
             if let Err(e) = clear_snapshot(&paths.home) {
                 eprintln!("[retire] account={}: clear_snapshot failed: {e}", account_id);
             }
+            crate::spot_scan::clean_spot_files(&paths.home);
+            crate::enhancement::clean_enhancement_files(&paths.home);
             acc.process = None;
             accounts.remove(account_id);
         }
@@ -1861,6 +2081,7 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
                 retiring: false,
                 pending_spot_scan: None,
                 last_spot_scan: None,
+                pending_enhancement: None,
             };
             (id, state)
         })
@@ -1898,6 +2119,7 @@ fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountS
         retiring: false,
         pending_spot_scan: None,
         last_spot_scan: None,
+        pending_enhancement: None,
     })
 }
 
@@ -1943,6 +2165,7 @@ fn merge_account_states(
             let _ = crate::launch::prepare_directories(&paths);
             let _ = clear_snapshot(&paths.home);
             crate::spot_scan::clean_spot_files(&paths.home);
+            crate::enhancement::clean_enhancement_files(&paths.home);
             let mut acc = fresh_acc;
             let _ = try_apply_config(&mut acc, jar_ctl_version, rest);
             reconcile_desired_state(&mut acc, rest, identity);

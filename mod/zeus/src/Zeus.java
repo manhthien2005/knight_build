@@ -248,6 +248,9 @@ public final class Zeus {
     private static final String SPOT_RESULT_PAYLOAD_FILE = "zeus-spot-result.tmp";
     private static final String SPOT_RESULT_READY_FILE = "zeus-spot-result.ready";
     private static final String INVENTORY_FILE = "zeus-inventory.json";
+    private static final String ENH_REQ_FILE = "zeus-enhance.req";
+    private static final String ENH_STATUS_FILE = "zeus-enhance-status.json";
+    private static final String ENH_CANCEL_FILE = "zeus-enhance.cancel";
 
     /**
      * Derived paths for the two above, declared here for a sharper reason: a static field with an
@@ -263,6 +266,9 @@ public final class Zeus {
     private static String spotPayloadPath;
     private static String spotReadyPath;
     private static String inventoryPath;
+    private static String enhReqPath;
+    private static String enhStatusPath;
+    private static String enhCancelPath;
     private static long lastInventoryHash = Long.MIN_VALUE;
     private static boolean inventoryWritten = false;
 
@@ -1038,6 +1044,9 @@ public final class Zeus {
             spotPayloadPath = home + SPOT_RESULT_PAYLOAD_FILE;
             spotReadyPath = home + SPOT_RESULT_READY_FILE;
             inventoryPath = home + INVENTORY_FILE;
+            enhReqPath = home + ENH_REQ_FILE;
+            enhStatusPath = home + ENH_STATUS_FILE;
+            enhCancelPath = home + ENH_CANCEL_FILE;
         }
         writeEveryMs = (long) intProp("zeus.player.writeMs", 1000);
         if (writeEveryMs < 200L) {
@@ -2291,7 +2300,16 @@ public final class Zeus {
      * a transform nobody had measured; the numbers cost one line and end the argument.
      */
     public static void paint(bx canvas) {
-        if (!ringOn || canvas == null) {
+        if (canvas == null) {
+            return;
+        }
+        try {
+            if (isEnhancementHighlightActive()) {
+                paintEnhancementHighlight(canvas);
+            }
+        } catch (Throwable ignored) {
+        }
+        if (!ringOn) {
             return;
         }
         try {
@@ -2904,6 +2922,26 @@ public final class Zeus {
             // does, once it has taken what it needed.
         }
         // ---- end DUNGEON ------------------------------------------------------
+        // ---- ENHANCE-04 -------------------------------------------------------
+        if (enhState == 6 && items != null) {
+            try {
+                int pickIndex = 0;
+                for (int i = 0; i < items.c(); i++) {
+                    Object entry = items.a(i);
+                    if (entry instanceof bt) {
+                        String label = norm(((bt) entry).a);
+                        if (label.indexOf("cuong hoa") >= 0) {
+                            pickIndex = i;
+                            break;
+                        }
+                    }
+                }
+                q.a().b((byte) idNPC, (short) idMenu, (byte) pickIndex);
+                taken = true;
+            } catch (Throwable t) {
+            }
+        }
+        // ---- end ENHANCE-04 ---------------------------------------------------
         if (!traceOn) {
             return taken;
         }
@@ -3460,6 +3498,7 @@ public final class Zeus {
         authReset();
         mapStableReset();
         navSessionReset();
+        recoverEnhancementSession();
     }
 
     private static void sessionTick() {
@@ -4375,30 +4414,930 @@ public final class Zeus {
         return -1;
     }
 
-    // ---- ENHANCE --------------------------------------------------------------
+    // ---- ENHANCE-04 RUNTIME CORE ----------------------------------------------
     //
-    // Auto equipment upgrade ("Cường Hóa"). Its own module rather than a branch of ATTACK, for
-    // the reason REVIVE already paid for: it has to run on a character that is not armed to
-    // fight, and a module nested inside `attack()` never runs there.
-    //
-    // The switch, the settings and the published state are all wired. The walk is not, and that
-    // is deliberate rather than unfinished-by-accident: docs/18-cuong-hoa-vs-ban-rac.md §2.4
-    // found no enhance screen anywhere in the client, so the dialog is built from server-sent
-    // text, and §3.2 lays out two ways to drive it that both begin with recording the real NPC
-    // menu labels by hand. Guessing those labels would walk the character into a menu nothing
-    // here can read, and a dialog left open then blocks every module that gates on ready().
+    // Safe single-item enhancement runtime engine without multi-item queue.
+    // Driven by sidecar requests (zeus-enhance.req) and reporting telemetry via
+    // zeus-enhance-status.json.
 
-    private static void enhance() {
-        if (!enhanceOn) {
+    // State machine fields (public static for testability and runtime visibility)
+    public static int enhState = 0; // 0 = IDLE
+    public static String enhRequestId = "";
+    public static int enhCapturedSlot = -1;
+    public static int enhTemplateId = 0;
+    public static int enhCategory = 3;
+    public static String enhBaseName = "";
+    public static int enhTier = 0;
+    public static int enhExpectedLevel = 0;
+    public static int enhStartLevel = 0;
+    public static int enhCurrentLevel = 0;
+    public static int enhTargetLevel = 0;
+    public static int enhConfiguredCharmMode = 3;
+    public static int enhResolvedCharmMode = 0;
+    public static int enhPaymentType = 0;
+    public static int enhAttemptCount = 0;
+    public static int enhMaxAttempts = 1;
+    public static String enhLastResult = null;
+    public static int enhActiveTargetSlot = -1;
+    public static boolean enhInFlightExecute = false;
+
+    public static long enhQuotedGoldCost = 0L;
+    public static long enhQuotedGemCost = 0L;
+    public static long[] enhQuotedMaterialRequirements = new long[4];
+    public static long enhActualGoldSpent = 0L;
+    public static long enhActualGemSpent = 0L;
+    public static long[] enhActualMaterialsSpent = new long[4];
+    public static long enhActualCharmsSpent = 0L;
+    public static String enhAccountingStatus = "PENDING";
+    public static String enhErrorCode = null;
+    public static String enhErrorMessage = null;
+
+    // Pre-attempt snapshot values for delta accounting
+    public static long snapGoldBefore = 0L;
+    public static long snapGemBefore = 0L;
+    public static long[] snapMaterialsBefore = new long[4];
+    public static long snapCharmBefore = 0L;
+    public static int snapTargetLevelBefore = 0;
+    public static int snapSelectedCharmTemplateId = 0;
+
+    private static String lastEnhRequestId = null;
+    private static long enhReqCheckedAt = 0L;
+    private static int enhWait = 0;
+
+    public static String getEnhancementStateName(int state) {
+        switch (state) {
+            case 0: return "IDLE";
+            case 1: return "VALIDATING_REQUEST";
+            case 2: return "WAITING_GAME_READY";
+            case 3: return "VALIDATING_TARGET";
+            case 4: return "LOCATING_BLACKSMITH";
+            case 5: return "APPROACHING_BLACKSMITH";
+            case 6: return "OPENING_FORGE";
+            case 7: return "INSERTING_TARGET";
+            case 8: return "RESOLVING_CHARM";
+            case 9: return "INSERTING_CHARM";
+            case 10: return "VERIFYING_RESOURCES";
+            case 11: return "READY_FOR_ATTEMPT";
+            case 12: return "ATTEMPTING";
+            case 13: return "WAITING_RESULT";
+            case 14: return "WAITING_SETTLEMENT";
+            case 15: return "FAILURE_PROTECTED";
+            case 16: return "FAILURE_DEGRADED";
+            case 17: return "TARGET_REACHED";
+            case 18: return "ATTEMPT_LIMIT_REACHED";
+            case 19: return "ITEM_DESTROYED";
+            case 20: return "ITEM_MISSING_OR_CHANGED";
+            case 21: return "AMBIGUOUS_WIRE_TARGET";
+            case 22: return "AMBIGUOUS_CHARM";
+            case 23: return "INELIGIBLE_ITEM";
+            case 24: return "CHARM_MISSING";
+            case 25: return "INSUFFICIENT_GOLD";
+            case 26: return "INSUFFICIENT_GEMS";
+            case 27: return "INSUFFICIENT_MATERIALS";
+            case 28: return "SERVER_REJECTED";
+            case 29: return "RESULT_AMBIGUOUS";
+            case 30: return "ACCOUNTING_UNSETTLED";
+            case 31: return "TIMEOUT";
+            case 32: return "CANCELLED";
+            case 33: return "MANUAL_REVIEW_REQUIRED";
+            default: return "UNKNOWN";
+        }
+    }
+
+    public static boolean isEnhancementStateTerminal(int state) {
+        return state >= 17 && state <= 33;
+    }
+
+    public static int resolveAutoCharm(int currentLevel) {
+        if (currentLevel <= 5) return 0;
+        if (currentLevel <= 10) return 1;
+        if (currentLevel <= 14) return 2;
+        return 0;
+    }
+
+    public static void validateEnhancementTarget() {
+        if (bw.V == null) {
+            enhState = 20; // ITEM_MISSING_OR_CHANGED
+            enhErrorMessage = "Bag is empty or null";
+            return;
+        }
+        int matchCount = 0;
+        j matchedItem = null;
+        int matchedSlot = -1;
+        int bagCount = bw.V.c();
+        for (int i = 0; i < bagCount; i++) {
+            Object obj = bw.V.a(i);
+            if (!(obj instanceof j)) {
+                continue;
+            }
+            j item = (j) obj;
+            if (item.O == enhTemplateId && item.u == enhCategory) {
+                matchCount++;
+                if (matchedItem == null) {
+                    matchedItem = item;
+                    matchedSlot = i;
+                }
+            }
+        }
+        if (matchCount == 0) {
+            enhState = 20; // ITEM_MISSING_OR_CHANGED
+            enhErrorMessage = "Target item not found in bag";
+            enhActiveTargetSlot = -1;
+            return;
+        }
+        if (matchCount > 1) {
+            enhState = 21; // AMBIGUOUS_WIRE_TARGET
+            enhErrorMessage = "Ambiguous wire target: multiple items match template " + enhTemplateId;
+            enhActiveTargetSlot = -1;
+            return;
+        }
+        // Exactly 1 match: validate fingerprint and level
+        if (enhBaseName != null && enhBaseName.trim().length() > 0 && matchedItem.i != null) {
+            if (!enhBaseName.equals(matchedItem.i)) {
+                enhState = 20; // ITEM_MISSING_OR_CHANGED
+                enhErrorMessage = "Item base name changed: expected " + enhBaseName + ", got " + matchedItem.i;
+                enhActiveTargetSlot = -1;
+                return;
+            }
+        }
+        if (matchedItem.N != enhTier) {
+            enhState = 20; // ITEM_MISSING_OR_CHANGED
+            enhErrorMessage = "Item tier changed: expected " + enhTier + ", got " + matchedItem.N;
+            enhActiveTargetSlot = -1;
+            return;
+        }
+        if (matchedItem.z != enhExpectedLevel) {
+            enhState = 20; // ITEM_MISSING_OR_CHANGED
+            enhErrorMessage = "Item level changed: expected " + enhExpectedLevel + ", got " + matchedItem.z;
+            enhActiveTargetSlot = -1;
+            return;
+        }
+        enhCurrentLevel = matchedItem.z;
+        enhStartLevel = matchedItem.z;
+        enhActiveTargetSlot = matchedSlot;
+        enhState = 4; // LOCATING_BLACKSMITH
+    }
+
+    public static void resolveEnhancementCharm() {
+        int desiredMode = enhConfiguredCharmMode;
+        if (desiredMode == 3) {
+            desiredMode = resolveAutoCharm(enhCurrentLevel);
+        }
+        if (desiredMode == 0) {
+            enhResolvedCharmMode = 0;
+            snapSelectedCharmTemplateId = 0;
+            enhState = 10; // VERIFYING_RESOURCES
+            return;
+        }
+        if (bw.V == null) {
+            enhState = 24; // CHARM_MISSING
+            enhErrorMessage = "Bag is empty; charm missing";
+            return;
+        }
+        int bagCount = bw.V.c();
+        java.util.Vector charmTemplates = new java.util.Vector();
+        j chosenCharm = null;
+        for (int i = 0; i < bagCount; i++) {
+            Object obj = bw.V.a(i);
+            if (!(obj instanceof j)) {
+                continue;
+            }
+            j item = (j) obj;
+            if (item.u == 7 && item.A == 11) {
+                boolean matchesMode = false;
+                String name = norm(item.g != null ? item.g : "");
+                String base = norm(item.i != null ? item.i : "");
+                if (desiredMode == 1) {
+                    if (name.indexOf("3 la") >= 0 || name.indexOf("3 lá") >= 0
+                            || base.indexOf("3 la") >= 0 || base.indexOf("3 lá") >= 0) {
+                        matchesMode = true;
+                    }
+                } else if (desiredMode == 2) {
+                    if (name.indexOf("4 la") >= 0 || name.indexOf("4 lá") >= 0
+                            || base.indexOf("4 la") >= 0 || base.indexOf("4 lá") >= 0) {
+                        matchesMode = true;
+                    }
+                }
+                if (matchesMode) {
+                    Integer idObj = new Integer(item.O);
+                    if (!charmTemplates.contains(idObj)) {
+                        charmTemplates.addElement(idObj);
+                    }
+                    if (chosenCharm == null) {
+                        chosenCharm = item;
+                    }
+                }
+            }
+        }
+        if (charmTemplates.isEmpty()) {
+            enhState = 24; // CHARM_MISSING
+            enhErrorMessage = "Required charm mode " + desiredMode + " not found in bag";
+            return;
+        }
+        if (charmTemplates.size() > 1) {
+            enhState = 22; // AMBIGUOUS_CHARM
+            enhErrorMessage = "Multiple distinct charm templates match mode " + desiredMode;
+            return;
+        }
+        enhResolvedCharmMode = desiredMode;
+        snapSelectedCharmTemplateId = chosenCharm.O;
+        enhState = 9; // INSERTING_CHARM
+    }
+
+    public static void verifyEnhancementResources() {
+        int targetLv = (c.l != null) ? c.l.z : enhCurrentLevel;
+        long quotedGold = 0L;
+        long quotedGems = 0L;
+        byte[] reqMats = null;
+        if (c.k != null && targetLv >= 0 && targetLv < c.k.length && c.k[targetLv] != null) {
+            quotedGold = c.k[targetLv].c;
+            quotedGems = c.k[targetLv].d;
+            reqMats = c.k[targetLv].e;
+        }
+        enhQuotedGoldCost = quotedGold;
+        enhQuotedGemCost = quotedGems;
+        if (enhQuotedMaterialRequirements == null) {
+            enhQuotedMaterialRequirements = new long[4];
+        }
+        if (reqMats != null) {
+            for (int i = 0; i < reqMats.length && i < enhQuotedMaterialRequirements.length; i++) {
+                enhQuotedMaterialRequirements[i] = reqMats[i];
+            }
+        }
+        if (cn.g == null) {
+            enhState = 25;
+            enhErrorMessage = "Player hero is null";
+            return;
+        }
+        if (enhPaymentType == 0) { // Gold mode
+            if (cn.g.bD < quotedGold) {
+                enhState = 25; // INSUFFICIENT_GOLD
+                enhErrorMessage = "Insufficient gold: have " + cn.g.bD + ", need " + quotedGold;
+                return;
+            }
+        } else if (enhPaymentType == 1) { // Gem mode
+            if (cn.g.bC < quotedGems) {
+                enhState = 26; // INSUFFICIENT_GEMS
+                enhErrorMessage = "Insufficient gems: have " + cn.g.bC + ", need " + quotedGems;
+                return;
+            }
+        }
+        if (reqMats != null) {
+            for (int i = 0; i < reqMats.length; i++) {
+                int required = reqMats[i] & 0xFF;
+                if (required > 0) {
+                    int available = (c.p != null && i < c.p.length) ? c.p[i] : 0;
+                    if (available < required) {
+                        enhState = 27; // INSUFFICIENT_MATERIALS
+                        enhErrorMessage = "Missing required material index " + i + ": have " + available + ", need " + required;
+                        return;
+                    }
+                }
+            }
+        }
+        enhState = 11; // READY_FOR_ATTEMPT
+    }
+
+    public static void executeEnhancementAttempt() {
+        if (enhAttemptCount >= enhMaxAttempts) {
+            enhState = 18; // ATTEMPT_LIMIT_REACHED
+            enhErrorMessage = "Attempt limit " + enhMaxAttempts + " reached";
+            return;
+        }
+        if (cn.g != null) {
+            snapGoldBefore = cn.g.bD;
+            snapGemBefore = cn.g.bC;
+        }
+        snapTargetLevelBefore = (c.l != null) ? c.l.z : enhCurrentLevel;
+        if (snapSelectedCharmTemplateId > 0 && bw.V != null) {
+            snapCharmBefore = countItemInBag(snapSelectedCharmTemplateId);
+        } else {
+            snapCharmBefore = 0L;
+        }
+        if (c.p != null) {
+            if (snapMaterialsBefore == null) snapMaterialsBefore = new long[4];
+            for (int i = 0; i < c.p.length && i < snapMaterialsBefore.length; i++) {
+                snapMaterialsBefore[i] = c.p[i];
+            }
+        }
+
+        enhAttemptCount++;
+        enhState = 12; // ATTEMPTING
+        enhInFlightExecute = true;
+
+        try {
+            q.a().b((byte) 2, (short) 0, (byte) enhPaymentType);
+            enhState = 13; // WAITING_RESULT
+            enhWait = 30;
+        } catch (Throwable t) {
+            enhState = 29; // RESULT_AMBIGUOUS
+            enhErrorMessage = "Failed to send Opcode 67 sub-action 2: " + t;
+        }
+    }
+
+    public static void settleEnhancementResult() {
+        if (cn.g != null) {
+            long goldDelta = Math.max(0L, snapGoldBefore - cn.g.bD);
+            enhActualGoldSpent += goldDelta;
+            snapGoldBefore = cn.g.bD;
+
+            long gemDelta = Math.max(0L, snapGemBefore - cn.g.bC);
+            enhActualGemSpent += gemDelta;
+            snapGemBefore = cn.g.bC;
+        }
+        if (snapSelectedCharmTemplateId > 0 && bw.V != null) {
+            long charmsLeft = countItemInBag(snapSelectedCharmTemplateId);
+            long charmDelta = Math.max(0L, snapCharmBefore - charmsLeft);
+            enhActualCharmsSpent += charmDelta;
+            snapCharmBefore = charmsLeft;
+        }
+        if (c.p != null && snapMaterialsBefore != null) {
+            if (enhActualMaterialsSpent == null) enhActualMaterialsSpent = new long[4];
+            for (int i = 0; i < c.p.length && i < snapMaterialsBefore.length; i++) {
+                long matDelta = Math.max(0L, snapMaterialsBefore[i] - c.p[i]);
+                enhActualMaterialsSpent[i] += matDelta;
+                snapMaterialsBefore[i] = c.p[i];
+            }
+        }
+        enhAccountingStatus = "SETTLED";
+        enhInFlightExecute = false;
+
+        j currentTarget = null;
+        if (bw.V != null) {
+            int bagCount = bw.V.c();
+            for (int i = 0; i < bagCount; i++) {
+                Object obj = bw.V.a(i);
+                if (obj instanceof j) {
+                    j item = (j) obj;
+                    if (item.O == enhTemplateId && item.u == enhCategory) {
+                        currentTarget = item;
+                        enhActiveTargetSlot = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (currentTarget == null) {
+            enhState = 19; // ITEM_DESTROYED
+            enhLastResult = "DESTROYED";
+            enhActiveTargetSlot = -1;
+            return;
+        }
+
+        int newLevel = currentTarget.z;
+        enhCurrentLevel = newLevel;
+
+        if (newLevel >= enhTargetLevel) {
+            enhLastResult = "SUCCESS";
+            enhState = 17; // TARGET_REACHED
+            return;
+        }
+
+        if (c.C == 3) {
+            enhLastResult = "SUCCESS";
+            if (enhAttemptCount >= enhMaxAttempts) {
+                enhState = 18; // ATTEMPT_LIMIT_REACHED
+            } else {
+                enhState = 10; // Ready for next cycle
+            }
+            return;
+        }
+
+        if (c.C == 4) {
+            if (newLevel == snapTargetLevelBefore) {
+                enhLastResult = "FAILURE_PROTECTED";
+                enhState = 15; // FAILURE_PROTECTED
+            } else if (newLevel < snapTargetLevelBefore) {
+                enhLastResult = "FAILURE_DEGRADED";
+                enhState = 16; // FAILURE_DEGRADED
+            } else {
+                enhLastResult = "FAILURE_PROTECTED";
+                enhState = 15;
+            }
+            if (enhAttemptCount >= enhMaxAttempts) {
+                enhState = 18; // ATTEMPT_LIMIT_REACHED
+            }
+            return;
+        }
+
+        if (enhAttemptCount >= enhMaxAttempts) {
+            enhState = 18;
+        }
+    }
+
+    public static void recoverEnhancementSession() {
+        if (enhInFlightExecute) {
+            enhState = 33; // MANUAL_REVIEW_REQUIRED
+            enhInFlightExecute = false;
+            enhErrorMessage = "Interrupted during in-flight enhancement attempt; manual review required";
+            publishEnhancementStatus();
+        }
+    }
+
+    public static boolean isEnhancementHighlightActive() {
+        return enhState > 0 && enhState < 17 && enhActiveTargetSlot >= 0;
+    }
+
+    private static void paintEnhancementHighlight(bx canvas) {
+        if (canvas == null || !isEnhancementHighlightActive()) return;
+        try {
+            canvas.a(0xFFCC00); // Amber highlight
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static long countItemInBag(int templateId) {
+        if (bw.V == null) return 0L;
+        long total = 0L;
+        for (int i = 0; i < bw.V.c(); i++) {
+            Object obj = bw.V.a(i);
+            if (obj instanceof j) {
+                j it = (j) obj;
+                if (it.O == templateId) {
+                    total += it.K > 0 ? it.K : 1;
+                }
+            }
+        }
+        return total;
+    }
+
+    private static j findBagItem(int templateId, int category) {
+        if (bw.V == null) return null;
+        for (int i = 0; i < bw.V.c(); i++) {
+            Object obj = bw.V.a(i);
+            if (obj instanceof j) {
+                j it = (j) obj;
+                if (it.O == templateId && it.u == category) {
+                    return it;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static fa findBlacksmithNpc() {
+        if (cn.j == null || cn.g == null) {
+            return null;
+        }
+        fa best = null;
+        fa fallback = null;
+        int bestDistance = Integer.MAX_VALUE;
+        for (int i = 0; i < cn.j.c(); i++) {
+            Object entry = cn.j.a(i);
+            if (!(entry instanceof fa)) {
+                continue;
+            }
+            fa candidate = (fa) entry;
+            if (candidate.cv != 2) {
+                continue;
+            }
+            if (candidate.cC != null) {
+                String n = norm(candidate.cC);
+                if (n.indexOf("phap su") >= 0 || n.indexOf("cuong hoa") >= 0) {
+                    int distance = abs(cn.g.aZ - candidate.aZ) + abs(cn.g.ba - candidate.ba);
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        best = candidate;
+                    }
+                    continue;
+                }
+            }
+            if (fallback == null && candidate.cu == -36) {
+                fallback = candidate;
+            }
+        }
+        return best != null ? best : fallback;
+    }
+
+    private static boolean isForgeScreenOpen() {
+        if (fu.a instanceof ev) {
+            ev pop = (ev) fu.a;
+            if (pop.b != null) {
+                for (int i = 0; i < pop.b.c(); i++) {
+                    Object tab = pop.b.a(i);
+                    if (tab instanceof c) {
+                        return pop.a == i;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static void enhSidecarTick(long now) {
+        if (enhReqPath == null) {
+            return;
+        }
+        if (now - enhReqCheckedAt < 200L) {
+            return;
+        }
+        enhReqCheckedAt = now;
+
+        // Check cancellation
+        if (enhCancelPath != null) {
+            java.io.File cancelFile = new java.io.File(enhCancelPath);
+            if (cancelFile.exists()) {
+                try {
+                    cancelFile.delete();
+                } catch (Throwable ignored) {
+                }
+                if (enhState > 0 && !isEnhancementStateTerminal(enhState)) {
+                    if (enhInFlightExecute) {
+                        // Let attempt finish or enter manual review
+                    } else {
+                        enhState = 32; // CANCELLED
+                        enhErrorMessage = "Enhancement cancelled via sidecar";
+                        publishEnhancementStatus();
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Check request file
+        java.io.File reqFile = new java.io.File(enhReqPath);
+        if (!reqFile.exists()) {
+            return;
+        }
+
+        String reqText = readSmallFile(enhReqPath);
+        if (reqText == null) {
+            return;
+        }
+
+        String reqId = parseJsonString(reqText, "request_id");
+        if (reqId == null || reqId.length() == 0) {
+            return;
+        }
+
+        // Only start if new request ID and we are currently IDLE or terminal
+        if (reqId.equals(lastEnhRequestId) && enhState != 0 && !isEnhancementStateTerminal(enhState)) {
+            return;
+        }
+
+        lastEnhRequestId = reqId;
+        enhRequestId = reqId;
+        enhCapturedSlot = parseJsonInt(reqText, "captured_slot", -1);
+        enhTemplateId = parseJsonInt(reqText, "template_id", 0);
+        enhCategory = parseJsonInt(reqText, "category", 3);
+        enhBaseName = parseJsonString(reqText, "base_name");
+        enhTier = parseJsonInt(reqText, "tier", 0);
+        enhExpectedLevel = parseJsonInt(reqText, "expected_level", 0);
+        enhTargetLevel = parseJsonInt(reqText, "target_level", 0);
+        enhConfiguredCharmMode = parseJsonInt(reqText, "charm_mode", 3);
+        enhPaymentType = parseJsonInt(reqText, "payment_type", 0);
+        enhMaxAttempts = parseJsonInt(reqText, "max_attempts", 1);
+
+        enhAttemptCount = 0;
+        enhActualGoldSpent = 0L;
+        enhActualGemSpent = 0L;
+        enhActualCharmsSpent = 0L;
+        enhActualMaterialsSpent = new long[4];
+        enhAccountingStatus = "PENDING";
+        enhLastResult = null;
+        enhErrorCode = null;
+        enhErrorMessage = null;
+        enhInFlightExecute = false;
+        enhActiveTargetSlot = -1;
+
+        enhState = 1; // VALIDATING_REQUEST
+        publishEnhancementStatus();
+    }
+
+    private static String parseJsonString(String text, String key) {
+        if (text == null || key == null) return null;
+        String pattern = "\"" + key + "\"";
+        int idx = text.indexOf(pattern);
+        if (idx < 0) return null;
+        int colon = text.indexOf(':', idx + pattern.length());
+        if (colon < 0) return null;
+        int startQuote = text.indexOf('"', colon + 1);
+        if (startQuote < 0) return null;
+        int endQuote = text.indexOf('"', startQuote + 1);
+        if (endQuote < 0) return null;
+        return text.substring(startQuote + 1, endQuote).trim();
+    }
+
+    private static int parseJsonInt(String text, String key, int def) {
+        if (text == null || key == null) return def;
+        String pattern = "\"" + key + "\"";
+        int idx = text.indexOf(pattern);
+        if (idx < 0) return def;
+        int colon = text.indexOf(':', idx + pattern.length());
+        if (colon < 0) return def;
+        int start = colon + 1;
+        while (start < text.length() && Character.isWhitespace(text.charAt(start))) {
+            start++;
+        }
+        int end = start;
+        while (end < text.length() && (Character.isDigit(text.charAt(end)) || text.charAt(end) == '-')) {
+            end++;
+        }
+        if (end > start) {
+            try {
+                return Integer.parseInt(text.substring(start, end));
+            } catch (Throwable ignored) {
+            }
+        }
+        return def;
+    }
+
+    private static String formatRfc3339(long timeMillis) {
+        java.util.Calendar cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"));
+        cal.setTime(new java.util.Date(timeMillis));
+        int year = cal.get(java.util.Calendar.YEAR);
+        int month = cal.get(java.util.Calendar.MONTH) + 1;
+        int day = cal.get(java.util.Calendar.DAY_OF_MONTH);
+        int hour = cal.get(java.util.Calendar.HOUR_OF_DAY);
+        int minute = cal.get(java.util.Calendar.MINUTE);
+        int second = cal.get(java.util.Calendar.SECOND);
+        StringBuffer sb = new StringBuffer(24);
+        sb.append(year).append('-');
+        if (month < 10) sb.append('0');
+        sb.append(month).append('-');
+        if (day < 10) sb.append('0');
+        sb.append(day).append('T');
+        if (hour < 10) sb.append('0');
+        sb.append(hour).append(':');
+        if (minute < 10) sb.append('0');
+        sb.append(minute).append(':');
+        if (second < 10) sb.append('0');
+        sb.append(second).append('Z');
+        return sb.toString();
+    }
+
+    public static String formatEnhancementStatusJson() {
+        StringBuffer sb = new StringBuffer(512);
+        sb.append("{\n");
+        sb.append("  \"version\": 1,\n");
+        sb.append("  \"request_id\": \"").append(enhRequestId != null ? enhRequestId : "").append("\",\n");
+        sb.append("  \"state\": \"").append(getEnhancementStateName(enhState)).append("\",\n");
+        sb.append("  \"captured_slot\": ").append(enhCapturedSlot).append(",\n");
+        sb.append("  \"template_id\": ").append(enhTemplateId).append(",\n");
+        sb.append("  \"category\": ").append(enhCategory).append(",\n");
+        sb.append("  \"base_name\": \"").append(enhBaseName != null ? enhBaseName : "").append("\",\n");
+        sb.append("  \"start_level\": ").append(enhStartLevel).append(",\n");
+        sb.append("  \"current_level\": ").append(enhCurrentLevel).append(",\n");
+        sb.append("  \"target_level\": ").append(enhTargetLevel).append(",\n");
+        sb.append("  \"configured_charm_mode\": ").append(enhConfiguredCharmMode).append(",\n");
+        sb.append("  \"resolved_charm_mode\": ").append(enhResolvedCharmMode).append(",\n");
+        sb.append("  \"payment_type\": ").append(enhPaymentType).append(",\n");
+        sb.append("  \"attempt_count\": ").append(enhAttemptCount).append(",\n");
+        sb.append("  \"max_attempts\": ").append(enhMaxAttempts).append(",\n");
+        if (enhLastResult != null) {
+            sb.append("  \"last_result\": \"").append(enhLastResult).append("\",\n");
+        } else {
+            sb.append("  \"last_result\": null,\n");
+        }
+        sb.append("  \"quoted_gold_cost\": ").append(enhQuotedGoldCost).append(",\n");
+        sb.append("  \"quoted_gem_cost\": ").append(enhQuotedGemCost).append(",\n");
+        sb.append("  \"quoted_material_requirements\": [");
+        if (enhQuotedMaterialRequirements != null) {
+            for (int i = 0; i < enhQuotedMaterialRequirements.length; i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(enhQuotedMaterialRequirements[i]);
+            }
+        }
+        sb.append("],\n");
+        sb.append("  \"actual_gold_spent\": ").append(enhActualGoldSpent).append(",\n");
+        sb.append("  \"actual_gem_spent\": ").append(enhActualGemSpent).append(",\n");
+        sb.append("  \"actual_materials_spent\": [");
+        if (enhActualMaterialsSpent != null) {
+            for (int i = 0; i < enhActualMaterialsSpent.length; i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(enhActualMaterialsSpent[i]);
+            }
+        }
+        sb.append("],\n");
+        sb.append("  \"actual_charms_spent\": ").append(enhActualCharmsSpent).append(",\n");
+        sb.append("  \"accounting_status\": \"").append(enhAccountingStatus != null ? enhAccountingStatus : "PENDING").append("\",\n");
+        if (enhErrorCode != null) {
+            sb.append("  \"error_code\": \"").append(enhErrorCode).append("\",\n");
+        }
+        if (enhErrorMessage != null) {
+            sb.append("  \"error_message\": \"").append(clean(enhErrorMessage)).append("\",\n");
+        }
+        sb.append("  \"updated_at\": \"").append(formatRfc3339(System.currentTimeMillis())).append("\"\n");
+        sb.append("}");
+        return sb.toString();
+    }
+
+    public static void publishEnhancementStatus() {
+        if (enhStatusPath == null) {
             return;
         }
         try {
-            // The NPC menu this module has to drive is not measured yet: docs/18-cuong-hoa-vs-ban-rac.md
-            // §3.2 records that both candidate paths start from recording the real label sequence by
-            // hand, and guessing it would walk the character into a dialog nothing here can read.
-            // Until then the switch is inert and reports itself as idle, so the tool shows "off"
-            // rather than a phase that is not moving.
+            String json = formatEnhancementStatusJson();
+            java.io.File target = new java.io.File(enhStatusPath);
+            java.io.File temp = new java.io.File(enhStatusPath + ".tmp");
+            java.io.FileOutputStream fos = new java.io.FileOutputStream(temp);
+            fos.write(json.getBytes("UTF-8"));
+            fos.flush();
+            fos.close();
+            if (target.exists()) {
+                target.delete();
+            }
+            temp.renameTo(target);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void enhance() {
+        long now = System.currentTimeMillis();
+        enhSidecarTick(now);
+
+        if (enhState == 0 || isEnhancementStateTerminal(enhState)) {
+            if (!enhanceOn) {
+                return;
+            }
             enhancePhase = 0;
+            return;
+        }
+
+        try {
+            switch (enhState) {
+                case 1: // VALIDATING_REQUEST
+                    if (enhCategory != 3 || enhExpectedLevel < 0 || enhExpectedLevel > 14
+                            || enhTargetLevel <= enhExpectedLevel || enhTargetLevel > 15
+                            || enhConfiguredCharmMode > 3 || enhPaymentType > 1 || enhMaxAttempts < 1) {
+                        enhState = 23; // INELIGIBLE_ITEM
+                        enhErrorMessage = "Invalid enhancement request parameters";
+                        publishEnhancementStatus();
+                        return;
+                    }
+                    enhState = 2; // WAITING_GAME_READY
+                    publishEnhancementStatus();
+                    break;
+
+                case 2: // WAITING_GAME_READY
+                    if (!inGame() || cn.g == null || cn.j == null) {
+                        return;
+                    }
+                    enhState = 3; // VALIDATING_TARGET
+                    publishEnhancementStatus();
+                    break;
+
+                case 3: // VALIDATING_TARGET
+                    validateEnhancementTarget();
+                    publishEnhancementStatus();
+                    break;
+
+                case 4: // LOCATING_BLACKSMITH
+                    fa blacksmith = findBlacksmithNpc();
+                    if (blacksmith == null) {
+                        enhState = 28; // SERVER_REJECTED / no NPC
+                        enhErrorMessage = "Blacksmith NPC not found";
+                        publishEnhancementStatus();
+                        return;
+                    }
+                    int dist = abs(cn.g.aZ - blacksmith.aZ) + abs(cn.g.ba - blacksmith.ba);
+                    if (dist > 45) {
+                        int here = fu.q != null ? fu.q.d : 0;
+                        travelMove(here, blacksmith.aZ, blacksmith.ba);
+                        enhState = 5; // APPROACHING_BLACKSMITH
+                    } else {
+                        enhState = 6; // OPENING_FORGE
+                        try {
+                            q.a().a((byte) blacksmith.cu);
+                        } catch (Throwable ignored) {
+                        }
+                        enhWait = 20;
+                    }
+                    publishEnhancementStatus();
+                    break;
+
+                case 5: // APPROACHING_BLACKSMITH
+                    fa bs = findBlacksmithNpc();
+                    if (bs == null) {
+                        enhState = 28;
+                        publishEnhancementStatus();
+                        return;
+                    }
+                    int d = abs(cn.g.aZ - bs.aZ) + abs(cn.g.ba - bs.ba);
+                    if (d <= 45) {
+                        enhState = 6; // OPENING_FORGE
+                        try {
+                            q.a().a((byte) bs.cu);
+                        } catch (Throwable ignored) {
+                        }
+                        enhWait = 20;
+                        publishEnhancementStatus();
+                    } else {
+                        int here = fu.q != null ? fu.q.d : 0;
+                        travelMove(here, bs.aZ, bs.ba);
+                    }
+                    break;
+
+                case 6: // OPENING_FORGE
+                    if (isForgeScreenOpen()) {
+                        enhState = 7; // INSERTING_TARGET
+                        publishEnhancementStatus();
+                        return;
+                    }
+                    if (enhWait > 0) {
+                        enhWait--;
+                        return;
+                    }
+                    fa bsRetry = findBlacksmithNpc();
+                    if (bsRetry != null) {
+                        try {
+                            q.a().a((byte) bsRetry.cu);
+                        } catch (Throwable ignored) {
+                        }
+                        enhWait = 20;
+                    }
+                    break;
+
+                case 7: // INSERTING_TARGET
+                    if (c.l != null && c.l.O == enhTemplateId) {
+                        enhState = 8; // RESOLVING_CHARM
+                        publishEnhancementStatus();
+                        return;
+                    }
+                    j targetItem = findBagItem(enhTemplateId, enhCategory);
+                    if (targetItem == null) {
+                        enhState = 20;
+                        publishEnhancementStatus();
+                        return;
+                    }
+                    q.a().b((byte) 0, (short) targetItem.O, (byte) targetItem.u);
+                    enhState = 8; // RESOLVING_CHARM
+                    publishEnhancementStatus();
+                    break;
+
+                case 8: // RESOLVING_CHARM
+                    resolveEnhancementCharm();
+                    publishEnhancementStatus();
+                    break;
+
+                case 9: // INSERTING_CHARM
+                    if (enhResolvedCharmMode == 0) {
+                        enhState = 10;
+                        publishEnhancementStatus();
+                        return;
+                    }
+                    if (c.m != null && c.m.O == snapSelectedCharmTemplateId) {
+                        enhState = 10; // VERIFYING_RESOURCES
+                        publishEnhancementStatus();
+                        return;
+                    }
+                    j charmItem = findBagItem(snapSelectedCharmTemplateId, 7);
+                    if (charmItem == null) {
+                        enhState = 24;
+                        publishEnhancementStatus();
+                        return;
+                    }
+                    q.a().b((byte) 0, (short) charmItem.O, (byte) 7);
+                    enhState = 10; // VERIFYING_RESOURCES
+                    publishEnhancementStatus();
+                    break;
+
+                case 10: // VERIFYING_RESOURCES
+                    verifyEnhancementResources();
+                    publishEnhancementStatus();
+                    break;
+
+                case 11: // READY_FOR_ATTEMPT
+                    executeEnhancementAttempt();
+                    publishEnhancementStatus();
+                    break;
+
+                case 12: // ATTEMPTING
+                    enhState = 13;
+                    break;
+
+                case 13: // WAITING_RESULT
+                    if (c.C == 3 || c.C == 4) {
+                        enhState = 14;
+                        settleEnhancementResult();
+                        publishEnhancementStatus();
+                        return;
+                    }
+                    if (enhWait > 0) {
+                        enhWait--;
+                    } else {
+                        enhState = 29; // RESULT_AMBIGUOUS
+                        enhErrorMessage = "Timed out waiting for server enhancement result";
+                        publishEnhancementStatus();
+                    }
+                    break;
+
+                case 14: // WAITING_SETTLEMENT
+                    settleEnhancementResult();
+                    publishEnhancementStatus();
+                    break;
+
+                case 15: // FAILURE_PROTECTED
+                case 16: // FAILURE_DEGRADED
+                    if (enhAttemptCount < enhMaxAttempts) {
+                        enhState = 7;
+                    } else {
+                        enhState = 18; // ATTEMPT_LIMIT_REACHED
+                    }
+                    publishEnhancementStatus();
+                    break;
+            }
         } catch (Throwable t) {
             // A module must never stall the client tick.
         }
@@ -4409,6 +5348,9 @@ public final class Zeus {
         enhancePhase = 0;
         enhanceWhy = 0;
         enhanceWait = 0;
+        enhState = 0;
+        enhActiveTargetSlot = -1;
+        enhInFlightExecute = false;
     }
 
     // ---- end ENHANCE ----------------------------------------------------------
