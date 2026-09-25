@@ -4931,7 +4931,7 @@ public final class Zeus {
             }
             if (candidate.cC != null) {
                 String n = norm(candidate.cC);
-                if (n.indexOf("phap su") >= 0 || n.indexOf("cuong hoa") >= 0) {
+                if (n.indexOf("phap su") >= 0) {
                     int distance = abs(cn.g.aZ - candidate.aZ) + abs(cn.g.ba - candidate.ba);
                     if (candidate.cu == -36) {
                         distance -= 10000;

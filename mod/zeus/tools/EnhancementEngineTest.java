@@ -605,6 +605,63 @@ public class EnhancementEngineTest {
             check("State " + s + " status JSON has attempt_count 0", json.contains("\"attempt_count\": 0"));
         }
 
+        // ---------------------------------------------------------------------
+        // Test 10: Strict Blacksmith Identity & Menu Contract
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 10: Strict Blacksmith Identity & Menu Contract ---");
+        Method findBsMethod = Class.forName("Zeus").getDeclaredMethod("findBlacksmithNpc");
+        findBsMethod.setAccessible(true);
+        setupWorldState(1);
+        cn.g.aZ = 300;
+        cn.g.ba = 600;
+
+        // 10.1: cv=2, name "Pháp sư" => eligible
+        cn.j = new et("npcs");
+        cn.j.a(makeNpc("Pháp sư", -36, 2, 324, 624));
+        fa res = (fa) findBsMethod.invoke(null);
+        check("cv=2 with name 'Pháp sư' is eligible", res != null && "Pháp sư".equals(res.cC));
+
+        // 10.2: cv!=2, name "Pháp sư" => not eligible
+        cn.j = new et("npcs");
+        cn.j.a(makeNpc("Pháp sư", -36, 1, 324, 624)); // cv = 1
+        res = (fa) findBsMethod.invoke(null);
+        check("cv!=2 with name 'Pháp sư' is NOT eligible", res == null);
+
+        // 10.3: cv=2, name containing 'Cường hóa' but NOT 'Pháp sư' => NOT eligible
+        cn.j = new et("npcs");
+        cn.j.a(makeNpc("Cường hóa", -36, 2, 324, 624));
+        res = (fa) findBsMethod.invoke(null);
+        check("cv=2 with name 'Cường hóa' but not 'Pháp sư' is NOT eligible", res == null);
+
+        // 10.4: cu=-36 with non-Pháp-sư name => not eligible
+        cn.j = new et("npcs");
+        cn.j.a(makeNpc("Thợ rèn", -36, 2, 324, 624));
+        res = (fa) findBsMethod.invoke(null);
+        check("cu=-36 with non-Pháp-sư name is NOT eligible", res == null);
+
+        // 10.5: Pháp sư candidate with cu=-36 receives priority only after eligibility
+        cn.j = new et("npcs");
+        cn.j.a(makeNpc("Pháp sư tập sự", -10, 2, 305, 605)); // dist = 10
+        cn.j.a(makeNpc("Pháp sư", -36, 2, 350, 650));         // dist = 100, but -10000 bonus
+        res = (fa) findBsMethod.invoke(null);
+        check("cu=-36 provides distance priority between valid Pháp sư candidates", res != null && res.cu == -36);
+
+        // 10.6: Menu option 'Cường hóa' remains accepted in serverMenu
+        Method serverMenuMethod = Class.forName("Zeus").getDeclaredMethod("serverMenu", et.class, int.class, int.class, String.class);
+        serverMenuMethod.setAccessible(true);
+        set("enhState", 6); // OPENING_FORGE
+        clearQueue();
+        et menuItems = new et("menu");
+        bt opt1 = new bt("Nhiệm vụ", 0);
+        bt opt2 = new bt("Cường hoá", 1);
+        bt opt3 = new bt("Thoát", 2);
+        menuItems.a(opt1);
+        menuItems.a(opt2);
+        menuItems.a(opt3);
+        boolean menuTaken = ((Boolean) serverMenuMethod.invoke(null, menuItems, 10, -36, "Pháp sư")).booleanValue();
+        check("serverMenu takes 'Cường hoá' option in state 6", menuTaken);
+        check("serverMenu dispatches option pick packet (opcode 24)", queue().size() == 1);
+
         System.out.println("=== EnhancementEngineTest Total Failures: " + failures + " ===");
         if (failures > 0) {
             System.exit(1);

@@ -509,6 +509,24 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
             JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
         ],
     },
+    RuntimeContract {
+        name: "ENHANCEMENT_ROUTING_V14",
+        jar_sha256: JarManifest::ENHANCEMENT_ROUTING_COMPATIBLE_JAR_SHA256,
+        ctl_version: 14,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+        ],
+    },
+    RuntimeContract {
+        name: "ENHANCEMENT_FINAL_V14",
+        jar_sha256: JarManifest::ENHANCEMENT_FINAL_COMPATIBLE_JAR_SHA256,
+        ctl_version: 14,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+        ],
+    },
 ];
 
 impl JarManifest {
@@ -523,6 +541,10 @@ impl JarManifest {
         "f06e4fa973c882c1be359f8fa6db609eba78b33d8fe134874ab7b11488ee5762";
     pub const ENHANCEMENT_ENGINE_COMPATIBLE_JAR_SHA256: &'static str =
         "01bbf0575badcbf5e47231c78ce6a5d848f7110650328fce7e6252b196473478";
+    pub const ENHANCEMENT_ROUTING_COMPATIBLE_JAR_SHA256: &'static str =
+        "180a9cd897cd6212bc6e93b93848990eef02cc4a79a0bdd0c3d76373620a9020";
+    pub const ENHANCEMENT_FINAL_COMPATIBLE_JAR_SHA256: &'static str =
+        "d264851685340b4729f401aa708e8b41ce51cc668c304e2dc43dd060bab5899a";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -3043,7 +3065,7 @@ mod tests {
 
         // 7. Test loading actual repository zeus-jar.json
         if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
-            assert_eq!(loaded_manifest.jar_sha256, JarManifest::ENHANCEMENT_ENGINE_COMPATIBLE_JAR_SHA256);
+            assert_eq!(loaded_manifest.jar_sha256, JarManifest::ENHANCEMENT_FINAL_COMPATIBLE_JAR_SHA256);
             assert_eq!(loaded_manifest.ctl_version, 14);
             assert_eq!(loaded_manifest.ctl_key_count, 37);
             assert!(loaded_manifest.is_character_slot_compatible());
@@ -3164,6 +3186,58 @@ mod tests {
             already_advertised.advertised_agent_version().matches("visual-qol-v1").count(),
             1
         );
+    }
+
+    #[test]
+    fn test_enhancement_routing_and_final_jar_capabilities() {
+        let manifest_180a = JarManifest {
+            jar_sha256: "180a9cd897cd6212bc6e93b93848990eef02cc4a79a0bdd0c3d76373620a9020".to_string(),
+            jar_size: 1146365,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-25T06:26:01Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(manifest_180a.is_character_slot_compatible(), "180a must be character-slot compatible");
+        assert!(manifest_180a.is_visual_qol_compatible(), "180a must be visual-qol compatible");
+        assert_eq!(manifest_180a.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert!(!manifest_180a.capabilities().contains(&"enhancement-queue-v1"));
+
+        let manifest_final = JarManifest {
+            jar_sha256: "d264851685340b4729f401aa708e8b41ce51cc668c304e2dc43dd060bab5899a".to_string(),
+            jar_size: 1146359,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-25T10:21:06Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(manifest_final.is_character_slot_compatible(), "final must be character-slot compatible");
+        assert!(manifest_final.is_visual_qol_compatible(), "final must be visual-qol compatible");
+        assert_eq!(manifest_final.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert!(!manifest_final.capabilities().contains(&"enhancement-queue-v1"));
+
+        // Unknown JAR must fail closed
+        let unknown = JarManifest {
+            jar_sha256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            jar_size: 1146359,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-25T00:00:00Z".to_string(),
+            patcher_sha256: "".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert_eq!(unknown.capabilities().len(), 0);
+        assert!(!unknown.is_character_slot_compatible());
+        assert!(!unknown.is_visual_qol_compatible());
+        assert_eq!(unknown.advertised_agent_version(), "0.1.0");
     }
 }
 
