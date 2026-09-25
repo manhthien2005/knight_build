@@ -98,6 +98,11 @@ pub enum EnhancementState {
     Timeout,
     Cancelled,
     ManualReviewRequired,
+    EnhancementTravelConflict,
+    BlacksmithRouteUnavailable,
+    BlacksmithNotFound,
+    BlacksmithInteractionFailed,
+    ForgeOpenFailed,
 }
 
 impl EnhancementState {
@@ -121,6 +126,11 @@ impl EnhancementState {
                 | Self::Timeout
                 | Self::Cancelled
                 | Self::ManualReviewRequired
+                | Self::EnhancementTravelConflict
+                | Self::BlacksmithRouteUnavailable
+                | Self::BlacksmithNotFound
+                | Self::BlacksmithInteractionFailed
+                | Self::ForgeOpenFailed
         )
     }
 
@@ -654,5 +664,22 @@ mod tests {
         clean_enhancement_request_file(home);
         assert!(!req_path.exists());
         assert!(status_path.exists());
+    }
+
+    #[test]
+    fn test_new_error_states_terminal_and_parsing() {
+        let error_states = [
+            "ENHANCEMENT_TRAVEL_CONFLICT",
+            "BLACKSMITH_ROUTE_UNAVAILABLE",
+            "BLACKSMITH_NOT_FOUND",
+            "BLACKSMITH_INTERACTION_FAILED",
+            "FORGE_OPEN_FAILED",
+        ];
+        for state_str in error_states {
+            let state: EnhancementState = serde_json::from_str(&format!("\"{}\"", state_str))
+                .unwrap_or_else(|_| panic!("Failed to parse {}", state_str));
+            assert!(state.is_terminal(), "{} must be terminal", state_str);
+            assert!(!state.is_success(), "{} must not be success", state_str);
+        }
     }
 }

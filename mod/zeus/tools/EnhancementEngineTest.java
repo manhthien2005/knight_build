@@ -440,9 +440,223 @@ public class EnhancementEngineTest {
         active = ((Boolean) highlightMethod.invoke(null)).booleanValue();
         check("Highlight clears on terminal TARGET_REACHED", !active);
 
+        // ---------------------------------------------------------------------
+        // Test 9: Blacksmith Cross-Map Routing, Ownership & Error Taxonomy
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 9: Blacksmith routing & error taxonomy ---");
+        Method enhanceMethod = Class.forName("Zeus").getDeclaredMethod("enhance");
+        enhanceMethod.setAccessible(true);
+        Method goalMethod = Class.forName("Zeus").getDeclaredMethod("goal");
+        goalMethod.setAccessible(true);
+        Method formatStatusMethod = Class.forName("Zeus").getDeclaredMethod("formatEnhancementStatusJson");
+        formatStatusMethod.setAccessible(true);
+
+        setupWorldState(44);
+        clearQueue();
+
+        // Subtest 9.1: Auto Farm conflict -> ENHANCEMENT_TRAVEL_CONFLICT (34), preserves atk.map/x/y
+        set("atkMode", 1);
+        set("atkMap", 44);
+        set("atkX", 100);
+        set("atkY", 200);
+        set("navTarget", -1);
+        set("navDone", true);
+        set("enhState", 4); // LOCATING_BLACKSMITH
+        set("enhAttemptCount", 0);
+        set("enhLastResult", null);
+
+        enhanceMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("Auto Farm conflict transitions to ENHANCEMENT_TRAVEL_CONFLICT (34)", state == 34);
+        check("Durable atkMap preserved", ((Integer) get("atkMap")).intValue() == 44);
+        check("Durable atkX preserved", ((Integer) get("atkX")).intValue() == 100);
+        check("Durable atkY preserved", ((Integer) get("atkY")).intValue() == 200);
+        check("No packet sent during conflict", queue().size() == 0);
+
+        // Subtest 9.2: Manual Travel conflict -> ENHANCEMENT_TRAVEL_CONFLICT (34), preserves navTarget/navDone
+        set("atkMode", 0);
+        set("atkMap", -1);
+        set("navTarget", 8);
+        set("navDone", false);
+        set("enhState", 4);
+
+        enhanceMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("Manual Travel conflict transitions to ENHANCEMENT_TRAVEL_CONFLICT (34)", state == 34);
+        check("Durable navTarget preserved", ((Integer) get("navTarget")).intValue() == 8);
+        check("Durable navDone preserved", !((Boolean) get("navDone")).booleanValue());
+
+        // Subtest 9.3: Unavailable BFS route -> BLACKSMITH_ROUTE_UNAVAILABLE (35)
+        set("atkMode", 0);
+        set("navTarget", -1);
+        set("navDone", true);
+        setupWorldState(9999); // completely disconnected / unknown map
+        set("enhState", 4);
+
+        enhanceMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("Unavailable BFS route transitions to BLACKSMITH_ROUTE_UNAVAILABLE (35)", state == 35);
+        check("Temporary routing cleaned on terminal", !((Boolean) get("enhNavigating")).booleanValue());
+
+        // Subtest 9.4: Map 44 -> Map 1 routing state progression without live enhancement
+        setupWorldState(44); // Cây cầu ma ám
+        set("enhState", 4); // LOCATING_BLACKSMITH
+        set("enhAttemptCount", 0);
+        set("enhLastResult", null);
+        clearQueue();
+
+        enhanceMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        boolean navigating = ((Boolean) get("enhNavigating")).booleanValue();
+        int activeGoal = ((Integer) goalMethod.invoke(null)).intValue();
+        check("On Map 44, enhancement activates temporary navigation", navigating);
+        check("goal() directs navigation to Map 1", activeGoal == 1);
+        check("Remains in LOCATING_BLACKSMITH (4) while cross-map routing", state == 4);
+        check("Zero execute packets sent while routing", queue().size() == 0);
+
+        // Character arrives on Map 1, but far from anchor
+        setupWorldState(1);
+        cn.g.aZ = 100;
+        cn.g.ba = 100;
+        // Map 1 Pháp sư NPC present at anchor 324, 624
+        cn.j = new et("npcs");
+        cn.j.a(makeNpc("Pháp sư", -36, 2, 324, 624));
+        // Settle map
+        Field mapStableField = Class.forName("Zeus").getDeclaredField("mapStableTicks");
+        mapStableField.setAccessible(true);
+        mapStableField.set(null, 15);
+        Field stableMapField = Class.forName("Zeus").getDeclaredField("stableMapId");
+        stableMapField.setAccessible(true);
+        stableMapField.set(null, 1);
+
+        enhanceMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("On Map 1 with dist > 45, transitions to APPROACHING_BLACKSMITH (5)", state == 5);
+
+        // Character approaches anchor (dist <= 45)
+        cn.g.aZ = 320;
+        cn.g.ba = 624;
+        clearQueue();
+        enhanceMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("When near Pháp sư, transitions to OPENING_FORGE (6)", state == 6);
+        check("Emitted NPC interaction packet (not opcode 67)", queue().size() == 1);
+        ep talkPkt = (ep) queue().elementAt(0);
+        check("Interaction packet is not opcode 67", talkPkt.a != 67);
+
+        // Subtest 9.5: Current Map 1 near-anchor fast path
+        clearQueue();
+        setupWorldState(1);
+        cn.g.aZ = 324;
+        cn.g.ba = 624;
+        cn.j = new et("npcs");
+        cn.j.a(makeNpc("Pháp sư", -36, 2, 324, 624));
+        mapStableField.set(null, 15);
+        stableMapField.set(null, 1);
+        set("enhState", 4);
+        enhanceMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("Near-anchor fast path transitions directly from 4 to OPENING_FORGE (6)", state == 6);
+        check("Fast path sends NPC interaction without cross-map routing", queue().size() == 1);
+
+        // Subtest 9.6: Missing live Pháp sư after bounded scans
+        setupWorldState(1);
+        cn.g.aZ = 324;
+        cn.g.ba = 624;
+        // cn.j has NPC with cu=-36 but WRONG name / not Pháp sư
+        cn.j = new et("npcs");
+        cn.j.a(makeNpc("Dan lang", -36, 2, 324, 624));
+        set("enhState", 4);
+        set("enhBlacksmithScanTicks", 0);
+        mapStableField.set(null, 15);
+        stableMapField.set(null, 1);
+
+        // Scan past bound
+        int maxScans = ((Integer) get("MAX_BLACKSMITH_SCANS")).intValue();
+        for (int s = 0; s <= maxScans + 2; s++) {
+            enhanceMethod.invoke(null);
+        }
+        state = ((Integer) get("enhState")).intValue();
+        check("Missing live Pháp sư after bounded scans enters BLACKSMITH_NOT_FOUND (36)", state == 36);
+        check("cu=-36 with wrong name was rejected (not accepted as sole identity)", state == 36);
+
+        // Subtest 9.7: Forge open failure timeout
+        set("enhState", 6); // OPENING_FORGE
+        set("enhWait", 0);
+        set("enhForgeOpenTries", 0);
+        cn.j = new et("npcs");
+        cn.j.a(makeNpc("Pháp sư", -36, 2, 324, 624));
+        // Retry until forge open fails
+        for (int i = 0; i < 5; i++) {
+            set("enhWait", 0);
+            enhanceMethod.invoke(null);
+        }
+        state = ((Integer) get("enhState")).intValue();
+        check("Forge open timeout enters FORGE_OPEN_FAILED (38)", state == 38);
+
+        // Subtest 9.8: Local pre-execute failures leave structured server result unset
+        int[] localErrorStates = new int[] { 34, 35, 36, 37, 38, 20, 21, 23, 24, 25, 26, 27 };
+        for (int s : localErrorStates) {
+            set("enhState", s);
+            set("enhLastResult", null);
+            set("enhAttemptCount", 0);
+            String json = (String) formatStatusMethod.invoke(null);
+            check("State " + s + " status JSON has last_result null", json.contains("\"last_result\": null"));
+            check("State " + s + " status JSON has attempt_count 0", json.contains("\"attempt_count\": 0"));
+        }
+
         System.out.println("=== EnhancementEngineTest Total Failures: " + failures + " ===");
         if (failures > 0) {
             System.exit(1);
         }
+    }
+
+    static void setupWorldState(int mapId) {
+        if (fu.c == null) {
+            fu.c = new cn();
+        }
+        fu.a = fu.c;
+        eh.h = true;
+        fu.s = null;
+        if (fu.q == null) {
+            try {
+                Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+                uf.setAccessible(true);
+                sun.misc.Unsafe unsafe = (sun.misc.Unsafe) uf.get(null);
+                fu.q = (cs) unsafe.allocateInstance(cs.class);
+            } catch (Throwable t) {
+            }
+        }
+        if (fu.q != null) {
+            fu.q.d = mapId;
+        }
+        if (cn.g == null) {
+            cn.g = new bq(100, (byte) 0, "hero", 0, 0);
+        }
+        cn.g.cG = 0; // alive (4 is dead)
+        cn.g.cx = 0;
+        cn.g.cy = 0;
+        try {
+            Field rst = Class.forName("Zeus").getDeclaredField("readySettleTicks");
+            rst.setAccessible(true);
+            rst.set(null, 15);
+            Field mst = Class.forName("Zeus").getDeclaredField("mapStableTicks");
+            mst.setAccessible(true);
+            mst.set(null, 15);
+            Field sm = Class.forName("Zeus").getDeclaredField("stableMapId");
+            sm.setAccessible(true);
+            sm.set(null, mapId);
+        } catch (Throwable t) {
+        }
+    }
+
+    static fa makeNpc(String name, int cu, int cv, int x, int y) {
+        fa npc = new fa();
+        npc.cC = name;
+        npc.cu = cu;
+        npc.cv = (byte) cv;
+        npc.aZ = x;
+        npc.ba = y;
+        return npc;
     }
 }

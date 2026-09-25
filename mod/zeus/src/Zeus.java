@@ -431,6 +431,7 @@ public final class Zeus {
         enhancePhase = 0;
         enhanceWhy = 0;
         enhanceWait = 0;
+        cleanEnhancementRouting();
         // ---- end ENHANCE ------------------------------------------------------
         // ---- DUNGEON ----------------------------------------------------------
         // The dungeon trip stops too, and stops mid-menu rather than finishing: the run was
@@ -3498,6 +3499,7 @@ public final class Zeus {
         authReset();
         mapStableReset();
         navSessionReset();
+        cleanEnhancementRouting();
         recoverEnhancementSession();
     }
 
@@ -3707,7 +3709,13 @@ public final class Zeus {
         if (atkMode != 0) {
             return autoFarmActive() ? atkMap : -1;
         }
-        return navDone ? -1 : navTarget;
+        if (navTarget >= 0 && !navDone) {
+            return navTarget;
+        }
+        if (enhNavigating) {
+            return BLACKSMITH_MAP;
+        }
+        return -1;
     }
 
     /**
@@ -4460,6 +4468,31 @@ public final class Zeus {
     public static int snapTargetLevelBefore = 0;
     public static int snapSelectedCharmTemplateId = 0;
 
+    public static final int BLACKSMITH_MAP = 1;
+    public static final int BLACKSMITH_ANCHOR_X = 324;
+    public static final int BLACKSMITH_ANCHOR_Y = 624;
+    public static final int MAX_BLACKSMITH_SCANS = 50;
+
+    public static boolean enhNavigating = false;
+    public static int enhBlacksmithScanTicks = 0;
+    public static int enhForgeOpenTries = 0;
+
+    public static void cleanEnhancementRouting() {
+        enhNavigating = false;
+        enhBlacksmithScanTicks = 0;
+        enhForgeOpenTries = 0;
+    }
+
+    public static boolean isEnhancementTravelConflict() {
+        if (autoFarmActive() || atkMode != 0) {
+            return true;
+        }
+        if (navTarget >= 0 && !navDone) {
+            return true;
+        }
+        return false;
+    }
+
     private static String lastEnhRequestId = null;
     private static long enhReqCheckedAt = 0L;
     private static int enhWait = 0;
@@ -4500,12 +4533,17 @@ public final class Zeus {
             case 31: return "TIMEOUT";
             case 32: return "CANCELLED";
             case 33: return "MANUAL_REVIEW_REQUIRED";
+            case 34: return "ENHANCEMENT_TRAVEL_CONFLICT";
+            case 35: return "BLACKSMITH_ROUTE_UNAVAILABLE";
+            case 36: return "BLACKSMITH_NOT_FOUND";
+            case 37: return "BLACKSMITH_INTERACTION_FAILED";
+            case 38: return "FORGE_OPEN_FAILED";
             default: return "UNKNOWN";
         }
     }
 
     public static boolean isEnhancementStateTerminal(int state) {
-        return state >= 17 && state <= 33;
+        return state >= 17 && state <= 38;
     }
 
     public static int resolveAutoCharm(int currentLevel) {
@@ -4881,7 +4919,6 @@ public final class Zeus {
             return null;
         }
         fa best = null;
-        fa fallback = null;
         int bestDistance = Integer.MAX_VALUE;
         for (int i = 0; i < cn.j.c(); i++) {
             Object entry = cn.j.a(i);
@@ -4896,18 +4933,17 @@ public final class Zeus {
                 String n = norm(candidate.cC);
                 if (n.indexOf("phap su") >= 0 || n.indexOf("cuong hoa") >= 0) {
                     int distance = abs(cn.g.aZ - candidate.aZ) + abs(cn.g.ba - candidate.ba);
+                    if (candidate.cu == -36) {
+                        distance -= 10000;
+                    }
                     if (distance < bestDistance) {
                         bestDistance = distance;
                         best = candidate;
                     }
-                    continue;
                 }
             }
-            if (fallback == null && candidate.cu == -36) {
-                fallback = candidate;
-            }
         }
-        return best != null ? best : fallback;
+        return best;
     }
 
     private static boolean isForgeScreenOpen() {
@@ -5112,8 +5148,12 @@ public final class Zeus {
         sb.append("],\n");
         sb.append("  \"actual_charms_spent\": ").append(enhActualCharmsSpent).append(",\n");
         sb.append("  \"accounting_status\": \"").append(enhAccountingStatus != null ? enhAccountingStatus : "PENDING").append("\",\n");
-        if (enhErrorCode != null) {
-            sb.append("  \"error_code\": \"").append(enhErrorCode).append("\",\n");
+        String errCode = enhErrorCode;
+        if (errCode == null && enhState >= 18 && enhState != 17) {
+            errCode = getEnhancementStateName(enhState);
+        }
+        if (errCode != null) {
+            sb.append("  \"error_code\": \"").append(errCode).append("\",\n");
         }
         if (enhErrorMessage != null) {
             sb.append("  \"error_message\": \"").append(clean(enhErrorMessage)).append("\",\n");
@@ -5124,6 +5164,9 @@ public final class Zeus {
     }
 
     public static void publishEnhancementStatus() {
+        if (isEnhancementStateTerminal(enhState)) {
+            cleanEnhancementRouting();
+        }
         if (enhStatusPath == null) {
             return;
         }
@@ -5156,6 +5199,16 @@ public final class Zeus {
         }
 
         try {
+            if (enhState >= 1 && enhState <= 6) {
+                if (isEnhancementTravelConflict()) {
+                    enhState = 34; // ENHANCEMENT_TRAVEL_CONFLICT
+                    enhErrorCode = "ENHANCEMENT_TRAVEL_CONFLICT";
+                    enhErrorMessage = "Enhancement travel conflict: navigation owned by Auto Farm or Manual Travel";
+                    cleanEnhancementRouting();
+                    publishEnhancementStatus();
+                    return;
+                }
+            }
             switch (enhState) {
                 case 1: // VALIDATING_REQUEST
                     if (enhCategory != 3 || enhExpectedLevel < 0 || enhExpectedLevel > 14
@@ -5184,25 +5237,58 @@ public final class Zeus {
                     break;
 
                 case 4: // LOCATING_BLACKSMITH
-                    fa blacksmith = findBlacksmithNpc();
-                    if (blacksmith == null) {
-                        enhState = 28; // SERVER_REJECTED / no NPC
-                        enhErrorMessage = "Blacksmith NPC not found";
+                    int here = fu.q != null ? fu.q.d : -1;
+                    if (here != BLACKSMITH_MAP) {
+                        int hop = mapNextHop(here, BLACKSMITH_MAP);
+                        if (hop < 0 || mapDistance(here, BLACKSMITH_MAP) < 0 || travelState == TV_BLOCKED) {
+                            enhState = 35; // BLACKSMITH_ROUTE_UNAVAILABLE
+                            enhErrorCode = "BLACKSMITH_ROUTE_UNAVAILABLE";
+                            enhErrorMessage = "No route from map " + here + " to Blacksmith map " + BLACKSMITH_MAP;
+                            cleanEnhancementRouting();
+                            publishEnhancementStatus();
+                            return;
+                        }
+                        enhNavigating = true;
                         publishEnhancementStatus();
                         return;
                     }
+
+                    // Authoritative arrival on Map 1
+                    enhNavigating = false;
+                    if (!mapStable() || !gameReady()) {
+                        return;
+                    }
+                    fa blacksmith = findBlacksmithNpc();
+                    if (blacksmith == null) {
+                        enhBlacksmithScanTicks++;
+                        if (enhBlacksmithScanTicks > MAX_BLACKSMITH_SCANS) {
+                            enhState = 36; // BLACKSMITH_NOT_FOUND
+                            enhErrorCode = "BLACKSMITH_NOT_FOUND";
+                            enhErrorMessage = "Blacksmith NPC not found on Map 1";
+                            cleanEnhancementRouting();
+                            publishEnhancementStatus();
+                            return;
+                        }
+                        travelMove(here, BLACKSMITH_ANCHOR_X, BLACKSMITH_ANCHOR_Y);
+                        return;
+                    }
+                    enhBlacksmithScanTicks = 0;
                     int dist = abs(cn.g.aZ - blacksmith.aZ) + abs(cn.g.ba - blacksmith.ba);
                     if (dist > 45) {
-                        int here = fu.q != null ? fu.q.d : 0;
                         travelMove(here, blacksmith.aZ, blacksmith.ba);
                         enhState = 5; // APPROACHING_BLACKSMITH
                     } else {
                         enhState = 6; // OPENING_FORGE
+                        enhWait = 20;
+                        enhForgeOpenTries = 1;
                         try {
                             q.a().a((byte) blacksmith.cu);
-                        } catch (Throwable ignored) {
+                        } catch (Throwable t) {
+                            enhState = 37; // BLACKSMITH_INTERACTION_FAILED
+                            enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
+                            enhErrorMessage = "Failed sending interaction packet to blacksmith";
+                            cleanEnhancementRouting();
                         }
-                        enhWait = 20;
                     }
                     publishEnhancementStatus();
                     break;
@@ -5210,28 +5296,37 @@ public final class Zeus {
                 case 5: // APPROACHING_BLACKSMITH
                     fa bs = findBlacksmithNpc();
                     if (bs == null) {
-                        enhState = 28;
+                        enhState = 37; // BLACKSMITH_INTERACTION_FAILED
+                        enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
+                        enhErrorMessage = "Blacksmith NPC lost during approach";
+                        cleanEnhancementRouting();
                         publishEnhancementStatus();
                         return;
                     }
                     int d = abs(cn.g.aZ - bs.aZ) + abs(cn.g.ba - bs.ba);
                     if (d <= 45) {
                         enhState = 6; // OPENING_FORGE
+                        enhWait = 20;
+                        enhForgeOpenTries = 1;
                         try {
                             q.a().a((byte) bs.cu);
-                        } catch (Throwable ignored) {
+                        } catch (Throwable t) {
+                            enhState = 37; // BLACKSMITH_INTERACTION_FAILED
+                            enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
+                            enhErrorMessage = "Failed sending interaction packet to blacksmith";
+                            cleanEnhancementRouting();
                         }
-                        enhWait = 20;
                         publishEnhancementStatus();
                     } else {
-                        int here = fu.q != null ? fu.q.d : 0;
-                        travelMove(here, bs.aZ, bs.ba);
+                        int curMap = fu.q != null ? fu.q.d : 0;
+                        travelMove(curMap, bs.aZ, bs.ba);
                     }
                     break;
 
                 case 6: // OPENING_FORGE
                     if (isForgeScreenOpen()) {
                         enhState = 7; // INSERTING_TARGET
+                        enhForgeOpenTries = 0;
                         publishEnhancementStatus();
                         return;
                     }
@@ -5239,13 +5334,35 @@ public final class Zeus {
                         enhWait--;
                         return;
                     }
+                    if (enhForgeOpenTries >= 3) {
+                        enhState = 38; // FORGE_OPEN_FAILED
+                        enhErrorCode = "FORGE_OPEN_FAILED";
+                        enhErrorMessage = "Forge dialog failed to open";
+                        cleanEnhancementRouting();
+                        publishEnhancementStatus();
+                        return;
+                    }
                     fa bsRetry = findBlacksmithNpc();
                     if (bsRetry != null) {
+                        enhForgeOpenTries++;
+                        enhWait = 20;
                         try {
                             q.a().a((byte) bsRetry.cu);
-                        } catch (Throwable ignored) {
+                        } catch (Throwable t) {
+                            enhState = 37; // BLACKSMITH_INTERACTION_FAILED
+                            enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
+                            enhErrorMessage = "Failed retry interaction packet to blacksmith";
+                            cleanEnhancementRouting();
+                            publishEnhancementStatus();
+                            return;
                         }
-                        enhWait = 20;
+                    } else {
+                        enhState = 37; // BLACKSMITH_INTERACTION_FAILED
+                        enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
+                        enhErrorMessage = "Blacksmith NPC lost during retry";
+                        cleanEnhancementRouting();
+                        publishEnhancementStatus();
+                        return;
                     }
                     break;
 
@@ -5314,11 +5431,22 @@ public final class Zeus {
                         publishEnhancementStatus();
                         return;
                     }
+                    if (c.C == 1 || c.C == 2 || c.C >= 5) {
+                        enhState = 28; // SERVER_REJECTED
+                        enhErrorCode = "SERVER_REJECTED";
+                        enhErrorMessage = "Server rejected enhancement attempt (code=" + c.C + ")";
+                        enhInFlightExecute = false;
+                        cleanEnhancementRouting();
+                        publishEnhancementStatus();
+                        return;
+                    }
                     if (enhWait > 0) {
                         enhWait--;
                     } else {
                         enhState = 29; // RESULT_AMBIGUOUS
+                        enhErrorCode = "RESULT_AMBIGUOUS";
                         enhErrorMessage = "Timed out waiting for server enhancement result";
+                        cleanEnhancementRouting();
                         publishEnhancementStatus();
                     }
                     break;
@@ -5351,6 +5479,7 @@ public final class Zeus {
         enhState = 0;
         enhActiveTargetSlot = -1;
         enhInFlightExecute = false;
+        cleanEnhancementRouting();
     }
 
     // ---- end ENHANCE ----------------------------------------------------------
