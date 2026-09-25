@@ -55,6 +55,10 @@ pub mod inventory;
 #[allow(dead_code)]
 pub mod enhancement;
 
+/// Durable enhancement queue v1 orchestrator (ENHANCE-05B). Cross-platform.
+#[allow(dead_code)]
+pub mod enhancement_queue;
+
 /// Main loop — B5+B6+B7+B8 (AGENT-SPEC §4.2).
 /// unix-only: reads /proc, /sys/fs/cgroup, runs ss, calls waitpid.
 #[cfg(unix)]

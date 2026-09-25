@@ -433,6 +433,211 @@ impl SupabaseRest {
                 format!("sign_in_as_device: no access_token (device_id={})", device_id)
             ))
     }
+
+    // ── enhancement_queue (ENHANCE-05B) ──────────────────────────────────────────
+
+    /// Fetches the oldest QUEUED job for an account and device, if any.
+    pub fn fetch_claimable_queue_job(
+        &self,
+        account_id: &str,
+        device_id: &str,
+    ) -> Result<Option<crate::enhancement_queue::EnhancementQueueJobRow>, RestError> {
+        let response = self
+            .request(
+                "GET",
+                &format!(
+                    "/rest/v1/enhancement_queue_jobs?account_id=eq.{account_id}&device_id=eq.{device_id}&status=eq.QUEUED&order=created_at.asc&limit=1"
+                ),
+            )
+            .call()?;
+        let rows: Vec<crate::enhancement_queue::EnhancementQueueJobRow> = response.json()?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Fetches any active unresolved job (RUNNING, PAUSING, PAUSED, MANUAL_REVIEW_REQUIRED) for an account.
+    pub fn fetch_active_unresolved_queue_job(
+        &self,
+        account_id: &str,
+        device_id: &str,
+    ) -> Result<Option<crate::enhancement_queue::EnhancementQueueJobRow>, RestError> {
+        let response = self
+            .request(
+                "GET",
+                &format!(
+                    "/rest/v1/enhancement_queue_jobs?account_id=eq.{account_id}&device_id=eq.{device_id}&status=in.(RUNNING,PAUSING,PAUSED,MANUAL_REVIEW_REQUIRED)&order=created_at.asc&limit=1"
+                ),
+            )
+            .call()?;
+        let rows: Vec<crate::enhancement_queue::EnhancementQueueJobRow> = response.json()?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Atomically claims a QUEUED job using conditional CAS.
+    /// Returns Some(row) if won, None if lost (another worker claimed or job not QUEUED).
+    pub fn claim_queue_job(
+        &self,
+        job_id: &str,
+        account_id: &str,
+        device_id: &str,
+        worker_id: &str,
+        claim_duration_secs: u64,
+    ) -> Result<Option<crate::enhancement_queue::EnhancementQueueJobRow>, RestError> {
+        let now = now_rfc3339();
+        let expires_at = rfc3339_offset_from_now(claim_duration_secs);
+        let path = format!(
+            "/rest/v1/enhancement_queue_jobs?id=eq.{job_id}&account_id=eq.{account_id}&device_id=eq.{device_id}&status=eq.QUEUED&or=(claimed_by.is.null,claim_expires_at.lt.{now})"
+        );
+        let payload = serde_json::json!({
+            "status": crate::enhancement_queue::EnhancementQueueJobStatus::Running.as_str(),
+            "claimed_by": worker_id,
+            "claimed_at": now,
+            "claim_expires_at": expires_at,
+            "started_at": now,
+        });
+
+        let response = self
+            .request("PATCH", &path)
+            .prefer("return=representation")
+            .send_json(payload)?;
+        let rows: Vec<crate::enhancement_queue::EnhancementQueueJobRow> = response.json()?;
+        if crate::enhancement_queue::evaluate_claim_result(&rows, worker_id)
+            == crate::enhancement_queue::ClaimOutcome::Won
+        {
+            Ok(rows.into_iter().next())
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Fetches all items for a queue job, ordered strictly by queue_order asc.
+    pub fn fetch_queue_items(
+        &self,
+        job_id: &str,
+        account_id: &str,
+    ) -> Result<Vec<crate::enhancement_queue::EnhancementQueueItemRow>, RestError> {
+        let response = self
+            .request(
+                "GET",
+                &format!(
+                    "/rest/v1/enhancement_queue_items?job_id=eq.{job_id}&account_id=eq.{account_id}&order=queue_order.asc"
+                ),
+            )
+            .call()?;
+        response.json()
+    }
+
+    /// Updates mutable fields of a queue job.
+    pub fn update_queue_job(
+        &self,
+        job_id: &str,
+        account_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), RestError> {
+        self.request(
+            "PATCH",
+            &format!("/rest/v1/enhancement_queue_jobs?id=eq.{job_id}&account_id=eq.{account_id}"),
+        )
+        .prefer("return=minimal")
+        .send_json(payload)?;
+        Ok(())
+    }
+
+    /// Updates mutable fields of a queue item.
+    pub fn update_queue_item(
+        &self,
+        item_id: &str,
+        account_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), RestError> {
+        self.request(
+            "PATCH",
+            &format!("/rest/v1/enhancement_queue_items?id=eq.{item_id}&account_id=eq.{account_id}"),
+        )
+        .prefer("return=minimal")
+        .send_json(payload)?;
+        Ok(())
+    }
+
+    /// Persists durable mutation fence for an item before command dispatch.
+    /// Returns true if fence committed successfully; false if CAS failed.
+    pub fn commit_item_mutation_fence(
+        &self,
+        item_id: &str,
+        attempt_uuid: &str,
+        current_phase: crate::enhancement_queue::EnhancementAttemptPhase,
+    ) -> Result<bool, RestError> {
+        let (path, body) = match crate::enhancement_queue::build_mutation_fence_update(
+            item_id,
+            attempt_uuid,
+            current_phase,
+        ) {
+            Ok(pair) => pair,
+            Err(e) => return Err(RestError::Decode(e.to_string())),
+        };
+
+        let response = self
+            .request("PATCH", &path)
+            .prefer("return=representation")
+            .send_json(body)?;
+        let rows: Vec<crate::enhancement_queue::EnhancementQueueItemRow> = response.json()?;
+        let decision = crate::enhancement_queue::evaluate_mutation_fence_response(&rows, attempt_uuid);
+        Ok(decision == crate::enhancement_queue::MutationFenceDecision::FenceCommittedProceedToDispatch)
+    }
+
+    /// Persists durable mutation fence for an item using full attempt spec.
+    pub fn commit_item_mutation_fence_with_spec(
+        &self,
+        item_id: &str,
+        account_id: &str,
+        spec: &crate::enhancement_queue::LevelAttemptSpec,
+        current_phase: &str,
+    ) -> Result<bool, RestError> {
+        let (path, body) = match crate::enhancement_queue::build_mutation_fence_update_with_spec(
+            item_id,
+            account_id,
+            spec,
+            current_phase,
+        ) {
+            Ok(pair) => pair,
+            Err(e) => return Err(RestError::Decode(e.to_string())),
+        };
+
+        let response = self
+            .request("PATCH", &path)
+            .prefer("return=representation")
+            .send_json(body)?;
+        let rows: Vec<crate::enhancement_queue::EnhancementQueueItemRow> = response.json()?;
+        let decision = crate::enhancement_queue::evaluate_mutation_fence_response(&rows, &spec.attempt_uuid);
+        Ok(decision == crate::enhancement_queue::MutationFenceDecision::FenceCommittedProceedToDispatch)
+    }
+
+    /// Commits authoritative settled spend and current level idempotently.
+    pub fn commit_item_settlement(
+        &self,
+        item: &crate::enhancement_queue::EnhancementQueueItemRow,
+        attempt_uuid: &str,
+        telemetry: &crate::enhancement::EnhancementStatusTelemetry,
+    ) -> Result<crate::enhancement_queue::SettlementCommitOutcome, RestError> {
+        let (path, body) = match crate::enhancement_queue::build_settlement_commit_update(
+            item,
+            attempt_uuid,
+            telemetry,
+        ) {
+            Ok(pair) => pair,
+            Err(e) => return Err(RestError::Decode(e.to_string())),
+        };
+
+        let response = self
+            .request("PATCH", &path)
+            .prefer("return=representation")
+            .send_json(body)?;
+        let rows: Vec<crate::enhancement_queue::EnhancementQueueItemRow> = response.json()?;
+        Ok(crate::enhancement_queue::evaluate_settlement_commit_result(
+            &rows,
+            attempt_uuid,
+            &item.attempt_phase,
+        ))
+    }
 }
 
 // ── payloads ────────────────────────────────────────────────────────────────────

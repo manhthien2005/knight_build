@@ -131,6 +131,8 @@ struct AccountState {
     last_spot_scan: Option<crate::spot_scan::RetainedSpotScan>,
     /// Pending single-item enhancement, if any.
     pending_enhancement: Option<crate::enhancement::PendingEnhancement>,
+    /// Enhancement queue orchestrator tracker.
+    pub queue_tracker: crate::enhancement_queue::AccountQueueTracker,
 }
 
 /// Cấu hình môi trường agent. Đọc từ biến môi trường lúc boot.
@@ -255,7 +257,12 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
         let _ = clear_snapshot(&paths.home);
         let _ = clear_settings(&paths.home);
         crate::spot_scan::clean_spot_files(&paths.home);
-        crate::enhancement::clean_enhancement_files(&paths.home);
+        let _ = crate::enhancement_queue::recover_account_enhancement_queue_on_boot(
+            &paths.home,
+            &cfg.device_id,
+            &acc.id,
+            &rest,
+        );
         // prepare_directories trước khi spawn — Issue #16
         let _ = crate::launch::prepare_directories(&paths);
         let _ = try_apply_config(acc, jar_ctl_version, &rest);
@@ -317,6 +324,7 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
 
     // Ticks
     let mut last_snapshot_tick = Instant::now();
+    let mut last_queue_tick = Instant::now();
     let mut last_heartbeat_tick = Instant::now();
     let mut last_viewer_tick = Instant::now();
     let mut last_token_refresh = Instant::now();
@@ -402,6 +410,23 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
             last_snapshot_tick = now;
             for acc in accounts.values_mut() {
                 tick_snapshot_telemetry(acc, &rest);
+            }
+
+            // Enhancement queue orchestrator periodic tick
+            for acc in accounts.values_mut() {
+                if !acc.retiring && !retired_tombstones.contains(&acc.id) {
+                    let paths = AccountPaths::for_slot(acc.slot_index);
+                    let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+                    crate::enhancement_queue::tick_account_enhancement_queue(
+                        &paths.home,
+                        &cfg.device_id,
+                        &acc.id,
+                        is_alive,
+                        acc.pending_enhancement.is_some(),
+                        &mut acc.queue_tracker,
+                        &rest,
+                    );
+                }
             }
 
             // Kiểm tra Xvnc socket còn sống — Issue #27
@@ -2089,6 +2114,7 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
                 pending_spot_scan: None,
                 last_spot_scan: None,
                 pending_enhancement: None,
+                queue_tracker: crate::enhancement_queue::AccountQueueTracker::default(),
             };
             (id, state)
         })
@@ -2127,6 +2153,7 @@ fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountS
         pending_spot_scan: None,
         last_spot_scan: None,
         pending_enhancement: None,
+        queue_tracker: crate::enhancement_queue::AccountQueueTracker::default(),
     })
 }
 
