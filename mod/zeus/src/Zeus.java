@@ -2937,7 +2937,7 @@ public final class Zeus {
                         }
                     }
                 }
-                q.a().b((byte) idNPC, (short) idMenu, (byte) pickIndex);
+                q.a().b((short) idNPC, (byte) idMenu, (byte) pickIndex);
                 taken = true;
             } catch (Throwable t) {
             }

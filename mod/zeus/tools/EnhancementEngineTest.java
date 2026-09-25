@@ -660,7 +660,29 @@ public class EnhancementEngineTest {
         menuItems.a(opt3);
         boolean menuTaken = ((Boolean) serverMenuMethod.invoke(null, menuItems, 10, -36, "Pháp sư")).booleanValue();
         check("serverMenu takes 'Cường hoá' option in state 6", menuTaken);
-        check("serverMenu dispatches option pick packet (opcode 24)", queue().size() == 1);
+        check("serverMenu dispatches option pick packet", queue().size() == 1);
+        ep pkt10 = (ep) queue().elementAt(0);
+        check("serverMenu option pick opcode is -30 (not 67)", pkt10.a == (byte) -30);
+
+        // 10.7: Focused wire test proving NPC=-36, menu=0, option=0 selects short-byte-byte overload
+        clearQueue();
+        set("enhState", 6);
+        et liveMenuItems = new et("menu");
+        liveMenuItems.a(new bt("Cường hóa", 0)); // option index 0
+        boolean liveMenuTaken = ((Boolean) serverMenuMethod.invoke(null, liveMenuItems, 0, -36, "Pháp sư")).booleanValue();
+        check("live-shape menu selection taken", liveMenuTaken);
+        check("exactly 1 packet queued for menu selection", queue().size() == 1);
+        ep wirePkt = (ep) queue().elementAt(0);
+        check("menu-selection wire opcode is -30", wirePkt.a == (byte) -30);
+        check("menu-selection produces zero Opcode 67 packets", wirePkt.a != (byte) 67);
+        byte[] payload = wirePkt.a();
+        java.io.DataInputStream dis = new java.io.DataInputStream(new java.io.ByteArrayInputStream(payload));
+        short wireNpc = dis.readShort();
+        byte wireMenu = dis.readByte();
+        byte wireOption = dis.readByte();
+        check("payload field order preserves NPC short -36", wireNpc == (short) -36);
+        check("payload field order preserves menu byte 0", wireMenu == (byte) 0);
+        check("payload field order preserves option byte 0", wireOption == (byte) 0);
 
         // ---------------------------------------------------------------------
         // Test 11: Deterministic Pre-Opcode-67 Validation Interlock & Guard
