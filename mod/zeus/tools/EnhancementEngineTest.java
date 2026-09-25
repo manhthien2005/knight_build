@@ -763,6 +763,40 @@ public class EnhancementEngineTest {
         boolean valOnlyAfterReset = ((Boolean) get("enhValidationOnly")).booleanValue();
         check("enhanceReset clears validationOnly flag", !valOnlyAfterReset);
 
+        // ---------------------------------------------------------------------
+        // Test 12: Interstitial Dialog Recovery & Native Dismissal
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 12: Interstitial dialog recovery & native dismissal ---");
+        Method dialogRecoveryMethod = Class.forName("Zeus").getDeclaredMethod("dialogRecovery");
+        dialogRecoveryMethod.setAccessible(true);
+
+        // 12.1: fu.p single "Đóng" button is dismissed via native button action
+        if (fu.p == null) {
+            fu.p = new fr();
+        }
+        fu.s = null;
+        fu.p.a = true;
+        fr.d = 1; // notification mode
+        dialogRecoveryMethod.invoke(null);
+        check("fu.p notification (fr.d=1) is dismissed by dialogRecovery", !fu.p.a);
+
+        // 12.2: fu.p menu mode (fr.d=0) is NOT auto-dismissed (fail-closed)
+        fu.s = null;
+        fu.p.a = true;
+        fr.d = 0; // menu mode
+        dialogRecoveryMethod.invoke(null);
+        check("fu.p menu mode (fr.d=0) fails closed and remains open", fu.p.a);
+        fu.p.a = false; // cleanup
+
+        // 12.3: cleanEnhancementRouting clears fu.p and restores fu.a to fu.c
+        setupWorldState(1);
+        ev forgeScreen = makeForgePopup();
+        fu.a = forgeScreen;
+        fu.p.a = true;
+        call("cleanEnhancementRouting");
+        check("cleanEnhancementRouting dismisses active fu.p", !fu.p.a);
+        check("cleanEnhancementRouting restores fu.a to fu.c", fu.a == fu.c);
+
         System.out.println("=== EnhancementEngineTest Total Failures: " + failures + " ===");
         if (failures > 0) {
             System.exit(1);

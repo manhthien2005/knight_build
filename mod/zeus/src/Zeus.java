@@ -3555,7 +3555,8 @@ public final class Zeus {
                 || text.indexOf("su kien") >= 0
                 || text.indexOf("chuc cac hiep si") >= 0
                 || text.indexOf("tips:") >= 0
-                || text.indexOf("huong dan") >= 0) {
+                || text.indexOf("huong dan") >= 0
+                || text.indexOf("vui long cho") >= 0) {
             return true;
         }
         return false;
@@ -3593,6 +3594,14 @@ public final class Zeus {
                 dialogLastFingerprint = "";
                 dialogStableTicks = 0;
                 dialogTries = 0;
+            }
+            if (fu.p != null && fu.p.a && fr.d == 1) {
+                if (dialogTries < DIALOG_MAX_TRIES) {
+                    ++dialogTries;
+                    trace("DIALOG fu.p notification dismissed try=" + dialogTries);
+                    fu.p.f();
+                    fu.m();
+                }
             }
             return;
         }
@@ -4483,6 +4492,15 @@ public final class Zeus {
         enhNavigating = false;
         enhBlacksmithScanTicks = 0;
         enhForgeOpenTries = 0;
+        try {
+            if (fu.p != null && fu.p.a) {
+                fu.p.f();
+            }
+            if (fu.a instanceof ev) {
+                fu.c.c();
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     public static boolean isEnhancementTravelConflict() {
@@ -4831,6 +4849,7 @@ public final class Zeus {
             enhState = 19; // ITEM_DESTROYED
             enhLastResult = "DESTROYED";
             enhActiveTargetSlot = -1;
+            cleanEnhancementRouting();
             return;
         }
 
@@ -4840,6 +4859,7 @@ public final class Zeus {
         if (newLevel >= enhTargetLevel) {
             enhLastResult = "SUCCESS";
             enhState = 17; // TARGET_REACHED
+            cleanEnhancementRouting();
             return;
         }
 
@@ -4847,6 +4867,7 @@ public final class Zeus {
             enhLastResult = "SUCCESS";
             if (enhAttemptCount >= enhMaxAttempts) {
                 enhState = 18; // ATTEMPT_LIMIT_REACHED
+                cleanEnhancementRouting();
             } else {
                 enhState = 10; // Ready for next cycle
             }
@@ -4866,12 +4887,14 @@ public final class Zeus {
             }
             if (enhAttemptCount >= enhMaxAttempts) {
                 enhState = 18; // ATTEMPT_LIMIT_REACHED
+                cleanEnhancementRouting();
             }
             return;
         }
 
         if (enhAttemptCount >= enhMaxAttempts) {
             enhState = 18;
+            cleanEnhancementRouting();
         }
     }
 
