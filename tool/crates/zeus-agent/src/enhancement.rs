@@ -39,6 +39,8 @@ pub struct SingleItemEnhanceCommandPayload {
     pub charm_mode: u8,
     pub payment_type: u8,
     pub max_attempts: u32,
+    #[serde(default)]
+    pub validation_only: bool,
 }
 
 /// Request payload written to `zeus-enhance.req`.
@@ -55,6 +57,8 @@ pub struct EnhancementRequestPayload {
     pub charm_mode: u8,
     pub payment_type: u8,
     pub max_attempts: u32,
+    #[serde(default)]
+    pub validation_only: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_at: Option<String>,
 }
@@ -103,6 +107,7 @@ pub enum EnhancementState {
     BlacksmithNotFound,
     BlacksmithInteractionFailed,
     ForgeOpenFailed,
+    DryRunComplete,
 }
 
 impl EnhancementState {
@@ -131,11 +136,12 @@ impl EnhancementState {
                 | Self::BlacksmithNotFound
                 | Self::BlacksmithInteractionFailed
                 | Self::ForgeOpenFailed
+                | Self::DryRunComplete
         )
     }
 
     pub fn is_success(&self) -> bool {
-        matches!(self, Self::TargetReached)
+        matches!(self, Self::TargetReached | Self::DryRunComplete)
     }
 }
 
@@ -166,6 +172,8 @@ pub struct EnhancementStatusTelemetry {
     pub actual_materials_spent: Vec<i64>,
     pub actual_charms_spent: i64,
     pub accounting_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_only: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,6 +190,7 @@ pub struct PendingEnhancement {
     pub template_id: i32,
     pub category: i32,
     pub target_level: i32,
+    pub validation_only: bool,
 }
 
 /// Validation error for single item enhancement payloads.
@@ -393,6 +402,7 @@ mod tests {
             charm_mode: 3,
             payment_type: 0,
             max_attempts: 10,
+            validation_only: false,
         }
     }
 
@@ -514,6 +524,7 @@ mod tests {
             charm_mode: 3,
             payment_type: 0,
             max_attempts: 10,
+            validation_only: false,
             requested_at: Some("2026-09-24T12:00:00Z".to_string()),
         };
 
@@ -681,5 +692,88 @@ mod tests {
             assert!(state.is_terminal(), "{} must be terminal", state_str);
             assert!(!state.is_success(), "{} must not be success", state_str);
         }
+    }
+
+    #[test]
+    fn test_dry_run_complete_terminal_and_telemetry() {
+        let state: EnhancementState = serde_json::from_str("\"DRY_RUN_COMPLETE\"").unwrap();
+        assert_eq!(state, EnhancementState::DryRunComplete);
+        assert!(state.is_terminal(), "DRY_RUN_COMPLETE must be terminal");
+        assert!(state.is_success(), "DRY_RUN_COMPLETE must be success");
+
+        let dir = tempdir().unwrap();
+        let home = dir.path();
+        let status_path = home.join(ENHANCE_STATUS_FILE_NAME);
+
+        let dry_run_json = r#"{
+            "version": 1,
+            "request_id": "req-dry-1",
+            "state": "DRY_RUN_COMPLETE",
+            "captured_slot": 0,
+            "template_id": 68,
+            "category": 3,
+            "base_name": "Kiem bao thu",
+            "start_level": 0,
+            "current_level": 0,
+            "target_level": 7,
+            "configured_charm_mode": 3,
+            "resolved_charm_mode": 0,
+            "payment_type": 0,
+            "attempt_count": 0,
+            "max_attempts": 1,
+            "last_result": null,
+            "quoted_gold_cost": 0,
+            "quoted_gem_cost": 0,
+            "quoted_material_requirements": [],
+            "actual_gold_spent": 0,
+            "actual_gem_spent": 0,
+            "actual_materials_spent": [],
+            "actual_charms_spent": 0,
+            "accounting_status": "PENDING",
+            "validation_only": true,
+            "updated_at": "2026-09-25T12:00:00Z"
+        }"#;
+        fs::write(&status_path, dry_run_json).unwrap();
+        match poll_enhancement_status(home, "req-dry-1") {
+            EnhancementPollOutcome::TerminalSuccess(telemetry) => {
+                assert_eq!(telemetry.state, "DRY_RUN_COMPLETE");
+                assert_eq!(telemetry.validation_only, Some(true));
+                assert_eq!(telemetry.attempt_count, 0);
+                assert_eq!(telemetry.last_result, None);
+            }
+            other => panic!("expected TerminalSuccess for DRY_RUN_COMPLETE, got {:?}", other),
+        }
+
+        // Test payload default validation_only = false
+        let payload_json = r#"{
+            "captured_slot": 0,
+            "template_id": 68,
+            "category": 3,
+            "base_name": "Kiem bao thu",
+            "tier": 0,
+            "expected_level": 0,
+            "target_level": 7,
+            "charm_mode": 3,
+            "payment_type": 0,
+            "max_attempts": 1
+        }"#;
+        let payload: SingleItemEnhanceCommandPayload = serde_json::from_str(payload_json).unwrap();
+        assert!(!payload.validation_only);
+
+        let dry_payload_json = r#"{
+            "captured_slot": 0,
+            "template_id": 68,
+            "category": 3,
+            "base_name": "Kiem bao thu",
+            "tier": 0,
+            "expected_level": 0,
+            "target_level": 7,
+            "charm_mode": 3,
+            "payment_type": 0,
+            "max_attempts": 1,
+            "validation_only": true
+        }"#;
+        let dry_payload: SingleItemEnhanceCommandPayload = serde_json::from_str(dry_payload_json).unwrap();
+        assert!(dry_payload.validation_only);
     }
 }

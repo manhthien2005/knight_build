@@ -662,10 +662,98 @@ public class EnhancementEngineTest {
         check("serverMenu takes 'Cường hoá' option in state 6", menuTaken);
         check("serverMenu dispatches option pick packet (opcode 24)", queue().size() == 1);
 
+        // ---------------------------------------------------------------------
+        // Test 11: Deterministic Pre-Opcode-67 Validation Interlock & Guard
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 11: Deterministic Dry-Run Interlock & Structural Opcode 67 Guard ---");
+        // Subtest 11.1: Forge-ready + validationOnly=true transitions directly to DRY_RUN_COMPLETE (39)
+        setupWorldState(1);
+        set("enhState", 6); // OPENING_FORGE
+        set("enhValidationOnly", true);
+        clearQueue();
+        fu.a = makeForgePopup();
+        enhanceMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("Forge-ready with validationOnly=true transitions to DRY_RUN_COMPLETE (39)", state == 39);
+        check("State 39 is classified as terminal", ((Boolean) Class.forName("Zeus").getDeclaredMethod("isEnhancementStateTerminal", int.class).invoke(null, 39)).booleanValue());
+        check("State 39 name is DRY_RUN_COMPLETE", "DRY_RUN_COMPLETE".equals(Class.forName("Zeus").getDeclaredMethod("getEnhancementStateName", int.class).invoke(null, 39)));
+        check("Validation-only at forge-ready sends ZERO Opcode 67 packets", queue().size() == 0);
+
+        // Subtest 11.2: Forge-ready + validationOnly=false still transitions to INSERTING_TARGET (7)
+        setupWorldState(1);
+        set("enhState", 6); // OPENING_FORGE
+        set("enhValidationOnly", false);
+        clearQueue();
+        fu.a = makeForgePopup();
+        enhanceMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("Forge-ready with validationOnly=false transitions to INSERTING_TARGET (7)", state == 7);
+
+        // Subtest 11.3: Telemetry contract for DRY_RUN_COMPLETE
+        set("enhState", 39);
+        set("enhValidationOnly", true);
+        set("enhErrorCode", null);
+        set("enhErrorMessage", null);
+        set("enhAttemptCount", 0);
+        set("enhLastResult", null);
+        String dryRunJson = (String) formatStatusMethod.invoke(null);
+        check("Telemetry contains state DRY_RUN_COMPLETE", dryRunJson.indexOf("\"state\": \"DRY_RUN_COMPLETE\"") >= 0);
+        check("Telemetry contains attempt_count 0", dryRunJson.indexOf("\"attempt_count\": 0") >= 0);
+        check("Telemetry contains last_result null", dryRunJson.indexOf("\"last_result\": null") >= 0);
+        check("Telemetry contains validation_only true", dryRunJson.indexOf("\"validation_only\": true") >= 0);
+        check("Telemetry has no error_code for DRY_RUN_COMPLETE", dryRunJson.indexOf("\"error_code\"") < 0);
+
+        // Subtest 11.4: Structural Guard at State 7 (INSERTING_TARGET)
+        setupWorldState(1);
+        set("enhState", 7);
+        set("enhValidationOnly", true);
+        clearQueue();
+        enhanceMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("State 7 structural guard intercepts and enters DRY_RUN_COMPLETE (39)", state == 39);
+        check("State 7 structural guard sends zero packets", queue().size() == 0);
+
+        // Subtest 11.5: Structural Guard at State 9 (INSERTING_CHARM)
+        setupWorldState(1);
+        set("enhState", 9);
+        set("enhValidationOnly", true);
+        clearQueue();
+        enhanceMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("State 9 structural guard intercepts and enters DRY_RUN_COMPLETE (39)", state == 39);
+        check("State 9 structural guard sends zero packets", queue().size() == 0);
+
+        // Subtest 11.6: Structural Guard at executeEnhancementAttempt
+        setupWorldState(1);
+        set("enhState", 11);
+        set("enhValidationOnly", true);
+        clearQueue();
+        executeAttemptMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("Execute structural guard intercepts and enters DRY_RUN_COMPLETE (39)", state == 39);
+        check("Execute structural guard sends zero packets", queue().size() == 0);
+
+        // Subtest 11.7: Request scoping and enhanceReset
+        Method resetMethod = Class.forName("Zeus").getDeclaredMethod("enhanceReset");
+        resetMethod.setAccessible(true);
+        set("enhValidationOnly", true);
+        resetMethod.invoke(null);
+        boolean valOnlyAfterReset = ((Boolean) get("enhValidationOnly")).booleanValue();
+        check("enhanceReset clears validationOnly flag", !valOnlyAfterReset);
+
         System.out.println("=== EnhancementEngineTest Total Failures: " + failures + " ===");
         if (failures > 0) {
             System.exit(1);
         }
+    }
+
+    static ev makeForgePopup() {
+        ev popup = new ev();
+        popup.b = new et("tabs");
+        c forgeTab = new c("Cuong hoa", (byte) 0);
+        popup.b.a(forgeTab);
+        popup.a = 0;
+        return popup;
     }
 
     static void setupWorldState(int mapId) {

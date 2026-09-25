@@ -1224,7 +1224,8 @@ fn dispatch_command(
             // 8. Publish telemetry snapshot ngay lập tức
             push_account_runtime_telemetry(acc, rest);
         }
-        "enhance-item" | "enhance-single-item" => {
+        "enhance-item" | "enhance-single-item" | "enhance-item-dry-run" => {
+            let is_dry_run_cmd = cmd.command_type == "enhance-item-dry-run";
             // 1. JVM/process phải đang chạy
             let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
             if !is_alive {
@@ -1253,7 +1254,7 @@ fn dispatch_command(
             }
 
             // 3. Parse and validate command payload strictly
-            let payload: crate::enhancement::SingleItemEnhanceCommandPayload = match cmd.payload {
+            let mut payload: crate::enhancement::SingleItemEnhanceCommandPayload = match cmd.payload {
                 Some(ref p) => match serde_json::from_value(p.clone()) {
                     Ok(parsed) => parsed,
                     Err(e) => {
@@ -1268,6 +1269,10 @@ fn dispatch_command(
                     return;
                 }
             };
+
+            if is_dry_run_cmd {
+                payload.validation_only = true;
+            }
 
             if let Err(e) = crate::enhancement::validate_single_item_payload(&payload) {
                 eprintln!("[command] enhance-item: invalid payload: {e}");
@@ -1297,6 +1302,7 @@ fn dispatch_command(
                 charm_mode: payload.charm_mode,
                 payment_type: payload.payment_type,
                 max_attempts: payload.max_attempts,
+                validation_only: payload.validation_only,
                 requested_at: Some(now_rfc),
             };
 
@@ -1320,6 +1326,7 @@ fn dispatch_command(
                 template_id: payload.template_id,
                 category: payload.category,
                 target_level: payload.target_level,
+                validation_only: payload.validation_only,
             });
 
             // 8. Publish telemetry snapshot ngay lập tức

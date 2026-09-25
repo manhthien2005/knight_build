@@ -527,6 +527,15 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
             JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
         ],
     },
+    RuntimeContract {
+        name: "ENHANCEMENT_DRY_RUN_V14",
+        jar_sha256: JarManifest::ENHANCEMENT_DRY_RUN_COMPATIBLE_JAR_SHA256,
+        ctl_version: 14,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+        ],
+    },
 ];
 
 impl JarManifest {
@@ -545,6 +554,8 @@ impl JarManifest {
         "180a9cd897cd6212bc6e93b93848990eef02cc4a79a0bdd0c3d76373620a9020";
     pub const ENHANCEMENT_FINAL_COMPATIBLE_JAR_SHA256: &'static str =
         "d264851685340b4729f401aa708e8b41ce51cc668c304e2dc43dd060bab5899a";
+    pub const ENHANCEMENT_DRY_RUN_COMPATIBLE_JAR_SHA256: &'static str =
+        "b23951d9eb4021544728d6fd1bb547170a8e2c5dc1066addb89f9422c8b53f85";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -3065,7 +3076,7 @@ mod tests {
 
         // 7. Test loading actual repository zeus-jar.json
         if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
-            assert_eq!(loaded_manifest.jar_sha256, JarManifest::ENHANCEMENT_FINAL_COMPATIBLE_JAR_SHA256);
+            assert_eq!(loaded_manifest.jar_sha256, JarManifest::ENHANCEMENT_DRY_RUN_COMPATIBLE_JAR_SHA256);
             assert_eq!(loaded_manifest.ctl_version, 14);
             assert_eq!(loaded_manifest.ctl_key_count, 37);
             assert!(loaded_manifest.is_character_slot_compatible());
@@ -3221,6 +3232,22 @@ mod tests {
         assert!(manifest_final.is_visual_qol_compatible(), "final must be visual-qol compatible");
         assert_eq!(manifest_final.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
         assert!(!manifest_final.capabilities().contains(&"enhancement-queue-v1"));
+
+        let manifest_dry_run = JarManifest {
+            jar_sha256: "b23951d9eb4021544728d6fd1bb547170a8e2c5dc1066addb89f9422c8b53f85".to_string(),
+            jar_size: 1146836,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-25T11:02:10Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(manifest_dry_run.is_character_slot_compatible(), "dry_run must be character-slot compatible");
+        assert!(manifest_dry_run.is_visual_qol_compatible(), "dry_run must be visual-qol compatible");
+        assert_eq!(manifest_dry_run.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert!(!manifest_dry_run.capabilities().contains(&"enhancement-queue-v1"));
 
         // Unknown JAR must fail closed
         let unknown = JarManifest {

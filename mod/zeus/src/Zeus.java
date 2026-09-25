@@ -4448,6 +4448,8 @@ public final class Zeus {
     public static String enhLastResult = null;
     public static int enhActiveTargetSlot = -1;
     public static boolean enhInFlightExecute = false;
+    public static boolean enhValidationOnly = false;
+    public static boolean enhValidationOnlyMalformed = false;
 
     public static long enhQuotedGoldCost = 0L;
     public static long enhQuotedGemCost = 0L;
@@ -4538,12 +4540,13 @@ public final class Zeus {
             case 36: return "BLACKSMITH_NOT_FOUND";
             case 37: return "BLACKSMITH_INTERACTION_FAILED";
             case 38: return "FORGE_OPEN_FAILED";
+            case 39: return "DRY_RUN_COMPLETE";
             default: return "UNKNOWN";
         }
     }
 
     public static boolean isEnhancementStateTerminal(int state) {
-        return state >= 17 && state <= 38;
+        return state >= 17 && state <= 39;
     }
 
     public static int resolveAutoCharm(int currentLevel) {
@@ -4757,6 +4760,14 @@ public final class Zeus {
             for (int i = 0; i < c.p.length && i < snapMaterialsBefore.length; i++) {
                 snapMaterialsBefore[i] = c.p[i];
             }
+        }
+
+        if (enhValidationOnly) {
+            enhState = 39; // DRY_RUN_COMPLETE
+            enhErrorCode = null;
+            enhErrorMessage = null;
+            cleanEnhancementRouting();
+            return;
         }
 
         enhAttemptCount++;
@@ -5024,6 +5035,8 @@ public final class Zeus {
         enhConfiguredCharmMode = parseJsonInt(reqText, "charm_mode", 3);
         enhPaymentType = parseJsonInt(reqText, "payment_type", 0);
         enhMaxAttempts = parseJsonInt(reqText, "max_attempts", 1);
+        enhValidationOnlyMalformed = false;
+        enhValidationOnly = parseJsonBooleanStrict(reqText, "validation_only", false);
 
         enhAttemptCount = 0;
         enhActualGoldSpent = 0L;
@@ -5079,6 +5092,30 @@ public final class Zeus {
         return def;
     }
 
+    private static boolean parseJsonBooleanStrict(String text, String key, boolean def) {
+        if (text == null || key == null) return def;
+        String pattern = "\"" + key + "\"";
+        int idx = text.indexOf(pattern);
+        if (idx < 0) return def;
+        int colon = text.indexOf(':', idx + pattern.length());
+        if (colon < 0) {
+            enhValidationOnlyMalformed = true;
+            return def;
+        }
+        int start = colon + 1;
+        while (start < text.length() && Character.isWhitespace(text.charAt(start))) {
+            start++;
+        }
+        if (text.startsWith("true", start)) {
+            return true;
+        }
+        if (text.startsWith("false", start)) {
+            return false;
+        }
+        enhValidationOnlyMalformed = true;
+        return def;
+    }
+
     private static String formatRfc3339(long timeMillis) {
         java.util.Calendar cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"));
         cal.setTime(new java.util.Date(timeMillis));
@@ -5121,6 +5158,9 @@ public final class Zeus {
         sb.append("  \"payment_type\": ").append(enhPaymentType).append(",\n");
         sb.append("  \"attempt_count\": ").append(enhAttemptCount).append(",\n");
         sb.append("  \"max_attempts\": ").append(enhMaxAttempts).append(",\n");
+        if (enhValidationOnly) {
+            sb.append("  \"validation_only\": true,\n");
+        }
         if (enhLastResult != null) {
             sb.append("  \"last_result\": \"").append(enhLastResult).append("\",\n");
         } else {
@@ -5149,7 +5189,7 @@ public final class Zeus {
         sb.append("  \"actual_charms_spent\": ").append(enhActualCharmsSpent).append(",\n");
         sb.append("  \"accounting_status\": \"").append(enhAccountingStatus != null ? enhAccountingStatus : "PENDING").append("\",\n");
         String errCode = enhErrorCode;
-        if (errCode == null && enhState >= 18 && enhState != 17) {
+        if (errCode == null && enhState >= 18 && enhState != 17 && enhState != 39) {
             errCode = getEnhancementStateName(enhState);
         }
         if (errCode != null) {
@@ -5213,7 +5253,8 @@ public final class Zeus {
                 case 1: // VALIDATING_REQUEST
                     if (enhCategory != 3 || enhExpectedLevel < 0 || enhExpectedLevel > 14
                             || enhTargetLevel <= enhExpectedLevel || enhTargetLevel > 15
-                            || enhConfiguredCharmMode > 3 || enhPaymentType > 1 || enhMaxAttempts < 1) {
+                            || enhConfiguredCharmMode > 3 || enhPaymentType > 1 || enhMaxAttempts < 1
+                            || enhValidationOnlyMalformed) {
                         enhState = 23; // INELIGIBLE_ITEM
                         enhErrorMessage = "Invalid enhancement request parameters";
                         publishEnhancementStatus();
@@ -5325,6 +5366,15 @@ public final class Zeus {
 
                 case 6: // OPENING_FORGE
                     if (isForgeScreenOpen()) {
+                        if (enhValidationOnly) {
+                            enhState = 39; // DRY_RUN_COMPLETE
+                            enhForgeOpenTries = 0;
+                            enhErrorCode = null;
+                            enhErrorMessage = null;
+                            cleanEnhancementRouting();
+                            publishEnhancementStatus();
+                            return;
+                        }
                         enhState = 7; // INSERTING_TARGET
                         enhForgeOpenTries = 0;
                         publishEnhancementStatus();
@@ -5367,6 +5417,14 @@ public final class Zeus {
                     break;
 
                 case 7: // INSERTING_TARGET
+                    if (enhValidationOnly) {
+                        enhState = 39; // DRY_RUN_COMPLETE
+                        enhErrorCode = null;
+                        enhErrorMessage = null;
+                        cleanEnhancementRouting();
+                        publishEnhancementStatus();
+                        return;
+                    }
                     if (c.l != null && c.l.O == enhTemplateId) {
                         enhState = 8; // RESOLVING_CHARM
                         publishEnhancementStatus();
@@ -5389,6 +5447,14 @@ public final class Zeus {
                     break;
 
                 case 9: // INSERTING_CHARM
+                    if (enhValidationOnly) {
+                        enhState = 39; // DRY_RUN_COMPLETE
+                        enhErrorCode = null;
+                        enhErrorMessage = null;
+                        cleanEnhancementRouting();
+                        publishEnhancementStatus();
+                        return;
+                    }
                     if (enhResolvedCharmMode == 0) {
                         enhState = 10;
                         publishEnhancementStatus();
@@ -5479,6 +5545,10 @@ public final class Zeus {
         enhState = 0;
         enhActiveTargetSlot = -1;
         enhInFlightExecute = false;
+        enhValidationOnly = false;
+        enhValidationOnlyMalformed = false;
+        enhErrorCode = null;
+        enhErrorMessage = null;
         cleanEnhancementRouting();
     }
 
