@@ -770,15 +770,19 @@ public class EnhancementEngineTest {
         Method dialogRecoveryMethod = Class.forName("Zeus").getDeclaredMethod("dialogRecovery");
         dialogRecoveryMethod.setAccessible(true);
 
-        // 12.1: fu.p single "Đóng" button is dismissed via native button action
         if (fu.p == null) {
             fu.p = new fr();
         }
+
+        // 12.1: Unrelated fu.p notification (fr.d=1) while unowned is NOT dismissed
         fu.s = null;
         fu.p.a = true;
         fr.d = 1; // notification mode
+        setupWorldState(1);
+        fu.a = fu.c;
         dialogRecoveryMethod.invoke(null);
-        check("fu.p notification (fr.d=1) is dismissed by dialogRecovery", !fu.p.a);
+        check("Unrelated fu.p notification (fr.d=1) is NOT dismissed when unowned", fu.p.a);
+        fu.p.a = false; // reset
 
         // 12.2: fu.p menu mode (fr.d=0) is NOT auto-dismissed (fail-closed)
         fu.s = null;
@@ -786,16 +790,79 @@ public class EnhancementEngineTest {
         fr.d = 0; // menu mode
         dialogRecoveryMethod.invoke(null);
         check("fu.p menu mode (fr.d=0) fails closed and remains open", fu.p.a);
-        fu.p.a = false; // cleanup
+        fu.p.a = false; // reset
 
-        // 12.3: cleanEnhancementRouting clears fu.p and restores fu.a to fu.c
-        setupWorldState(1);
-        ev forgeScreen = makeForgePopup();
-        fu.a = forgeScreen;
-        fu.p.a = true;
+        // 12.3: Unrelated ev tab-screen (e.g. inventory) is NOT force-closed by cleanEnhancementRouting
+        ev invScreen = makeInventoryPopup();
+        fu.a = invScreen;
         call("cleanEnhancementRouting");
-        check("cleanEnhancementRouting dismisses active fu.p", !fu.p.a);
-        check("cleanEnhancementRouting restores fu.a to fu.c", fu.a == fu.c);
+        check("Unrelated ev screen is NOT force-closed to fu.c", fu.a == invScreen);
+        check("fu.a remains invScreen and not fu.c", fu.a != fu.c);
+
+        // 12.4: Unowned forge screen is NOT closed by cleanEnhancementRouting
+        ev unownedForge = makeForgePopup();
+        fu.a = unownedForge;
+        set("enhOwnsForgeScreen", false);
+        call("cleanEnhancementRouting");
+        check("Unowned forge screen is NOT closed by cleanEnhancementRouting", fu.a == unownedForge);
+
+        // 12.5: Enhancement-owned fu.p is dismissed via native fr.f() when owned
+        ev ownedForge = makeForgePopup();
+        fu.a = ownedForge;
+        fu.p.a = true;
+        fr.d = 1;
+        set("enhOwnsForgeScreen", true);
+        set("enhOwnsResultDialog", true);
+        dialogRecoveryMethod.invoke(null);
+        check("Enhancement-owned fu.p is dismissed by dialogRecovery", !fu.p.a);
+        check("enhOwnsResultDialog is cleared after dismissal", !((Boolean) get("enhOwnsResultDialog")).booleanValue());
+
+        // 12.6: Zero Opcode 67 packets emitted on dialog dismissal
+        clearQueue();
+        set("enhOwnsForgeScreen", true);
+        set("enhOwnsResultDialog", true);
+        fu.p.a = true;
+        fr.d = 1;
+        dialogRecoveryMethod.invoke(null);
+        check("Dialog dismissal emits zero packets", queue().size() == 0);
+
+        // 12.7: Enhancement-owned forge screen cleanup restores fu.a to fu.c
+        fu.a = ownedForge;
+        set("enhOwnsForgeScreen", true);
+        call("cleanEnhancementRouting");
+        check("Enhancement-owned forge screen is restored to fu.c", fu.a == fu.c);
+        check("enhOwnsForgeScreen cleared after cleanup", !((Boolean) get("enhOwnsForgeScreen")).booleanValue());
+
+        // 12.8: Dry-run validation never sets enhOwnsResultDialog
+        call("enhanceReset");
+        setupWorldState(1);
+        set("enhValidationOnly", true);
+        set("enhState", 6); // OPENING_FORGE
+        fu.a = makeForgePopup();
+        enhanceMethod.invoke(null);
+        check("Dry run terminates in DRY_RUN_COMPLETE (39)", ((Integer) get("enhState")).intValue() == 39);
+        check("Dry run does NOT set enhOwnsResultDialog", !((Boolean) get("enhOwnsResultDialog")).booleanValue());
+        check("Dry run clears enhOwnsForgeScreen", !((Boolean) get("enhOwnsForgeScreen")).booleanValue());
+
+        // 12.9: Real execute lifecycle sets enhOwnsResultDialog and clears on reset
+        call("enhanceReset");
+        setupWorldState(1);
+        set("enhValidationOnly", false);
+        set("enhState", 13); // WAITING_RESULT
+        set("enhInFlightExecute", true);
+        set("enhOwnsForgeScreen", true);
+        c.C = 3; // server SUCCESS result
+        enhanceMethod.invoke(null);
+        check("Real result lifecycle sets enhOwnsResultDialog", ((Boolean) get("enhOwnsResultDialog")).booleanValue());
+        call("enhanceReset");
+        check("enhanceReset clears enhOwnsResultDialog", !((Boolean) get("enhOwnsResultDialog")).booleanValue());
+        check("enhanceReset clears enhOwnsForgeScreen", !((Boolean) get("enhOwnsForgeScreen")).booleanValue());
+
+        // 12.10: Between attempts clean state
+        check("Target slot cleared (-1)", ((Integer) get("enhActiveTargetSlot")).intValue() == -1);
+        check("Engine idle (0)", ((Integer) get("enhState")).intValue() == 0);
+        check("Dialog ownership false", !((Boolean) get("enhOwnsResultDialog")).booleanValue());
+        check("Forge ownership false", !((Boolean) get("enhOwnsForgeScreen")).booleanValue());
 
         System.out.println("=== EnhancementEngineTest Total Failures: " + failures + " ===");
         if (failures > 0) {
@@ -808,6 +875,15 @@ public class EnhancementEngineTest {
         popup.b = new et("tabs");
         c forgeTab = new c("Cuong hoa", (byte) 0);
         popup.b.a(forgeTab);
+        popup.a = 0;
+        return popup;
+    }
+
+    static ev makeInventoryPopup() {
+        ev popup = new ev();
+        popup.b = new et("tabs");
+        fm invTab = new fm();
+        popup.b.a(invTab);
         popup.a = 0;
         return popup;
     }

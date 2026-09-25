@@ -3595,11 +3595,13 @@ public final class Zeus {
                 dialogStableTicks = 0;
                 dialogTries = 0;
             }
-            if (fu.p != null && fu.p.a && fr.d == 1) {
+            if (enhOwnsResultDialog && enhOwnsForgeScreen && isForgeScreenOpen()
+                    && fu.p != null && fu.p.a && fr.d == 1) {
                 if (dialogTries < DIALOG_MAX_TRIES) {
                     ++dialogTries;
-                    trace("DIALOG fu.p notification dismissed try=" + dialogTries);
+                    trace("DIALOG owned enhancement fu.p notification dismissed try=" + dialogTries);
                     fu.p.f();
+                    enhOwnsResultDialog = false;
                     fu.m();
                 }
             }
@@ -4487,20 +4489,24 @@ public final class Zeus {
     public static boolean enhNavigating = false;
     public static int enhBlacksmithScanTicks = 0;
     public static int enhForgeOpenTries = 0;
+    public static boolean enhOwnsForgeScreen = false;
+    public static boolean enhOwnsResultDialog = false;
 
     public static void cleanEnhancementRouting() {
         enhNavigating = false;
         enhBlacksmithScanTicks = 0;
         enhForgeOpenTries = 0;
         try {
-            if (fu.p != null && fu.p.a) {
+            if (enhOwnsResultDialog && enhOwnsForgeScreen && isForgeScreenOpen() && fu.p != null && fu.p.a) {
                 fu.p.f();
             }
-            if (fu.a instanceof ev) {
+            if (enhOwnsForgeScreen && isForgeScreenOpen()) {
                 fu.c.c();
             }
         } catch (Throwable ignored) {
         }
+        enhOwnsResultDialog = false;
+        enhOwnsForgeScreen = false;
     }
 
     public static boolean isEnhancementTravelConflict() {
@@ -4849,7 +4855,6 @@ public final class Zeus {
             enhState = 19; // ITEM_DESTROYED
             enhLastResult = "DESTROYED";
             enhActiveTargetSlot = -1;
-            cleanEnhancementRouting();
             return;
         }
 
@@ -4859,7 +4864,6 @@ public final class Zeus {
         if (newLevel >= enhTargetLevel) {
             enhLastResult = "SUCCESS";
             enhState = 17; // TARGET_REACHED
-            cleanEnhancementRouting();
             return;
         }
 
@@ -4867,7 +4871,6 @@ public final class Zeus {
             enhLastResult = "SUCCESS";
             if (enhAttemptCount >= enhMaxAttempts) {
                 enhState = 18; // ATTEMPT_LIMIT_REACHED
-                cleanEnhancementRouting();
             } else {
                 enhState = 10; // Ready for next cycle
             }
@@ -4887,14 +4890,12 @@ public final class Zeus {
             }
             if (enhAttemptCount >= enhMaxAttempts) {
                 enhState = 18; // ATTEMPT_LIMIT_REACHED
-                cleanEnhancementRouting();
             }
             return;
         }
 
         if (enhAttemptCount >= enhMaxAttempts) {
             enhState = 18;
-            cleanEnhancementRouting();
         }
     }
 
@@ -4902,7 +4903,10 @@ public final class Zeus {
         if (enhInFlightExecute) {
             enhState = 33; // MANUAL_REVIEW_REQUIRED
             enhInFlightExecute = false;
+            enhOwnsResultDialog = false;
+            enhOwnsForgeScreen = false;
             enhErrorMessage = "Interrupted during in-flight enhancement attempt; manual review required";
+            cleanEnhancementRouting();
             publishEnhancementStatus();
         }
     }
@@ -5227,7 +5231,7 @@ public final class Zeus {
     }
 
     public static void publishEnhancementStatus() {
-        if (isEnhancementStateTerminal(enhState)) {
+        if (isEnhancementStateTerminal(enhState) && !enhOwnsResultDialog) {
             cleanEnhancementRouting();
         }
         if (enhStatusPath == null) {
@@ -5389,6 +5393,7 @@ public final class Zeus {
 
                 case 6: // OPENING_FORGE
                     if (isForgeScreenOpen()) {
+                        enhOwnsForgeScreen = true;
                         if (enhValidationOnly) {
                             enhState = 39; // DRY_RUN_COMPLETE
                             enhForgeOpenTries = 0;
@@ -5515,6 +5520,7 @@ public final class Zeus {
 
                 case 13: // WAITING_RESULT
                     if (c.C == 3 || c.C == 4) {
+                        enhOwnsResultDialog = true;
                         enhState = 14;
                         settleEnhancementResult();
                         publishEnhancementStatus();
