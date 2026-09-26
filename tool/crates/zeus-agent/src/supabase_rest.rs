@@ -766,6 +766,7 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         capabilities: &[
             JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
             JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+            JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
         ],
     },
 ];
@@ -773,6 +774,7 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
 impl JarManifest {
     pub const CHARACTER_SLOT_CAPABILITY_TOKEN: &'static str = "character-slot-v1";
     pub const VISUAL_QOL_CAPABILITY_TOKEN: &'static str = "visual-qol-v1";
+    pub const ENHANCEMENT_QUEUE_CAPABILITY_TOKEN: &'static str = "enhancement-queue-v1";
 
     pub const CHARACTER_SLOT_COMPATIBLE_JAR_SHA256: &'static str =
         "0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd";
@@ -820,6 +822,10 @@ impl JarManifest {
         self.capabilities().contains(&Self::VISUAL_QOL_CAPABILITY_TOKEN)
     }
 
+    pub fn is_enhancement_queue_compatible(&self) -> bool {
+        self.capabilities().contains(&Self::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN)
+    }
+
     pub fn canonical_agent_version(&self) -> &str {
         let trimmed = self.agent_version.trim();
         if trimmed.is_empty() {
@@ -843,6 +849,7 @@ impl JarManifest {
             for token in m.split('.') {
                 if token == Self::CHARACTER_SLOT_CAPABILITY_TOKEN
                     || token == Self::VISUAL_QOL_CAPABILITY_TOKEN
+                    || token == Self::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN
                 {
                     continue;
                 }
@@ -861,6 +868,11 @@ impl JarManifest {
             && !tokens.contains(&Self::VISUAL_QOL_CAPABILITY_TOKEN)
         {
             tokens.push(Self::VISUAL_QOL_CAPABILITY_TOKEN);
+        }
+        if caps.contains(&Self::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN)
+            && !tokens.contains(&Self::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN)
+        {
+            tokens.push(Self::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN);
         }
 
         if tokens.is_empty() {
@@ -3319,7 +3331,8 @@ mod tests {
             assert_eq!(loaded_manifest.ctl_key_count, 37);
             assert!(loaded_manifest.is_character_slot_compatible());
             assert!(loaded_manifest.is_visual_qol_compatible());
-            assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+            assert!(loaded_manifest.is_enhancement_queue_compatible());
+            assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1");
         }
     }
 
@@ -3532,8 +3545,9 @@ mod tests {
         };
         assert!(manifest_dialog_owned.is_character_slot_compatible(), "dialog_owned must be character-slot compatible");
         assert!(manifest_dialog_owned.is_visual_qol_compatible(), "dialog_owned must be visual-qol compatible");
-        assert_eq!(manifest_dialog_owned.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
-        assert!(!manifest_dialog_owned.capabilities().contains(&"enhancement-queue-v1"));
+        assert!(manifest_dialog_owned.is_enhancement_queue_compatible(), "dialog_owned must be enhancement-queue compatible");
+        assert!(manifest_dialog_owned.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
+        assert_eq!(manifest_dialog_owned.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1");
 
         // Unknown JAR must fail closed
         let unknown = JarManifest {
@@ -3550,7 +3564,106 @@ mod tests {
         assert_eq!(unknown.capabilities().len(), 0);
         assert!(!unknown.is_character_slot_compatible());
         assert!(!unknown.is_visual_qol_compatible());
+        assert!(!unknown.is_enhancement_queue_compatible());
         assert_eq!(unknown.advertised_agent_version(), "0.1.0");
+    }
+
+    #[test]
+    fn test_enhancement_queue_v1_capability_matrix() {
+        // 1. Final 5b8 JAR alone receives enhancement-queue-v1
+        let manifest_5b8 = JarManifest {
+            jar_sha256: "5b8de74dc0135a1cda3cb111297b6f0c4676cdc5e6788e079c610bd59f256072".to_string(),
+            jar_size: 1147120,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-25T16:59:16Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(manifest_5b8.is_character_slot_compatible());
+        assert!(manifest_5b8.is_visual_qol_compatible());
+        assert!(manifest_5b8.is_enhancement_queue_compatible());
+        assert_eq!(
+            manifest_5b8.capabilities(),
+            &[
+                JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+                JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+            ]
+        );
+        assert_eq!(
+            manifest_5b8.advertised_agent_version(),
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1"
+        );
+
+        // 2. 99479d does not get enhancement-queue-v1
+        let manifest_994 = JarManifest {
+            jar_sha256: "99479d3804cc4c25ccf5a0269e41df4bf1bb2018f571e124898dd2da71872192".to_string(),
+            jar_size: 1146828,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-25T11:51:48Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(manifest_994.is_character_slot_compatible());
+        assert!(manifest_994.is_visual_qol_compatible());
+        assert!(!manifest_994.is_enhancement_queue_compatible());
+        assert_eq!(
+            manifest_994.advertised_agent_version(),
+            "0.1.0+character-slot-v1.visual-qol-v1"
+        );
+
+        // 3. 17fd2775 does not get enhancement-queue-v1
+        let manifest_17fd = JarManifest {
+            jar_sha256: "17fd277537603d459471def5b92118064619b559e0d90b3ea8f1302174b4183f".to_string(),
+            jar_size: 1147009,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-25T16:09:33Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(manifest_17fd.is_character_slot_compatible());
+        assert!(manifest_17fd.is_visual_qol_compatible());
+        assert!(!manifest_17fd.is_enhancement_queue_compatible());
+        assert_eq!(
+            manifest_17fd.advertised_agent_version(),
+            "0.1.0+character-slot-v1.visual-qol-v1"
+        );
+
+        // 4. Unknown JAR fails closed
+        let unknown = JarManifest {
+            jar_sha256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string(),
+            jar_size: 1147120,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-25T00:00:00Z".to_string(),
+            patcher_sha256: "".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert_eq!(unknown.capabilities().len(), 0);
+        assert!(!unknown.is_enhancement_queue_compatible());
+        assert_eq!(unknown.advertised_agent_version(), "0.1.0");
+
+        // 5. Deterministic token order preserved when metadata already had tokens in different order
+        let mut disordered = manifest_5b8.clone();
+        disordered.agent_version = "0.1.0+visual-qol-v1.enhancement-queue-v1.character-slot-v1".to_string();
+        assert_eq!(
+            disordered.advertised_agent_version(),
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1"
+        );
+        assert_eq!(disordered.advertised_agent_version().matches("enhancement-queue-v1").count(), 1);
+        assert_eq!(disordered.advertised_agent_version().matches("character-slot-v1").count(), 1);
+        assert_eq!(disordered.advertised_agent_version().matches("visual-qol-v1").count(), 1);
     }
 }
 

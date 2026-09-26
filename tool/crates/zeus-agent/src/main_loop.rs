@@ -1265,8 +1265,8 @@ fn dispatch_command(
                 return;
             }
 
-            // 2. Reject nếu đã có enhancement đang pending
-            if acc.pending_enhancement.is_some() {
+            // 2. Reject nếu đã có enhancement đang pending (single-item hoặc queue attempt in flight)
+            if acc.pending_enhancement.is_some() || acc.queue_tracker.in_flight_attempt.is_some() {
                 eprintln!("[command] enhance-item: account {account_id} already has pending enhancement");
                 if let Err(e) = rest.finish_command(
                     &cmd.id,

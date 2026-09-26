@@ -2527,5 +2527,64 @@ mod tests {
             other => panic!("expected TransitionToManualReviewRequired, got {:?}", other),
         }
     }
+
+    #[test]
+    fn test_manual_single_item_and_queue_coexistence_mutual_exclusion() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let mut tracker = AccountQueueTracker::default();
+        let rest = crate::supabase_rest::SupabaseRest::new("http://127.0.0.1:54321".to_string(), "test-key".to_string());
+
+        // 1. When legacy single-item enhancement is in flight, queue tick immediately yields
+        tick_account_enhancement_queue(
+            home,
+            "dev-test",
+            "acc-test",
+            true, // process is alive
+            true, // has_pending_single_item_enhancement == true
+            &mut tracker,
+            &rest,
+        );
+
+        // Tracker state must be untouched: no active job, no in flight attempt
+        assert!(tracker.active_job_id.is_none());
+        assert!(tracker.in_flight_attempt.is_none());
+        // No enhancement request file written to disk
+        assert!(!home.join("enhancement_request.json").exists());
+
+        // 2. When queue has an in_flight_attempt, tracker reflects it
+        tracker.in_flight_attempt = Some(InFlightQueueAttempt {
+            job_id: "job-1".to_string(),
+            item_id: "item-1".to_string(),
+            attempt_uuid: "attempt-1".to_string(),
+            expected_level: 0,
+            target_level: 1,
+            started_at: std::time::Instant::now(),
+        });
+        assert!(tracker.in_flight_attempt.is_some());
+    }
+
+    #[test]
+    fn test_queue_schema_error_and_empty_queue_safety() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let mut tracker = AccountQueueTracker::default();
+        let rest = crate::supabase_rest::SupabaseRest::new("http://127.0.0.1:54321".to_string(), "test-key".to_string());
+
+        // When no queue rows exist (or endpoint unreachable), safe no-op
+        tick_account_enhancement_queue(
+            home,
+            "dev-test",
+            "acc-test",
+            true,
+            false,
+            &mut tracker,
+            &rest,
+        );
+
+        assert!(tracker.active_job_id.is_none());
+        assert!(tracker.in_flight_attempt.is_none());
+        assert!(!home.join("enhancement_request.json").exists());
+    }
 }
 
