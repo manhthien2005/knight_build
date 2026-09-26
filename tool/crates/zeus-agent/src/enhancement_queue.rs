@@ -2269,4 +2269,263 @@ mod tests {
             RestartRecoveryAction::JobTerminal
         );
     }
+
+    // ── Required Adversarial Audit Tests (ENHANCE-05C) ─────────────────────────
+
+    #[test]
+    fn test_crash_immediately_after_mutation_fence_before_dispatch() {
+        let job = EnhancementQueueJobRow::mock("job-c1", "acc-1", "dev-1", "RUNNING", "worker-1");
+        let mut item = EnhancementQueueItemRow::mock("it-c1", "job-c1", 1, 0, 0, 1, "RUNNING");
+        item.active_attempt_uuid = Some("att-uuid-c1".to_string());
+        item.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+
+        // Process crashed immediately after fence commit before command dispatch reached sidecar.
+        // Disk telemetry is None because command was never executed.
+        let action = evaluate_restart_recovery_step(&job, Some(&item), None);
+
+        // MUST NOT blindly replay or resume pre-fence preparation!
+        match action {
+            RestartRecoveryAction::TransitionToManualReviewRequired { reason } => {
+                assert!(reason.contains("unreconciled post-fence attempt"));
+                assert!(reason.contains("att-uuid-c1"));
+            }
+            other => panic!("expected TransitionToManualReviewRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_crash_immediately_after_dispatch_with_unknown_runtime_acceptance() {
+        let job = EnhancementQueueJobRow::mock("job-c2", "acc-1", "dev-1", "RUNNING", "worker-1");
+        let mut item = EnhancementQueueItemRow::mock("it-c2", "job-c2", 1, 0, 0, 1, "RUNNING");
+        item.active_attempt_uuid = Some("att-uuid-c2".to_string());
+        item.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+
+        // Dispatch completed, but agent crashed before JVM acknowledged or finished.
+        // On restart, telemetry on disk is missing or has non-settled state.
+        let action = evaluate_restart_recovery_step(&job, Some(&item), None);
+        assert!(matches!(action, RestartRecoveryAction::TransitionToManualReviewRequired { .. }));
+    }
+
+    #[test]
+    fn test_crash_after_settlement_before_spend_commit() {
+        let job = EnhancementQueueJobRow::mock("job-c3", "acc-1", "dev-1", "RUNNING", "worker-1");
+        let mut item = EnhancementQueueItemRow::mock("it-c3", "job-c3", 1, 0, 0, 1, "RUNNING");
+        item.active_attempt_uuid = Some("att-uuid-c3".to_string());
+        item.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+
+        // Runtime completed Opcode 67 and wrote settled status to disk, but agent crashed before DB commit.
+        let telemetry = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: "att-uuid-c3".to_string(),
+            state: "SUCCESS".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm".to_string(),
+            start_level: 0,
+            current_level: 1,
+            target_level: 1,
+            configured_charm_mode: 0,
+            resolved_charm_mode: 0,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("SUCCESS".to_string()),
+            quoted_gold_cost: 5000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![],
+            actual_gold_spent: 5000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![],
+            actual_charms_spent: 0,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: Some(false),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-26T00:00:00Z".to_string(),
+        };
+
+        let action = evaluate_restart_recovery_step(&job, Some(&item), Some(&telemetry));
+        match action {
+            RestartRecoveryAction::ReconcileSettledAttempt(recovered) => {
+                assert_eq!(recovered.request_id, "att-uuid-c3");
+                assert_eq!(recovered.actual_gold_spent, 5000);
+                assert_eq!(recovered.current_level, 1);
+            }
+            other => panic!("expected ReconcileSettledAttempt, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_duplicate_settlement_observation() {
+        let attempt_uuid = "att-uuid-dup";
+        // Simulate row already in SETTLED phase in database
+        let outcome = evaluate_settlement_commit_result(&[], attempt_uuid, "SETTLED");
+        assert_eq!(outcome, SettlementCommitOutcome::AlreadySettledDoNotIncrementAgain);
+    }
+
+    #[test]
+    fn test_lease_expiry_takeover_on_post_fence_attempt() {
+        // Worker 1 claimed job, initiated post-fence attempt, then crashed.
+        // Worker 2 takes over after lease expiry. Worker 2 does NOT have Worker 1's disk telemetry.
+        let job = EnhancementQueueJobRow::mock("job-lease", "acc-1", "dev-1", "RUNNING", "worker-2-takeover");
+        let mut item = EnhancementQueueItemRow::mock("it-lease", "job-lease", 1, 0, 0, 1, "RUNNING");
+        item.active_attempt_uuid = Some("att-worker-1".to_string());
+        item.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+
+        let action = evaluate_restart_recovery_step(&job, Some(&item), None);
+        // Worker 2 MUST NOT dispatch again. Must freeze in MANUAL_REVIEW_REQUIRED.
+        match action {
+            RestartRecoveryAction::TransitionToManualReviewRequired { reason } => {
+                assert!(reason.contains("unreconciled post-fence attempt"));
+            }
+            other => panic!("expected TransitionToManualReviewRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_two_worker_claim_race() {
+        let job_id = "job-race";
+        let acc_id = "acc-1";
+        let dev_id = "dev-1";
+
+        // Query path must enforce conditional atomic CAS
+        let path = build_claim_job_path(job_id, acc_id, dev_id);
+        assert!(path.contains("status=eq.QUEUED"));
+
+        // Winner gets the row with its worker id
+        let winner_row = EnhancementQueueJobRow::mock(job_id, acc_id, dev_id, "RUNNING", "worker-1");
+        assert_eq!(evaluate_claim_result(&[winner_row], "worker-1"), ClaimOutcome::Won);
+
+        // Loser gets 0 rows (CAS failure)
+        assert_eq!(evaluate_claim_result(&[], "worker-2"), ClaimOutcome::Lost);
+    }
+
+    #[test]
+    fn test_duplicate_polling_race() {
+        // Two runnable-looking items returned by poll
+        let item1 = EnhancementQueueItemRow::mock("it-1", "job-1", 1, 0, 0, 2, "PENDING");
+        let item2 = EnhancementQueueItemRow::mock("it-2", "job-1", 2, 0, 0, 2, "PENDING");
+
+        // Regardless of order returned by poll, strictly lowest queue_order is selected
+        assert_eq!(
+            select_next_executable_item(&[item2.clone(), item1.clone()]),
+            ItemSelectionOutcome::ProceedWithItem("it-1".to_string())
+        );
+        assert_eq!(
+            select_next_executable_item(&[item1, item2]),
+            ItemSelectionOutcome::ProceedWithItem("it-1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pause_immediately_after_fence() {
+        let mut job = EnhancementQueueJobRow::mock("job-p", "acc-1", "dev-1", "RUNNING", "worker-1");
+        job.pause_requested_at = Some("2026-09-26T00:05:00Z".to_string());
+
+        let action = evaluate_pause_request(&job, EnhancementAttemptPhase::ExecuteMayHaveBeenSent);
+        assert_eq!(action, PauseAction::WaitForSettlementPostFenceThenPause);
+    }
+
+    #[test]
+    fn test_cancel_immediately_after_fence() {
+        let mut job = EnhancementQueueJobRow::mock("job-c", "acc-1", "dev-1", "RUNNING", "worker-1");
+        job.cancel_requested_at = Some("2026-09-26T00:05:00Z".to_string());
+
+        let action = evaluate_cancel_request(&job, EnhancementAttemptPhase::ExecuteMayHaveBeenSent);
+        assert_eq!(action, CancelAction::WaitForSettlementPostFenceThenCancel);
+    }
+
+    #[test]
+    fn test_later_item_cannot_overtake_unresolved_earlier_item() {
+        let mut item1 = EnhancementQueueItemRow::mock("it-1", "job-1", 1, 0, 0, 2, "RUNNING");
+        let item2 = EnhancementQueueItemRow::mock("it-2", "job-1", 2, 0, 0, 2, "PENDING");
+
+        // Item 1 is RUNNING -> Item 2 cannot start
+        assert_eq!(
+            select_next_executable_item(&[item2.clone(), item1.clone()]),
+            ItemSelectionOutcome::ActiveItemRunning("it-1".to_string())
+        );
+
+        // Item 1 is FAILED -> Item 2 cannot start
+        item1.status = "FAILED".to_string();
+        assert_eq!(
+            select_next_executable_item(&[item2.clone(), item1.clone()]),
+            ItemSelectionOutcome::HaltedOnFailure("it-1".to_string())
+        );
+
+        // Item 1 is MANUAL_REVIEW_REQUIRED -> Item 2 cannot start
+        item1.status = "MANUAL_REVIEW_REQUIRED".to_string();
+        assert_eq!(
+            select_next_executable_item(&[item2, item1]),
+            ItemSelectionOutcome::HaltedOnManualReview("it-1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cross_account_claim_and_mutation_blocked() {
+        assert_eq!(
+            evaluate_claim_authorization("acc-owner", "dev-owner", "acc-intruder", "dev-owner"),
+            ClaimAuthDecision::RejectedAccountMismatch
+        );
+        assert_eq!(
+            evaluate_claim_authorization("acc-owner", "dev-owner", "acc-owner", "dev-intruder"),
+            ClaimAuthDecision::RejectedDeviceMismatch
+        );
+        assert_eq!(
+            evaluate_claim_authorization("acc-owner", "dev-owner", "acc-owner", "dev-owner"),
+            ClaimAuthDecision::Authorized
+        );
+    }
+
+    #[test]
+    fn test_stale_runtime_result_cannot_settle_new_attempt_uuid() {
+        let job = EnhancementQueueJobRow::mock("job-stale", "acc-1", "dev-1", "RUNNING", "worker-1");
+        let mut item = EnhancementQueueItemRow::mock("it-stale", "job-stale", 1, 0, 0, 1, "RUNNING");
+        item.active_attempt_uuid = Some("fresh-attempt-uuid-2".to_string());
+        item.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+
+        // Disk has telemetry from an older attempt UUID
+        let stale_telemetry = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: "stale-attempt-uuid-1".to_string(),
+            state: "SUCCESS".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm".to_string(),
+            start_level: 0,
+            current_level: 1,
+            target_level: 1,
+            configured_charm_mode: 0,
+            resolved_charm_mode: 0,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("SUCCESS".to_string()),
+            quoted_gold_cost: 5000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![],
+            actual_gold_spent: 5000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![],
+            actual_charms_spent: 0,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: Some(false),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-26T00:00:00Z".to_string(),
+        };
+
+        let action = evaluate_restart_recovery_step(&job, Some(&item), Some(&stale_telemetry));
+        // Stale result MUST NOT settle the fresh attempt!
+        match action {
+            RestartRecoveryAction::TransitionToManualReviewRequired { reason } => {
+                assert!(reason.contains("unreconciled post-fence attempt"));
+                assert!(reason.contains("fresh-attempt-uuid-2"));
+            }
+            other => panic!("expected TransitionToManualReviewRequired, got {:?}", other),
+        }
+    }
 }
+
