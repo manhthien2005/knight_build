@@ -194,6 +194,23 @@ impl AgentConfig {
 
 // ── entry point ───────────────────────────────────────────────────────────────
 
+/// Interval between enhancement queue orchestrator polling/ticks.
+#[cfg(unix)]
+pub(crate) const ENHANCEMENT_QUEUE_TICK_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Determines whether the enhancement queue tick should run on this main loop iteration.
+/// Enforces bounded cadence and prevents busy-looping.
+#[cfg(unix)]
+pub(crate) fn should_tick_enhancement_queue(now: Instant, last_tick: Instant) -> bool {
+    now.duration_since(last_tick) >= ENHANCEMENT_QUEUE_TICK_INTERVAL
+}
+
+/// Identifies whether a command is an enhancement dry-run command based on its canonical discriminator.
+#[cfg(unix)]
+pub(crate) fn is_enhancement_dry_run_command(kind: &str) -> bool {
+    kind == "enhance-item-dry-run"
+}
+
 /// Chạy vòng chính cho đến khi nhận SIGTERM (không return bình thường).
 ///
 /// Gọi từ `main()` sau khi pairing xong và `device_id` đã có.
@@ -412,23 +429,6 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
                 tick_snapshot_telemetry(acc, &rest);
             }
 
-            // Enhancement queue orchestrator periodic tick
-            for acc in accounts.values_mut() {
-                if !acc.retiring && !retired_tombstones.contains(&acc.id) {
-                    let paths = AccountPaths::for_slot(acc.slot_index);
-                    let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
-                    crate::enhancement_queue::tick_account_enhancement_queue(
-                        &paths.home,
-                        &cfg.device_id,
-                        &acc.id,
-                        is_alive,
-                        acc.pending_enhancement.is_some(),
-                        &mut acc.queue_tracker,
-                        &rest,
-                    );
-                }
-            }
-
             // Kiểm tra Xvnc socket còn sống — Issue #27
             let display_num = cfg.display_num;
             let x_socket = format!("/tmp/.X11-unix/X{display_num}");
@@ -453,6 +453,26 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
                     eprintln!("[reconcile] account={} crash detected, restarting", acc.id);
                     acc.restarts += 1;
                     reconcile_desired_state(acc, &rest, &identity);
+                }
+            }
+        }
+
+        // ── tick 2 s: enhancement queue orchestrator ─────────────────────
+        if should_tick_enhancement_queue(now, last_queue_tick) {
+            last_queue_tick = now;
+            for acc in accounts.values_mut() {
+                if !acc.retiring && !retired_tombstones.contains(&acc.id) {
+                    let paths = AccountPaths::for_slot(acc.slot_index);
+                    let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
+                    crate::enhancement_queue::tick_account_enhancement_queue(
+                        &paths.home,
+                        &cfg.device_id,
+                        &acc.id,
+                        is_alive,
+                        acc.pending_enhancement.is_some(),
+                        &mut acc.queue_tracker,
+                        &rest,
+                    );
                 }
             }
         }
@@ -1250,7 +1270,7 @@ fn dispatch_command(
             push_account_runtime_telemetry(acc, rest);
         }
         "enhance-item" | "enhance-single-item" | "enhance-item-dry-run" => {
-            let is_dry_run_cmd = cmd.command_type == "enhance-item-dry-run";
+            let is_dry_run_cmd = is_enhancement_dry_run_command(&cmd.kind);
             // 1. JVM/process phải đang chạy
             let is_alive = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
             if !is_alive {
@@ -2520,5 +2540,113 @@ mod tests {
         assert_eq!(settings.effects, 1);
         assert_eq!(settings.hide_players, 0);
         assert_eq!(settings.to_wire().lines().count(), 37);
+    }
+
+    #[test]
+    fn test_enhancement_command_kind_classification() {
+        use crate::supabase_rest::CommandRow;
+
+        assert!(is_enhancement_dry_run_command("enhance-item-dry-run"));
+        assert!(!is_enhancement_dry_run_command("enhance-item"));
+        assert!(!is_enhancement_dry_run_command("enhance-single-item"));
+        assert!(!is_enhancement_dry_run_command("start"));
+        assert!(!is_enhancement_dry_run_command("spot-scan"));
+
+        let dry_run_cmd = CommandRow {
+            id: "cmd-dry-1".to_string(),
+            account_id: Some("acc-1".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "enhance-item-dry-run".to_string(),
+            payload: None,
+            expires_at: "2026-09-26T00:00:00Z".to_string(),
+        };
+        assert!(is_enhancement_dry_run_command(&dry_run_cmd.kind));
+        assert_eq!(dry_run_cmd.kind, "enhance-item-dry-run");
+
+        let normal_cmd = CommandRow {
+            id: "cmd-norm-1".to_string(),
+            account_id: Some("acc-1".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "enhance-item".to_string(),
+            payload: None,
+            expires_at: "2026-09-26T00:00:00Z".to_string(),
+        };
+        assert!(!is_enhancement_dry_run_command(&normal_cmd.kind));
+        assert_eq!(normal_cmd.kind, "enhance-item");
+
+        let single_cmd = CommandRow {
+            id: "cmd-single-1".to_string(),
+            account_id: Some("acc-1".to_string()),
+            device_id: Some("dev-1".to_string()),
+            kind: "enhance-single-item".to_string(),
+            payload: None,
+            expires_at: "2026-09-26T00:00:00Z".to_string(),
+        };
+        assert!(!is_enhancement_dry_run_command(&single_cmd.kind));
+        assert_eq!(single_cmd.kind, "enhance-single-item");
+    }
+
+    #[test]
+    fn test_enhancement_queue_tick_scheduling_cadence() {
+        let base = Instant::now();
+
+        // 1. Elapsed below 2 seconds must NOT tick (bounds cadence, prevents busy-loop)
+        assert!(!should_tick_enhancement_queue(base, base));
+        assert!(!should_tick_enhancement_queue(base + Duration::from_millis(500), base));
+        assert!(!should_tick_enhancement_queue(base + Duration::from_millis(1000), base));
+        assert!(!should_tick_enhancement_queue(base + Duration::from_millis(1999), base));
+
+        // 2. Elapsed at or above 2 seconds MUST tick (reachability guaranteed)
+        assert!(should_tick_enhancement_queue(base + Duration::from_secs(2), base));
+        assert!(should_tick_enhancement_queue(base + Duration::from_secs(3), base));
+        assert!(should_tick_enhancement_queue(base + Duration::from_secs(60), base));
+    }
+
+    #[test]
+    fn test_queue_tick_polling_failure_is_nonfatal_for_main_loop() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let mut tracker = crate::enhancement_queue::AccountQueueTracker::default();
+        // Point to an unreachable port to guarantee connection/REST failure
+        let rest = crate::supabase_rest::SupabaseRest::new("http://127.0.0.1:9".to_string(), "test-key".to_string());
+
+        // Must execute cleanly without panic
+        crate::enhancement_queue::tick_account_enhancement_queue(
+            home,
+            "dev-test",
+            "acc-test",
+            true,
+            false,
+            &mut tracker,
+            &rest,
+        );
+
+        // State remains uncorrupted
+        assert!(tracker.active_job_id.is_none());
+        assert!(tracker.in_flight_attempt.is_none());
+        assert!(!home.join("enhancement_request.json").exists());
+    }
+
+    #[test]
+    fn test_no_queue_mutation_when_no_queue_rows_exist() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let mut tracker = crate::enhancement_queue::AccountQueueTracker::default();
+        let rest = crate::supabase_rest::SupabaseRest::new("http://127.0.0.1:54321".to_string(), "test-key".to_string());
+
+        crate::enhancement_queue::tick_account_enhancement_queue(
+            home,
+            "dev-test",
+            "acc-empty",
+            true,
+            false,
+            &mut tracker,
+            &rest,
+        );
+
+        assert!(tracker.active_job_id.is_none());
+        assert!(tracker.in_flight_attempt.is_none());
+        assert!(!home.join("enhancement_request.json").exists());
+        assert!(!home.join("zeus-enhance.req").exists());
     }
 }
