@@ -946,6 +946,8 @@ pub struct InFlightQueueAttempt {
     pub expected_level: i32,
     pub target_level: i32,
     pub started_at: std::time::Instant,
+    pub last_progress_at: std::time::Instant,
+    pub last_progress_signature: Option<crate::enhancement::EnhancementProgressSignature>,
 }
 
 /// Tracks enhancement queue orchestrator state for a single account.
@@ -1108,7 +1110,7 @@ pub fn tick_account_enhancement_queue(
     }
 
     // 2. Poll/reconcile in-flight attempt if active
-    if let Some(attempt) = tracker.in_flight_attempt.take() {
+    if let Some(mut attempt) = tracker.in_flight_attempt.take() {
         if !process_alive {
             eprintln!(
                 "[enhancement_queue] account {} process died while attempt {} in flight",
@@ -1147,40 +1149,134 @@ pub fn tick_account_enhancement_queue(
                     }),
                 );
             }
-            crate::enhancement::clean_enhancement_files(home_dir);
+            // Retain status evidence for forensic reconciliation! Only clean request file
+            crate::enhancement::clean_enhancement_request_file(home_dir);
             tracker.active_job_id = None;
             return;
         }
 
-        if attempt.started_at.elapsed().as_secs() >= crate::enhancement::ENHANCEMENT_TIMEOUT_SECS {
-            eprintln!(
-                "[enhancement_queue] account {} attempt {} timed out waiting for JVM",
-                account_id, attempt.attempt_uuid
-            );
-            let _ = rest.update_queue_item(
-                &attempt.item_id,
-                account_id,
-                &serde_json::json!({
-                    "status": "MANUAL_REVIEW_REQUIRED",
-                    "error_message": "enhancement attempt timed out waiting for JVM",
-                }),
-            );
-            let _ = rest.update_queue_job(
-                &attempt.job_id,
-                account_id,
-                &serde_json::json!({
-                    "status": "MANUAL_REVIEW_REQUIRED",
-                    "error_message": "enhancement attempt timed out waiting for JVM",
-                }),
-            );
-            crate::enhancement::clean_enhancement_files(home_dir);
-            tracker.active_job_id = None;
-            return;
-        }
+        let poll_outcome = crate::enhancement::poll_enhancement_status(
+            home_dir,
+            &attempt.attempt_uuid,
+            attempt.last_progress_signature.as_ref(),
+        );
 
-        match crate::enhancement::poll_enhancement_status(home_dir, &attempt.attempt_uuid) {
-            crate::enhancement::EnhancementPollOutcome::NoStatusYet => {
-                // Keep waiting
+        match poll_outcome {
+            crate::enhancement::EnhancementPollOutcome::NonTerminalProgress { signature, .. } => {
+                // Meaningful progress observed! Refresh inactivity timer and record signature
+                attempt.last_progress_at = std::time::Instant::now();
+                attempt.last_progress_signature = Some(signature);
+
+                // Check hard safety bound watchdog
+                if attempt.started_at.elapsed().as_secs() >= crate::enhancement::ENHANCEMENT_HARD_SAFETY_BOUND_SECS {
+                    eprintln!(
+                        "[enhancement_queue] account {} attempt {} exceeded hard safety bound ({}s)",
+                        account_id, attempt.attempt_uuid, crate::enhancement::ENHANCEMENT_HARD_SAFETY_BOUND_SECS
+                    );
+                    let _ = rest.update_queue_item(
+                        &attempt.item_id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "MANUAL_REVIEW_REQUIRED",
+                            "error_message": "enhancement attempt exceeded hard safety bound timeout",
+                        }),
+                    );
+                    let _ = rest.update_queue_job(
+                        &attempt.job_id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "MANUAL_REVIEW_REQUIRED",
+                            "error_message": "enhancement attempt exceeded hard safety bound timeout",
+                        }),
+                    );
+                    crate::enhancement::clean_enhancement_request_file(home_dir);
+                    tracker.active_job_id = None;
+                    return;
+                }
+
+                // Keep waiting while active progress continues
+                tracker.in_flight_attempt = Some(attempt);
+                return;
+            }
+            crate::enhancement::EnhancementPollOutcome::NonTerminalUnchanged { signature, .. } => {
+                // In-flight without progress: do NOT refresh last_progress_at
+                attempt.last_progress_signature = Some(signature);
+
+                let is_inactivity = attempt.last_progress_at.elapsed().as_secs() >= crate::enhancement::ENHANCEMENT_INACTIVITY_TIMEOUT_SECS;
+                let is_hard_bound = attempt.started_at.elapsed().as_secs() >= crate::enhancement::ENHANCEMENT_HARD_SAFETY_BOUND_SECS;
+
+                if is_inactivity || is_hard_bound {
+                    let err_msg = if is_inactivity {
+                        "enhancement attempt timed out due to inactivity waiting for JVM progress"
+                    } else {
+                        "enhancement attempt exceeded hard safety bound timeout"
+                    };
+                    eprintln!(
+                        "[enhancement_queue] account {} attempt {} timed out: {}",
+                        account_id, attempt.attempt_uuid, err_msg
+                    );
+                    let _ = rest.update_queue_item(
+                        &attempt.item_id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "MANUAL_REVIEW_REQUIRED",
+                            "error_message": err_msg,
+                        }),
+                    );
+                    let _ = rest.update_queue_job(
+                        &attempt.job_id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "MANUAL_REVIEW_REQUIRED",
+                            "error_message": err_msg,
+                        }),
+                    );
+                    // Retain status evidence for manual review/forensics! Only clean request file
+                    crate::enhancement::clean_enhancement_request_file(home_dir);
+                    tracker.active_job_id = None;
+                    return;
+                }
+
+                tracker.in_flight_attempt = Some(attempt);
+                return;
+            }
+            crate::enhancement::EnhancementPollOutcome::NoStatusYet
+            | crate::enhancement::EnhancementPollOutcome::StaleOrWrongRequest { .. } => {
+                // Missing status file or status belonging to other/stale request: do NOT refresh last_progress_at
+                let is_inactivity = attempt.last_progress_at.elapsed().as_secs() >= crate::enhancement::ENHANCEMENT_INACTIVITY_TIMEOUT_SECS;
+                let is_hard_bound = attempt.started_at.elapsed().as_secs() >= crate::enhancement::ENHANCEMENT_HARD_SAFETY_BOUND_SECS;
+
+                if is_inactivity || is_hard_bound {
+                    let err_msg = if is_inactivity {
+                        "enhancement attempt timed out waiting for JVM progress"
+                    } else {
+                        "enhancement attempt exceeded hard safety bound timeout"
+                    };
+                    eprintln!(
+                        "[enhancement_queue] account {} attempt {} timed out waiting for JVM: {}",
+                        account_id, attempt.attempt_uuid, err_msg
+                    );
+                    let _ = rest.update_queue_item(
+                        &attempt.item_id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "MANUAL_REVIEW_REQUIRED",
+                            "error_message": err_msg,
+                        }),
+                    );
+                    let _ = rest.update_queue_job(
+                        &attempt.job_id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "MANUAL_REVIEW_REQUIRED",
+                            "error_message": err_msg,
+                        }),
+                    );
+                    crate::enhancement::clean_enhancement_request_file(home_dir);
+                    tracker.active_job_id = None;
+                    return;
+                }
+
                 tracker.in_flight_attempt = Some(attempt);
                 return;
             }
@@ -1207,7 +1303,8 @@ pub fn tick_account_enhancement_queue(
                             "error_message": "level discrepancy observed from runtime result",
                         }),
                     );
-                    crate::enhancement::clean_enhancement_files(home_dir);
+                    // Retain status evidence for forensic investigation
+                    crate::enhancement::clean_enhancement_request_file(home_dir);
                     tracker.active_job_id = None;
                     return;
                 }
@@ -1277,7 +1374,7 @@ pub fn tick_account_enhancement_queue(
                 crate::enhancement::clean_enhancement_files(home_dir);
                 return;
             }
-            crate::enhancement::EnhancementPollOutcome::TerminalFailure { state, error_message } => {
+            crate::enhancement::EnhancementPollOutcome::TerminalFailure { state, error_message, .. } => {
                 let outcome = map_runtime_failure_to_queue_outcome(&state, None, error_message.as_deref());
                 match outcome {
                     QueueFailureOutcome::ItemFailedAndStopQueue { error_code, error_message } => {
@@ -1323,6 +1420,10 @@ pub fn tick_account_enhancement_queue(
                                 "error_message": error_message,
                             }),
                         );
+                        // Retain status evidence for manual review/forensics! Only clean request file
+                        crate::enhancement::clean_enhancement_request_file(home_dir);
+                        tracker.active_job_id = None;
+                        return;
                     }
                 }
                 crate::enhancement::clean_enhancement_files(home_dir);
@@ -1346,7 +1447,8 @@ pub fn tick_account_enhancement_queue(
                         "error_message": "invalid status payload from JVM",
                     }),
                 );
-                crate::enhancement::clean_enhancement_files(home_dir);
+                // Retain invalid payload file for investigation; only remove request file
+                crate::enhancement::clean_enhancement_request_file(home_dir);
                 tracker.active_job_id = None;
                 return;
             }
@@ -1478,13 +1580,16 @@ pub fn tick_account_enhancement_queue(
                     if let Err(e) = crate::enhancement::write_enhancement_request_file(home_dir, &req_payload) {
                         eprintln!("[enhancement_queue] write_enhancement_request_file failed: {e}");
                     }
+                    let now = std::time::Instant::now();
                     tracker.in_flight_attempt = Some(InFlightQueueAttempt {
                         job_id: job.id,
                         item_id: item.id,
                         attempt_uuid: spec.attempt_uuid,
                         expected_level: spec.expected_level,
                         target_level: spec.target_level,
-                        started_at: std::time::Instant::now(),
+                        started_at: now,
+                        last_progress_at: now,
+                        last_progress_signature: None,
                     });
                 }
                 Ok(false) => {
@@ -2142,13 +2247,16 @@ mod tests {
         assert!(tracker.in_flight_attempt.is_none());
 
         tracker.active_job_id = Some("job-1".to_string());
+        let now = std::time::Instant::now();
         tracker.in_flight_attempt = Some(InFlightQueueAttempt {
             job_id: "job-1".to_string(),
             item_id: "it-1".to_string(),
             attempt_uuid: "att-1".to_string(),
             expected_level: 0,
             target_level: 1,
-            started_at: std::time::Instant::now(),
+            started_at: now,
+            last_progress_at: now,
+            last_progress_signature: None,
         });
 
         assert_eq!(tracker.active_job_id.as_deref(), Some("job-1"));
@@ -2553,13 +2661,16 @@ mod tests {
         assert!(!home.join("enhancement_request.json").exists());
 
         // 2. When queue has an in_flight_attempt, tracker reflects it
+        let now = std::time::Instant::now();
         tracker.in_flight_attempt = Some(InFlightQueueAttempt {
             job_id: "job-1".to_string(),
             item_id: "item-1".to_string(),
             attempt_uuid: "attempt-1".to_string(),
             expected_level: 0,
             target_level: 1,
-            started_at: std::time::Instant::now(),
+            started_at: now,
+            last_progress_at: now,
+            last_progress_signature: None,
         });
         assert!(tracker.in_flight_attempt.is_some());
     }
@@ -2585,6 +2696,328 @@ mod tests {
         assert!(tracker.active_job_id.is_none());
         assert!(tracker.in_flight_attempt.is_none());
         assert!(!home.join("enhancement_request.json").exists());
+    }
+
+    fn write_mock_snapshot(home: &std::path::Path, map_id: u16, px: i32, py: i32) {
+        let content = format!(
+            "v=6\nt=1788240611417\nname=TestChar\nlv=80\nxp=105\n\
+            hp=45991\nhpmax=45991\nmp=9406\nmpmax=9406\n\
+            wallet=1\ngold=44916\ngem=0\nmap={map_id}\nzone=13\npx={px}\npy={py}\n\
+            quota=30000\nbag=37\nbagmax=42\nstate=0\nmount=-1\nmounts=\nguild=\n\
+            xprate=0\nstale=0\n\
+            atkphase=1\nctl=1\natkstate=0\ntarget=1\nstuck=0\npotions=3\nrevives=1\n\
+            pkrank=1\npkmphp=0\npkgold=0\nbuffs=101\ndrops=1-0110\n\
+            travel=3\ntravelwhy=0\ntravelgoal=1\ntravelhops=2\n\
+            enhancephase=0\nenhancewhy=0\nenhancedone=0\n\
+            dungeonstate=0\ndungeonwhy=0\ndungeonruns=0\ndungeongoal=-1\n"
+        );
+        std::fs::write(home.join(zeus_core::wire::SNAPSHOT_FILE_NAME), content).unwrap();
+    }
+
+    #[test]
+    fn test_long_route_progress_does_not_timeout() {
+        use std::time::{Duration, Instant};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let mut tracker = AccountQueueTracker::default();
+        let rest = crate::supabase_rest::SupabaseRest::new("http://127.0.0.1:54321".to_string(), "test-key".to_string());
+
+        let attempt_uuid = "att-long-route-1";
+        // Started 150 seconds ago (> 120s old fixed timeout)
+        let started_at = Instant::now() - Duration::from_secs(150);
+        let last_progress_at = Instant::now() - Duration::from_secs(10);
+
+        tracker.active_job_id = Some("job-long".to_string());
+        tracker.in_flight_attempt = Some(InFlightQueueAttempt {
+            job_id: "job-long".to_string(),
+            item_id: "item-long".to_string(),
+            attempt_uuid: attempt_uuid.to_string(),
+            expected_level: 0,
+            target_level: 1,
+            started_at,
+            last_progress_at,
+            last_progress_signature: None,
+        });
+
+        // Write initial request file
+        let req = crate::enhancement::EnhancementRequestPayload {
+            request_id: attempt_uuid.to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm ngắn".to_string(),
+            tier: 2,
+            expected_level: 0,
+            target_level: 1,
+            charm_mode: 0,
+            payment_type: 0,
+            max_attempts: 1,
+            validation_only: false,
+            requested_at: Some("2026-09-26T00:00:00Z".to_string()),
+        };
+        crate::enhancement::write_enhancement_request_file(home, &req).unwrap();
+
+        // 12-hop simulated route: 44 -> 43 -> 42 -> 22 -> 24 -> 23 -> 20 -> 34 -> 33 -> 25 -> 18 -> 7 -> 1
+        let maps: [u16; 13] = [44, 43, 42, 22, 24, 23, 20, 34, 33, 25, 18, 7, 1];
+        for map_id in maps {
+            write_mock_snapshot(home, map_id, 100, 200);
+
+            let status = crate::enhancement::EnhancementStatusTelemetry {
+                version: 1,
+                request_id: attempt_uuid.to_string(),
+                state: "LOCATING_BLACKSMITH".to_string(),
+                captured_slot: 0,
+                template_id: 101,
+                category: 3,
+                base_name: "Kiếm ngắn".to_string(),
+                start_level: 0,
+                current_level: 0,
+                target_level: 1,
+                configured_charm_mode: 0,
+                resolved_charm_mode: 0,
+                payment_type: 0,
+                attempt_count: 0,
+                max_attempts: 1,
+                last_result: None,
+                quoted_gold_cost: 0,
+                quoted_gem_cost: 0,
+                quoted_material_requirements: vec![],
+                actual_gold_spent: 0,
+                actual_gem_spent: 0,
+                actual_materials_spent: vec![],
+                actual_charms_spent: 0,
+                accounting_status: "IN_PROGRESS".to_string(),
+                validation_only: Some(false),
+                error_code: None,
+                error_message: None,
+                updated_at: "2026-09-26T00:01:00Z".to_string(),
+            };
+            std::fs::write(home.join(crate::enhancement::ENHANCE_STATUS_FILE_NAME), serde_json::to_string(&status).unwrap()).unwrap();
+
+            tick_account_enhancement_queue(
+                home,
+                "dev-1",
+                "acc-1",
+                true,
+                false,
+                &mut tracker,
+                &rest,
+            );
+
+            // Attempt MUST NOT time out! Active progress observed on every map transition
+            assert!(
+                tracker.in_flight_attempt.is_some(),
+                "attempt must remain in flight during active routing on map {}",
+                map_id
+            );
+            assert_eq!(tracker.active_job_id.as_deref(), Some("job-long"));
+        }
+
+        // Prove exactly one sidecar dispatch remains and no retry
+        assert!(home.join(crate::enhancement::ENHANCE_REQUEST_FILE_NAME).exists());
+        let current_req: crate::enhancement::EnhancementRequestPayload =
+            serde_json::from_str(&std::fs::read_to_string(home.join(crate::enhancement::ENHANCE_REQUEST_FILE_NAME)).unwrap()).unwrap();
+        assert_eq!(current_req.request_id, attempt_uuid);
+        assert_eq!(tracker.in_flight_attempt.as_ref().unwrap().attempt_uuid, attempt_uuid);
+    }
+
+    #[test]
+    fn test_stalled_route_inactivity_timeout() {
+        use std::time::{Duration, Instant};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let mut tracker = AccountQueueTracker::default();
+        let rest = crate::supabase_rest::SupabaseRest::new("http://127.0.0.1:54321".to_string(), "test-key".to_string());
+
+        let attempt_uuid = "att-stalled-1";
+        // Started 130s ago, last progress was 125s ago (> 120s inactivity limit)
+        let started_at = Instant::now() - Duration::from_secs(130);
+        let last_progress_at = Instant::now() - Duration::from_secs(125);
+
+        write_mock_snapshot(home, 44, 100, 200);
+
+        // Status is stationary at Map 44
+        let status = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: attempt_uuid.to_string(),
+            state: "LOCATING_BLACKSMITH".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm ngắn".to_string(),
+            start_level: 0,
+            current_level: 0,
+            target_level: 1,
+            configured_charm_mode: 0,
+            resolved_charm_mode: 0,
+            payment_type: 0,
+            attempt_count: 0,
+            max_attempts: 1,
+            last_result: None,
+            quoted_gold_cost: 0,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![],
+            actual_gold_spent: 0,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![],
+            actual_charms_spent: 0,
+            accounting_status: "IN_PROGRESS".to_string(),
+            validation_only: Some(false),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-26T00:01:00Z".to_string(),
+        };
+        std::fs::write(home.join(crate::enhancement::ENHANCE_STATUS_FILE_NAME), serde_json::to_string(&status).unwrap()).unwrap();
+
+        let sig = crate::enhancement::EnhancementProgressSignature {
+            request_id: attempt_uuid.to_string(),
+            state: "LOCATING_BLACKSMITH".to_string(),
+            attempt_count: 0,
+            quoted_gold_cost: 0,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![],
+            map_id: Some(44),
+            position: Some((100, 200)),
+        };
+
+        tracker.active_job_id = Some("job-stalled".to_string());
+        tracker.in_flight_attempt = Some(InFlightQueueAttempt {
+            job_id: "job-stalled".to_string(),
+            item_id: "item-stalled".to_string(),
+            attempt_uuid: attempt_uuid.to_string(),
+            expected_level: 0,
+            target_level: 1,
+            started_at,
+            last_progress_at,
+            last_progress_signature: Some(sig),
+        });
+
+        // Write request file
+        let req = crate::enhancement::EnhancementRequestPayload {
+            request_id: attempt_uuid.to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm ngắn".to_string(),
+            tier: 2,
+            expected_level: 0,
+            target_level: 1,
+            charm_mode: 0,
+            payment_type: 0,
+            max_attempts: 1,
+            validation_only: false,
+            requested_at: Some("2026-09-26T00:00:00Z".to_string()),
+        };
+        crate::enhancement::write_enhancement_request_file(home, &req).unwrap();
+
+        // Tick orchestrator with stationary status
+        tick_account_enhancement_queue(
+            home,
+            "dev-1",
+            "acc-1",
+            true,
+            false,
+            &mut tracker,
+            &rest,
+        );
+
+        // 1. Inactivity timeout triggers fail-closed MANUAL_REVIEW_REQUIRED
+        assert!(tracker.in_flight_attempt.is_none());
+        assert!(tracker.active_job_id.is_none());
+
+        // 2. Request file cleaned, preventing blind retry
+        assert!(!home.join(crate::enhancement::ENHANCE_REQUEST_FILE_NAME).exists());
+
+        // 3. Status file MUST be preserved for forensic analysis / reconciliation!
+        assert!(home.join(crate::enhancement::ENHANCE_STATUS_FILE_NAME).exists());
+        let disk_telemetry = crate::enhancement::read_enhancement_status(home).expect("status file must be retained");
+        assert_eq!(disk_telemetry.request_id, attempt_uuid);
+    }
+
+    #[test]
+    fn test_result_wait_not_timed_out_by_agent() {
+        use std::time::{Duration, Instant};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path();
+        let mut tracker = AccountQueueTracker::default();
+        let rest = crate::supabase_rest::SupabaseRest::new("http://127.0.0.1:54321".to_string(), "test-key".to_string());
+
+        let attempt_uuid = "att-wait-result-1";
+        // Routing took 130s (> 120s total elapsed), forge reached 10s ago, WAITING_RESULT reached 5s ago
+        let started_at = Instant::now() - Duration::from_secs(140);
+        let last_progress_at = Instant::now() - Duration::from_secs(5);
+
+        write_mock_snapshot(home, 1, 324, 624);
+
+        let status = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: attempt_uuid.to_string(),
+            state: "WAITING_RESULT".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm ngắn".to_string(),
+            start_level: 0,
+            current_level: 0,
+            target_level: 1,
+            configured_charm_mode: 0,
+            resolved_charm_mode: 0,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: None,
+            quoted_gold_cost: 3000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![1, 0, 0, 0],
+            actual_gold_spent: 0,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![],
+            actual_charms_spent: 0,
+            accounting_status: "IN_PROGRESS".to_string(),
+            validation_only: Some(false),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-26T00:02:20Z".to_string(),
+        };
+        std::fs::write(home.join(crate::enhancement::ENHANCE_STATUS_FILE_NAME), serde_json::to_string(&status).unwrap()).unwrap();
+
+        tracker.active_job_id = Some("job-wait".to_string());
+        tracker.in_flight_attempt = Some(InFlightQueueAttempt {
+            job_id: "job-wait".to_string(),
+            item_id: "item-wait".to_string(),
+            attempt_uuid: attempt_uuid.to_string(),
+            expected_level: 0,
+            target_level: 1,
+            started_at,
+            last_progress_at,
+            last_progress_signature: None,
+        });
+
+        // Tick: Agent must NOT timeout solely because total elapsed is 140s > 120s
+        tick_account_enhancement_queue(
+            home,
+            "dev-1",
+            "acc-1",
+            true,
+            false,
+            &mut tracker,
+            &rest,
+        );
+
+        assert!(tracker.in_flight_attempt.is_some());
+        assert_eq!(tracker.active_job_id.as_deref(), Some("job-wait"));
+
+        // Now test fail-closed mapping for RESULT_AMBIGUOUS
+        let failure_outcome = map_runtime_failure_to_queue_outcome("RESULT_AMBIGUOUS", None, Some("authoritative outcome unknown"));
+        match failure_outcome {
+            QueueFailureOutcome::ManualReviewRequiredAndFreezeQueue { error_code, .. } => {
+                assert_eq!(error_code, "RESULT_AMBIGUOUS");
+            }
+            other => panic!("expected ManualReviewRequiredAndFreezeQueue, got {:?}", other),
+        }
     }
 }
 

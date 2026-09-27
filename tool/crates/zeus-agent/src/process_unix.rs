@@ -640,19 +640,26 @@ mod tests {
 
         // Case C — escalation (SIGTERM-resistant child)
         // Spawn a child that traps and ignores SIGTERM.
-        let mut resistant = Command::new("sh");
-        resistant.args(["-c", "trap '' TERM; sleep 30"]);
+        let mut resistant = Command::new("sleep");
+        resistant.args(["30"]);
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            resistant.pre_exec(|| {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                Ok(())
+            });
+        }
         let child_c = spawn(resistant).expect("spawn resistant child");
         assert!(child_c.alive(), "resistant child must be alive initially");
 
         // With 200ms grace, SIGTERM is ignored and stop must escalate to SIGKILL and verify death
         let outcome_c = stop(&child_c, Duration::from_millis(200));
+        let reaped_c = reap();
         assert_eq!(
             outcome_c,
             StopOutcome::Killed,
             "SIGKILL escalation must succeed and confirm death: {outcome_c:?}"
         );
-        let reaped_c = reap();
         assert!(
             reaped_c.iter().any(|(pid, _)| *pid == child_c.pid),
             "waitpid must report resistant child was killed"
@@ -663,10 +670,11 @@ mod tests {
         // Proves that leader death alone is NOT sufficient for Stop success.
         let mut leader_with_descendant = Command::new("sh");
         // Non-interactive shell keeps background job in same PGID. Background job traps TERM, leader waits.
-        leader_with_descendant.args(["-c", "(trap '' TERM; sleep 30) & wait $!"]);
+        leader_with_descendant.args(["-c", "(trap '' TERM; exec sleep 30) & wait $!"]);
         let child_d = spawn(leader_with_descendant).expect("spawn leader with descendant");
         assert!(child_d.alive(), "leader must be alive initially");
         assert!(child_d.pgid_alive(), "group must be alive initially");
+        std::thread::sleep(Duration::from_millis(100));
 
         // Stop with 200ms grace: leader terminates on SIGTERM, but descendant ignores SIGTERM.
         // stop() must NOT return Terminated based on leader death; it must escalate to SIGKILL

@@ -303,6 +303,7 @@ pub fn prepare_directories(paths: &AccountPaths) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeus_core::wire::suite_directory;
 
     fn spec() -> LaunchSpec {
         LaunchSpec {

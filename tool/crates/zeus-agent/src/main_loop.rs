@@ -1368,6 +1368,8 @@ fn dispatch_command(
                 command_id: cmd.id.clone(),
                 request_id: cmd.id.clone(),
                 started_at: Instant::now(),
+                last_progress_at: Instant::now(),
+                last_progress_signature: None,
                 template_id: payload.template_id,
                 category: payload.category,
                 target_level: payload.target_level,
@@ -1554,7 +1556,7 @@ fn poll_pending_enhancements(
 ) {
     let now = Instant::now();
     for acc in accounts.values_mut() {
-        let pending = match acc.pending_enhancement.take() {
+        let mut pending = match acc.pending_enhancement.take() {
             Some(p) => p,
             None => continue,
         };
@@ -1579,25 +1581,72 @@ fn poll_pending_enhancements(
             continue;
         }
 
-        if crate::enhancement::is_pending_enhancement_timed_out(&pending, now) {
-            eprintln!(
-                "[enhancement] account {} command {} timed out after {}s",
-                acc.id, pending.command_id, crate::enhancement::ENHANCEMENT_TIMEOUT_SECS
-            );
-            crate::enhancement::clean_enhancement_files(&paths.home);
-            if let Err(e) = rest.finish_command(
-                &pending.command_id,
-                CommandStatus::Failed,
-                Some("enhancement attempt timed out waiting for JVM completion"),
-            ) {
-                eprintln!("[enhancement] finish_command (timeout) failed: {e}");
-            }
-            push_account_runtime_telemetry(acc, rest);
-            continue;
-        }
+        let poll_outcome = crate::enhancement::poll_enhancement_status(
+            &paths.home,
+            &pending.request_id,
+            pending.last_progress_signature.as_ref(),
+        );
 
-        match crate::enhancement::poll_enhancement_status(&paths.home, &pending.request_id) {
-            crate::enhancement::EnhancementPollOutcome::NoStatusYet => {
+        match poll_outcome {
+            crate::enhancement::EnhancementPollOutcome::NoStatusYet
+            | crate::enhancement::EnhancementPollOutcome::StaleOrWrongRequest { .. } => {
+                if crate::enhancement::is_pending_enhancement_timed_out(&pending, now) {
+                    eprintln!(
+                        "[enhancement] account {} command {} timed out waiting for JVM",
+                        acc.id, pending.command_id
+                    );
+                    crate::enhancement::clean_enhancement_request_file(&paths.home);
+                    if let Err(e) = rest.finish_command(
+                        &pending.command_id,
+                        CommandStatus::Failed,
+                        Some("enhancement attempt timed out waiting for JVM completion"),
+                    ) {
+                        eprintln!("[enhancement] finish_command (timeout) failed: {e}");
+                    }
+                    push_account_runtime_telemetry(acc, rest);
+                    continue;
+                }
+                acc.pending_enhancement = Some(pending);
+            }
+            crate::enhancement::EnhancementPollOutcome::NonTerminalProgress { signature, .. } => {
+                pending.last_progress_at = now;
+                pending.last_progress_signature = Some(signature);
+                if crate::enhancement::is_pending_enhancement_timed_out(&pending, now) {
+                    eprintln!(
+                        "[enhancement] account {} command {} timed out (hard safety bound)",
+                        acc.id, pending.command_id
+                    );
+                    crate::enhancement::clean_enhancement_request_file(&paths.home);
+                    if let Err(e) = rest.finish_command(
+                        &pending.command_id,
+                        CommandStatus::Failed,
+                        Some("enhancement attempt exceeded hard safety bound timeout"),
+                    ) {
+                        eprintln!("[enhancement] finish_command (timeout) failed: {e}");
+                    }
+                    push_account_runtime_telemetry(acc, rest);
+                    continue;
+                }
+                acc.pending_enhancement = Some(pending);
+            }
+            crate::enhancement::EnhancementPollOutcome::NonTerminalUnchanged { signature, .. } => {
+                pending.last_progress_signature = Some(signature);
+                if crate::enhancement::is_pending_enhancement_timed_out(&pending, now) {
+                    eprintln!(
+                        "[enhancement] account {} command {} timed out due to inactivity",
+                        acc.id, pending.command_id
+                    );
+                    crate::enhancement::clean_enhancement_request_file(&paths.home);
+                    if let Err(e) = rest.finish_command(
+                        &pending.command_id,
+                        CommandStatus::Failed,
+                        Some("enhancement attempt timed out waiting for JVM progress"),
+                    ) {
+                        eprintln!("[enhancement] finish_command (timeout) failed: {e}");
+                    }
+                    push_account_runtime_telemetry(acc, rest);
+                    continue;
+                }
                 acc.pending_enhancement = Some(pending);
             }
             crate::enhancement::EnhancementPollOutcome::TerminalSuccess(status) => {
@@ -1615,7 +1664,7 @@ fn poll_pending_enhancements(
                 }
                 push_account_runtime_telemetry(acc, rest);
             }
-            crate::enhancement::EnhancementPollOutcome::TerminalFailure { state, error_message } => {
+            crate::enhancement::EnhancementPollOutcome::TerminalFailure { state, error_message, .. } => {
                 eprintln!(
                     "[enhancement] account {} command {} failed: state={} err={:?}",
                     acc.id, pending.command_id, state, error_message
@@ -1637,7 +1686,7 @@ fn poll_pending_enhancements(
                     "[enhancement] account {} command {} invalid payload: {err_msg}",
                     acc.id, pending.command_id
                 );
-                crate::enhancement::clean_enhancement_files(&paths.home);
+                crate::enhancement::clean_enhancement_request_file(&paths.home);
                 if let Err(e) = rest.finish_command(
                     &pending.command_id,
                     CommandStatus::Failed,

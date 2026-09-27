@@ -187,6 +187,8 @@ pub struct PendingEnhancement {
     pub command_id: String,
     pub request_id: String,
     pub started_at: Instant,
+    pub last_progress_at: Instant,
+    pub last_progress_signature: Option<EnhancementProgressSignature>,
     pub template_id: i32,
     pub category: i32,
     pub target_level: i32,
@@ -287,12 +289,24 @@ pub fn clean_enhancement_files(home: &Path) {
     let _ = fs::remove_file(home.join(ENHANCE_CANCEL_FILE_NAME));
 }
 
-/// Timeout for pending enhancement before failing command (seconds).
+/// Legacy timeout constant retained for backwards-compatibility checks (seconds).
 pub const ENHANCEMENT_TIMEOUT_SECS: u64 = 120;
 
-/// Checks if a pending enhancement has exceeded its timeout threshold.
+/// Inactivity timeout waiting for any meaningful JVM progress (seconds).
+/// 120 seconds allows abundant headroom for multi-map routing hops (typically 15-30s each)
+/// while guaranteeing fail-closed termination if the JVM completely stalls.
+pub const ENHANCEMENT_INACTIVITY_TIMEOUT_SECS: u64 = 120;
+
+/// Hard safety bound watchdog for the entire enhancement attempt duration (seconds).
+/// 900 seconds (15 minutes) comfortably exceeds the observed ~3-6 minute 12-hop route
+/// while strictly guarding against infinite cyclic route oscillation.
+pub const ENHANCEMENT_HARD_SAFETY_BOUND_SECS: u64 = 900;
+
+/// Checks if a pending enhancement has exceeded its progress-aware timeout threshold.
 pub fn is_pending_enhancement_timed_out(pending: &PendingEnhancement, now: Instant) -> bool {
-    now.duration_since(pending.started_at).as_secs() >= ENHANCEMENT_TIMEOUT_SECS
+    let inactivity_secs = now.duration_since(pending.last_progress_at).as_secs();
+    let total_secs = now.duration_since(pending.started_at).as_secs();
+    inactivity_secs >= ENHANCEMENT_INACTIVITY_TIMEOUT_SECS || total_secs >= ENHANCEMENT_HARD_SAFETY_BOUND_SECS
 }
 
 impl std::str::FromStr for EnhancementState {
@@ -302,20 +316,95 @@ impl std::str::FromStr for EnhancementState {
     }
 }
 
+/// Deterministic signature representing observable enhancement progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnhancementProgressSignature {
+    pub request_id: String,
+    pub state: String,
+    pub attempt_count: u32,
+    pub quoted_gold_cost: i64,
+    pub quoted_gem_cost: i64,
+    pub quoted_material_requirements: Vec<i64>,
+    pub map_id: Option<u16>,
+    pub position: Option<(i32, i32)>,
+}
+
+impl EnhancementProgressSignature {
+    pub fn is_meaningful_advancement_from(&self, previous: Option<&Self>) -> bool {
+        let prev = match previous {
+            Some(p) => p,
+            None => return true,
+        };
+
+        if self.request_id != prev.request_id {
+            return false;
+        }
+
+        if self.state != prev.state {
+            return true;
+        }
+
+        if self.attempt_count != prev.attempt_count {
+            return true;
+        }
+
+        if self.quoted_gold_cost != prev.quoted_gold_cost
+            || self.quoted_gem_cost != prev.quoted_gem_cost
+            || self.quoted_material_requirements != prev.quoted_material_requirements
+        {
+            return true;
+        }
+
+        if self.map_id != prev.map_id && self.map_id.is_some() {
+            return true;
+        }
+
+        if matches!(self.state.as_str(), "LOCATING_BLACKSMITH" | "APPROACHING_BLACKSMITH") {
+            if let (Some(cur_pos), Some(prev_pos)) = (self.position, prev.position) {
+                let dist = (cur_pos.0 - prev_pos.0).abs() + (cur_pos.1 - prev_pos.1).abs();
+                if dist >= 16 {
+                    return true;
+                }
+            } else if self.position.is_some() && prev.position.is_none() {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
 /// Outcome of polling for an enhancement status result.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EnhancementPollOutcome {
     NoStatusYet,
+    StaleOrWrongRequest {
+        expected: String,
+        actual: String,
+    },
+    InvalidPayload(String),
+    NonTerminalProgress {
+        telemetry: EnhancementStatusTelemetry,
+        signature: EnhancementProgressSignature,
+    },
+    NonTerminalUnchanged {
+        telemetry: EnhancementStatusTelemetry,
+        signature: EnhancementProgressSignature,
+    },
     TerminalSuccess(EnhancementStatusTelemetry),
     TerminalFailure {
         state: String,
         error_message: Option<String>,
+        telemetry: Option<EnhancementStatusTelemetry>,
     },
-    InvalidPayload(String),
 }
 
-/// Polls for completion of a pending enhancement.
-pub fn poll_enhancement_status(home: &Path, expected_request_id: &str) -> EnhancementPollOutcome {
+/// Polls for completion of a pending enhancement with progress awareness.
+pub fn poll_enhancement_status(
+    home: &Path,
+    expected_request_id: &str,
+    last_signature: Option<&EnhancementProgressSignature>,
+) -> EnhancementPollOutcome {
     let status_path = home.join(ENHANCE_STATUS_FILE_NAME);
     if !status_path.exists() {
         return EnhancementPollOutcome::NoStatusYet;
@@ -329,8 +418,27 @@ pub fn poll_enhancement_status(home: &Path, expected_request_id: &str) -> Enhanc
     };
 
     if status.request_id != expected_request_id {
-        return EnhancementPollOutcome::NoStatusYet;
+        return EnhancementPollOutcome::StaleOrWrongRequest {
+            expected: expected_request_id.to_string(),
+            actual: status.request_id,
+        };
     }
+
+    let (map_id, position) = match zeus_core::wire::read_snapshot(home) {
+        Ok(Some(snap)) => (snap.map_id, Some((snap.pixel_x, snap.pixel_y))),
+        _ => (None, None),
+    };
+
+    let current_signature = EnhancementProgressSignature {
+        request_id: status.request_id.clone(),
+        state: status.state.clone(),
+        attempt_count: status.attempt_count,
+        quoted_gold_cost: status.quoted_gold_cost,
+        quoted_gem_cost: status.quoted_gem_cost,
+        quoted_material_requirements: status.quoted_material_requirements.clone(),
+        map_id,
+        position,
+    };
 
     if let Ok(state_enum) = status.state.parse::<EnhancementState>() {
         if state_enum.is_terminal() {
@@ -338,34 +446,51 @@ pub fn poll_enhancement_status(home: &Path, expected_request_id: &str) -> Enhanc
                 EnhancementPollOutcome::TerminalSuccess(status)
             } else {
                 EnhancementPollOutcome::TerminalFailure {
-                    state: status.state,
-                    error_message: status.error_message,
+                    state: status.state.clone(),
+                    error_message: status.error_message.clone(),
+                    telemetry: Some(status),
                 }
             }
         } else {
-            EnhancementPollOutcome::NoStatusYet
+            if current_signature.is_meaningful_advancement_from(last_signature) {
+                EnhancementPollOutcome::NonTerminalProgress {
+                    telemetry: status,
+                    signature: current_signature,
+                }
+            } else {
+                EnhancementPollOutcome::NonTerminalUnchanged {
+                    telemetry: status,
+                    signature: current_signature,
+                }
+            }
         }
     } else if status.state == "TARGET_REACHED" {
         EnhancementPollOutcome::TerminalSuccess(status)
     } else {
         EnhancementPollOutcome::TerminalFailure {
-            state: status.state,
-            error_message: status.error_message,
+            state: status.state.clone(),
+            error_message: status.error_message.clone(),
+            telemetry: Some(status),
         }
     }
 }
 
 /// Reads and validates `zeus-enhance-status.json`. Fails closed.
 pub fn read_enhancement_status(path: &Path) -> Option<EnhancementStatusTelemetry> {
-    if !path.exists() {
+    let file_path = if path.is_dir() {
+        path.join(ENHANCE_STATUS_FILE_NAME)
+    } else {
+        path.to_path_buf()
+    };
+    if !file_path.exists() {
         return None;
     }
-    let metadata = fs::metadata(path).ok()?;
+    let metadata = fs::metadata(&file_path).ok()?;
     if metadata.len() > MAX_ENHANCE_STATUS_BYTES {
-        eprintln!("[enhancement] status file {:?} exceeds max bytes", path);
+        eprintln!("[enhancement] status file {:?} exceeds max bytes", file_path);
         return None;
     }
-    let text = fs::read_to_string(path).ok()?;
+    let text = fs::read_to_string(&file_path).ok()?;
     let status: EnhancementStatusTelemetry = serde_json::from_str(&text).ok()?;
     if status.version != 1 {
         eprintln!("[enhancement] unsupported status version {}", status.version);
@@ -603,11 +728,11 @@ mod tests {
 
         // 1. Missing file -> NoStatusYet
         assert_eq!(
-            poll_enhancement_status(home, "req-1"),
+            poll_enhancement_status(home, "req-1", None),
             EnhancementPollOutcome::NoStatusYet
         );
 
-        // 2. In-progress state -> NoStatusYet
+        // 2. In-progress state -> NonTerminalProgress on first read, NonTerminalUnchanged on repeat
         let in_progress_json = r#"{
             "version": 1,
             "request_id": "req-1",
@@ -636,21 +761,31 @@ mod tests {
             "updated_at": "2026-09-24T12:00:00Z"
         }"#;
         fs::write(&status_path, in_progress_json).unwrap();
-        assert_eq!(
-            poll_enhancement_status(home, "req-1"),
-            EnhancementPollOutcome::NoStatusYet
-        );
+        let sig1 = match poll_enhancement_status(home, "req-1", None) {
+            EnhancementPollOutcome::NonTerminalProgress { signature, .. } => signature,
+            other => panic!("expected NonTerminalProgress, got {:?}", other),
+        };
+        // Repeat poll with unchanged signature -> NonTerminalUnchanged
+        match poll_enhancement_status(home, "req-1", Some(&sig1)) {
+            EnhancementPollOutcome::NonTerminalUnchanged { signature, .. } => {
+                assert_eq!(signature, sig1);
+            }
+            other => panic!("expected NonTerminalUnchanged, got {:?}", other),
+        }
 
-        // 3. Mismatched request_id -> NoStatusYet
-        assert_eq!(
-            poll_enhancement_status(home, "req-different"),
-            EnhancementPollOutcome::NoStatusYet
-        );
+        // 3. Mismatched request_id -> StaleOrWrongRequest
+        match poll_enhancement_status(home, "req-different", None) {
+            EnhancementPollOutcome::StaleOrWrongRequest { expected, actual } => {
+                assert_eq!(expected, "req-different");
+                assert_eq!(actual, "req-1");
+            }
+            other => panic!("expected StaleOrWrongRequest, got {:?}", other),
+        }
 
         // 4. Terminal success -> TerminalSuccess
         let success_json = in_progress_json.replace("\"EXECUTING\"", "\"TARGET_REACHED\"");
         fs::write(&status_path, success_json).unwrap();
-        match poll_enhancement_status(home, "req-1") {
+        match poll_enhancement_status(home, "req-1", Some(&sig1)) {
             EnhancementPollOutcome::TerminalSuccess(telemetry) => {
                 assert_eq!(telemetry.state, "TARGET_REACHED");
             }
@@ -662,7 +797,7 @@ mod tests {
             .replace("\"EXECUTING\"", "\"ITEM_DESTROYED\"")
             .replace("\"last_result\": null", "\"last_result\": \"DESTROYED\"");
         fs::write(&status_path, fail_json).unwrap();
-        match poll_enhancement_status(home, "req-1") {
+        match poll_enhancement_status(home, "req-1", Some(&sig1)) {
             EnhancementPollOutcome::TerminalFailure { state, .. } => {
                 assert_eq!(state, "ITEM_DESTROYED");
             }
@@ -734,7 +869,7 @@ mod tests {
             "updated_at": "2026-09-25T12:00:00Z"
         }"#;
         fs::write(&status_path, dry_run_json).unwrap();
-        match poll_enhancement_status(home, "req-dry-1") {
+        match poll_enhancement_status(home, "req-dry-1", None) {
             EnhancementPollOutcome::TerminalSuccess(telemetry) => {
                 assert_eq!(telemetry.state, "DRY_RUN_COMPLETE");
                 assert_eq!(telemetry.validation_only, Some(true));
@@ -776,4 +911,91 @@ mod tests {
         let dry_payload: SingleItemEnhanceCommandPayload = serde_json::from_str(dry_payload_json).unwrap();
         assert!(dry_payload.validation_only);
     }
+
+    #[test]
+    fn test_progress_signature_advancement_semantics() {
+        let base_sig = EnhancementProgressSignature {
+            request_id: "req-100".to_string(),
+            state: "LOCATING_BLACKSMITH".to_string(),
+            attempt_count: 0,
+            quoted_gold_cost: 0,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![],
+            map_id: Some(44),
+            position: Some((100, 200)),
+        };
+
+        // 1. First observation is always meaningful progress
+        assert!(base_sig.is_meaningful_advancement_from(None));
+
+        // 2. Identical signature -> not advancement
+        assert!(!base_sig.is_meaningful_advancement_from(Some(&base_sig)));
+
+        // 3. Different request ID -> not advancement for this attempt
+        let mut wrong_req = base_sig.clone();
+        wrong_req.request_id = "req-other".to_string();
+        wrong_req.state = "OPENING_FORGE".to_string();
+        assert!(!wrong_req.is_meaningful_advancement_from(Some(&base_sig)));
+
+        // 4. State transition -> meaningful progress
+        let mut next_state = base_sig.clone();
+        next_state.state = "OPENING_FORGE".to_string();
+        assert!(next_state.is_meaningful_advancement_from(Some(&base_sig)));
+
+        // 5. Attempt count increment -> meaningful progress
+        let mut next_attempt = base_sig.clone();
+        next_attempt.attempt_count = 1;
+        assert!(next_attempt.is_meaningful_advancement_from(Some(&base_sig)));
+
+        // 6. Quoted resources newly available at forge -> meaningful progress
+        let mut quoted = base_sig.clone();
+        quoted.quoted_gold_cost = 3000;
+        quoted.quoted_material_requirements = vec![1, 1, 0, 0];
+        assert!(quoted.is_meaningful_advancement_from(Some(&base_sig)));
+
+        // 7. Map transition during routing -> meaningful progress
+        let mut map_hop = base_sig.clone();
+        map_hop.map_id = Some(43);
+        assert!(map_hop.is_meaningful_advancement_from(Some(&base_sig)));
+
+        // 8. Meaningful coordinate movement (>= 16 pixels) during routing -> progress
+        let mut moved = base_sig.clone();
+        moved.position = Some((120, 200)); // delta = 20 >= 16
+        assert!(moved.is_meaningful_advancement_from(Some(&base_sig)));
+
+        // 9. Coordinate jitter (< 16 pixels) -> NOT progress
+        let mut jitter = base_sig.clone();
+        jitter.position = Some((105, 202)); // delta = 5 + 2 = 7 < 16
+        assert!(!jitter.is_meaningful_advancement_from(Some(&base_sig)));
+    }
+
+    #[test]
+    fn test_progress_aware_timeout_model() {
+        use std::time::Duration;
+        let now = Instant::now();
+        let mut pending = PendingEnhancement {
+            command_id: "cmd-1".to_string(),
+            request_id: "req-1".to_string(),
+            started_at: now - Duration::from_secs(180), // Started 180s ago (> 120s old threshold)
+            last_progress_at: now - Duration::from_secs(10), // Progress was made 10s ago
+            last_progress_signature: None,
+            template_id: 101,
+            category: 3,
+            target_level: 7,
+            validation_only: false,
+        };
+
+        // Long route (> 120s elapsed) does NOT time out because last progress is fresh (10s ago)
+        assert!(!is_pending_enhancement_timed_out(&pending, now));
+
+        // When inactivity exceeds 120 seconds, it times out fail-closed
+        pending.last_progress_at = now - Duration::from_secs(120);
+        assert!(is_pending_enhancement_timed_out(&pending, now));
+
+        // When total elapsed exceeds hard safety bound (900s), it times out even if last progress was recent
+        pending.last_progress_at = now - Duration::from_secs(5);
+        pending.started_at = now - Duration::from_secs(901);
+        assert!(is_pending_enhancement_timed_out(&pending, now));
+    }
 }
+
