@@ -4481,6 +4481,30 @@ public final class Zeus {
     public static int snapTargetLevelBefore = 0;
     public static int snapSelectedCharmTemplateId = 0;
 
+    // Pre-execute evidence snapshot values for safe state reconciliation
+    public static String snapRequestId = null;
+    public static int snapTemplateId = 0;
+    public static int snapCategory = 3;
+    public static String snapBaseName = null;
+    public static int snapTier = 0;
+    public static int snapExpectedLevel = 0;
+    public static int snapTargetLevel = 0;
+    public static int snapPaymentType = 0;
+    public static int snapResolvedCharmMode = 0;
+    public static long snapRecipeGoldCost = 0L;
+    public static long snapRecipeGemCost = 0L;
+    public static long[] snapRecipeMaterials = new long[4];
+    public static long enhExecuteStartedAt = 0L;
+    public static long enhResultDeadline = 0L;
+    public static int enhResultCode = -1;
+    public static String enhSettlementSource = null;
+    public static String enhSettlementProvenance = null;
+
+    // Post-execute result wait window: 8.0s (200 ticks at 25 t/s)
+    // Exceeds 3.7s native animation delay with 4.3s network/server RTT margin
+    public static final long ENH_RESULT_WAIT_MS = 8000L;
+    public static final int ENH_RESULT_WAIT_TICKS = 200;
+
     public static final int BLACKSMITH_MAP = 1;
     public static final int BLACKSMITH_ANCHOR_X = 324;
     public static final int BLACKSMITH_ANCHOR_Y = 624;
@@ -4794,6 +4818,28 @@ public final class Zeus {
             return;
         }
 
+        // Preserve pre-execute evidence snapshot immediately before Opcode 67
+        snapRequestId = enhRequestId;
+        snapTemplateId = enhTemplateId;
+        snapCategory = enhCategory;
+        snapBaseName = enhBaseName;
+        snapTier = enhTier;
+        snapExpectedLevel = enhExpectedLevel;
+        snapTargetLevel = enhTargetLevel;
+        snapPaymentType = enhPaymentType;
+        snapResolvedCharmMode = enhResolvedCharmMode;
+        snapRecipeGoldCost = enhQuotedGoldCost;
+        snapRecipeGemCost = enhQuotedGemCost;
+        if (snapRecipeMaterials == null) snapRecipeMaterials = new long[4];
+        if (enhQuotedMaterialRequirements != null) {
+            for (int i = 0; i < enhQuotedMaterialRequirements.length && i < snapRecipeMaterials.length; i++) {
+                snapRecipeMaterials[i] = enhQuotedMaterialRequirements[i];
+            }
+        }
+        enhResultCode = -1;
+        enhSettlementSource = null;
+        enhSettlementProvenance = null;
+
         enhAttemptCount++;
         enhState = 12; // ATTEMPTING
         enhInFlightExecute = true;
@@ -4801,7 +4847,10 @@ public final class Zeus {
         try {
             q.a().b((byte) 2, (short) 0, (byte) enhPaymentType);
             enhState = 13; // WAITING_RESULT
-            enhWait = 30;
+            long now = System.currentTimeMillis();
+            enhExecuteStartedAt = now;
+            enhResultDeadline = now + ENH_RESULT_WAIT_MS;
+            enhWait = ENH_RESULT_WAIT_TICKS;
         } catch (Throwable t) {
             enhState = 29; // RESULT_AMBIGUOUS
             enhErrorMessage = "Failed to send Opcode 67 sub-action 2: " + t;
@@ -4861,6 +4910,18 @@ public final class Zeus {
         int newLevel = currentTarget.z;
         enhCurrentLevel = newLevel;
 
+        if ("STATE_RECONCILED_SUCCESS".equals(enhSettlementProvenance)) {
+            enhLastResult = "STATE_RECONCILED_SUCCESS";
+            if (newLevel >= enhTargetLevel) {
+                enhState = 17; // TARGET_REACHED
+            } else if (enhAttemptCount >= enhMaxAttempts) {
+                enhState = 18; // ATTEMPT_LIMIT_REACHED
+            } else {
+                enhState = 10;
+            }
+            return;
+        }
+
         if (newLevel >= enhTargetLevel) {
             enhLastResult = "SUCCESS";
             enhState = 17; // TARGET_REACHED
@@ -4880,12 +4941,15 @@ public final class Zeus {
         if (c.C == 4) {
             if (newLevel == snapTargetLevelBefore) {
                 enhLastResult = "FAILURE_PROTECTED";
+                enhSettlementProvenance = "FAILURE_PROTECTED";
                 enhState = 15; // FAILURE_PROTECTED
             } else if (newLevel < snapTargetLevelBefore) {
                 enhLastResult = "FAILURE_DEGRADED";
+                enhSettlementProvenance = "FAILURE_DEGRADED";
                 enhState = 16; // FAILURE_DEGRADED
             } else {
                 enhLastResult = "FAILURE_PROTECTED";
+                enhSettlementProvenance = "FAILURE_PROTECTED";
                 enhState = 15;
             }
             if (enhAttemptCount >= enhMaxAttempts) {
@@ -4897,6 +4961,110 @@ public final class Zeus {
         if (enhAttemptCount >= enhMaxAttempts) {
             enhState = 18;
         }
+    }
+
+    public static boolean canReconcileStateSuccess() {
+        if (!enhInFlightExecute) {
+            return false;
+        }
+        if (c.C == 3 || c.C == 4 || c.C == 1 || c.C == 2 || c.C >= 5) {
+            return false;
+        }
+        if (enhRequestId == null || enhRequestId.length() == 0 || !enhRequestId.equals(snapRequestId)) {
+            return false;
+        }
+        if (bw.V == null) {
+            return false;
+        }
+        int bagCount = bw.V.c();
+        int matchCount = 0;
+        j matchedItem = null;
+        for (int i = 0; i < bagCount; i++) {
+            Object obj = bw.V.a(i);
+            if (obj instanceof j) {
+                j it = (j) obj;
+                if (it.O == snapTemplateId && it.u == snapCategory) {
+                    matchCount++;
+                    matchedItem = it;
+                }
+            }
+        }
+        if (matchCount != 1 || matchedItem == null) {
+            return false;
+        }
+        if (matchedItem.N != snapTier) {
+            return false;
+        }
+        if (snapBaseName != null && snapBaseName.trim().length() > 0 && matchedItem.i != null) {
+            if (!snapBaseName.equals(matchedItem.i)) {
+                return false;
+            }
+        }
+        if (matchedItem.z != snapTargetLevel) {
+            return false;
+        }
+        if (snapTargetLevelBefore != snapExpectedLevel) {
+            return false;
+        }
+        if (matchedItem.z != snapExpectedLevel + 1) {
+            return false;
+        }
+        if (cn.g == null) {
+            return false;
+        }
+        long liveGoldDelta = Math.max(0L, snapGoldBefore - cn.g.bD);
+        long liveGemDelta = Math.max(0L, snapGemBefore - cn.g.bC);
+
+        if (snapPaymentType == 0) {
+            if (liveGoldDelta != snapRecipeGoldCost) {
+                return false;
+            }
+            if (liveGemDelta != 0L) {
+                return false;
+            }
+        } else if (snapPaymentType == 1) {
+            if (liveGemDelta != snapRecipeGemCost) {
+                return false;
+            }
+            if (liveGoldDelta != 0L) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        if (snapRecipeMaterials != null && c.p != null && snapMaterialsBefore != null) {
+            for (int i = 0; i < snapRecipeMaterials.length && i < 4; i++) {
+                long required = snapRecipeMaterials[i];
+                long actualAvailable = (i < c.p.length) ? c.p[i] : 0L;
+                long actualBefore = (i < snapMaterialsBefore.length) ? snapMaterialsBefore[i] : 0L;
+                long actualMatDelta = Math.max(0L, actualBefore - actualAvailable);
+                if (actualMatDelta != required) {
+                    return false;
+                }
+            }
+        }
+
+        if (snapResolvedCharmMode == 0) {
+            if (snapSelectedCharmTemplateId > 0) {
+                long currentCharmCount = countItemInBag(snapSelectedCharmTemplateId);
+                long charmDelta = Math.max(0L, snapCharmBefore - currentCharmCount);
+                if (charmDelta != 0L) {
+                    return false;
+                }
+            }
+        } else {
+            if (snapSelectedCharmTemplateId <= 0) {
+                return false;
+            }
+            long currentCharmCount = countItemInBag(snapSelectedCharmTemplateId);
+            long charmDelta = Math.max(0L, snapCharmBefore - currentCharmCount);
+            if (charmDelta != 1L) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public static void recoverEnhancementSession() {
@@ -5188,10 +5356,30 @@ public final class Zeus {
         if (enhValidationOnly) {
             sb.append("  \"validation_only\": true,\n");
         }
-        if (enhLastResult != null) {
+        if ("STATE_RECONCILED_SUCCESS".equals(enhSettlementProvenance)) {
+            sb.append("  \"last_result\": \"STATE_RECONCILED_SUCCESS\",\n");
+            sb.append("  \"result_code\": null,\n");
+            sb.append("  \"settlement_source\": \"STATE_RECONCILED\",\n");
+            sb.append("  \"settlement_provenance\": \"STATE_RECONCILED_SUCCESS\",\n");
+        } else if ("SUCCESS".equals(enhLastResult) || "RESULT_CODE_SUCCESS".equals(enhSettlementProvenance)) {
+            sb.append("  \"last_result\": \"SUCCESS\",\n");
+            sb.append("  \"result_code\": 3,\n");
+            sb.append("  \"settlement_source\": \"RESULT_CODE\",\n");
+            sb.append("  \"settlement_provenance\": \"RESULT_CODE_SUCCESS\",\n");
+        } else if (enhLastResult != null) {
             sb.append("  \"last_result\": \"").append(enhLastResult).append("\",\n");
+            if (enhResultCode > 0) {
+                sb.append("  \"result_code\": ").append(enhResultCode).append(",\n");
+            } else {
+                sb.append("  \"result_code\": null,\n");
+            }
+            sb.append("  \"settlement_source\": \"RESULT_CODE\",\n");
+            sb.append("  \"settlement_provenance\": \"").append(enhLastResult).append("\",\n");
         } else {
             sb.append("  \"last_result\": null,\n");
+            sb.append("  \"result_code\": null,\n");
+            sb.append("  \"settlement_source\": null,\n");
+            sb.append("  \"settlement_provenance\": null,\n");
         }
         sb.append("  \"quoted_gold_cost\": ").append(enhQuotedGoldCost).append(",\n");
         sb.append("  \"quoted_gem_cost\": ").append(enhQuotedGemCost).append(",\n");
@@ -5519,8 +5707,21 @@ public final class Zeus {
                     break;
 
                 case 13: // WAITING_RESULT
-                    if (c.C == 3 || c.C == 4) {
+                    if (c.C == 3) {
                         enhOwnsResultDialog = true;
+                        enhResultCode = 3;
+                        enhSettlementSource = "RESULT_CODE";
+                        enhSettlementProvenance = "RESULT_CODE_SUCCESS";
+                        enhLastResult = "SUCCESS";
+                        enhState = 14;
+                        settleEnhancementResult();
+                        publishEnhancementStatus();
+                        return;
+                    }
+                    if (c.C == 4) {
+                        enhOwnsResultDialog = true;
+                        enhResultCode = 4;
+                        enhSettlementSource = "RESULT_CODE";
                         enhState = 14;
                         settleEnhancementResult();
                         publishEnhancementStatus();
@@ -5530,20 +5731,37 @@ public final class Zeus {
                         enhState = 28; // SERVER_REJECTED
                         enhErrorCode = "SERVER_REJECTED";
                         enhErrorMessage = "Server rejected enhancement attempt (code=" + c.C + ")";
+                        enhResultCode = c.C;
+                        enhSettlementSource = "RESULT_CODE";
                         enhInFlightExecute = false;
                         cleanEnhancementRouting();
                         publishEnhancementStatus();
                         return;
                     }
-                    if (enhWait > 0) {
+                    long nowWait = System.currentTimeMillis();
+                    boolean waitTimeout = (nowWait >= enhResultDeadline);
+                    if (enhWait > 0 && !waitTimeout) {
                         enhWait--;
-                    } else {
-                        enhState = 29; // RESULT_AMBIGUOUS
-                        enhErrorCode = "RESULT_AMBIGUOUS";
-                        enhErrorMessage = "Timed out waiting for server enhancement result";
-                        cleanEnhancementRouting();
-                        publishEnhancementStatus();
+                        return;
                     }
+
+                    // Fallback conservative state reconciliation
+                    if (canReconcileStateSuccess()) {
+                        enhOwnsResultDialog = false;
+                        enhResultCode = -1; // Keep result_code NULL for state-reconciled success
+                        enhSettlementSource = "STATE_RECONCILED";
+                        enhSettlementProvenance = "STATE_RECONCILED_SUCCESS";
+                        enhLastResult = "STATE_RECONCILED_SUCCESS";
+                        settleEnhancementResult();
+                        publishEnhancementStatus();
+                        return;
+                    }
+
+                    enhState = 29; // RESULT_AMBIGUOUS
+                    enhErrorCode = "RESULT_AMBIGUOUS";
+                    enhErrorMessage = "Timed out waiting for server enhancement result and exact state reconciliation criteria not met";
+                    cleanEnhancementRouting();
+                    publishEnhancementStatus();
                     break;
 
                 case 14: // WAITING_SETTLEMENT
@@ -5578,6 +5796,23 @@ public final class Zeus {
         enhValidationOnlyMalformed = false;
         enhErrorCode = null;
         enhErrorMessage = null;
+        snapRequestId = null;
+        snapTemplateId = 0;
+        snapCategory = 3;
+        snapBaseName = null;
+        snapTier = 0;
+        snapExpectedLevel = 0;
+        snapTargetLevel = 0;
+        snapPaymentType = 0;
+        snapResolvedCharmMode = 0;
+        snapRecipeGoldCost = 0L;
+        snapRecipeGemCost = 0L;
+        snapRecipeMaterials = new long[4];
+        enhExecuteStartedAt = 0L;
+        enhResultDeadline = 0L;
+        enhResultCode = -1;
+        enhSettlementSource = null;
+        enhSettlementProvenance = null;
         cleanEnhancementRouting();
     }
 

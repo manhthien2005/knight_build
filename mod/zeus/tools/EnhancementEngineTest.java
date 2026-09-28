@@ -864,6 +864,335 @@ public class EnhancementEngineTest {
         check("Dialog ownership false", !((Boolean) get("enhOwnsResultDialog")).booleanValue());
         check("Forge ownership false", !((Boolean) get("enhOwnsForgeScreen")).booleanValue());
 
+        // ---------------------------------------------------------------------
+        // Test 13: Post-Execute Result Wait & Non-Replay State Reconciliation
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 13: Result wait window & conservative state reconciliation ---");
+
+        // 13.1: Normal c.C == 3 arriving after >1.5s within wait window is captured as RESULT_CODE_SUCCESS
+        call("enhanceReset");
+        setupWorldState(1);
+        c.C = 0;
+        set("enhState", 13); // WAITING_RESULT
+        set("enhInFlightExecute", true);
+        set("enhWait", 100); // 100 ticks remaining (>1.5s)
+        set("enhResultDeadline", System.currentTimeMillis() + 4000L); // deadline in future
+        c.C = 3; // server result arrives
+        enhanceMethod.invoke(null);
+        check("13.1: Normal c.C == 3 captures SUCCESS", "SUCCESS".equals(get("enhLastResult")));
+        check("13.1: Settlement provenance is RESULT_CODE_SUCCESS", "RESULT_CODE_SUCCESS".equals(get("enhSettlementProvenance")));
+        check("13.1: Settlement source is RESULT_CODE", "RESULT_CODE".equals(get("enhSettlementSource")));
+        check("13.1: Result code is 3", ((Integer) get("enhResultCode")).intValue() == 3);
+
+        // 13.2: Native result delay around 3.7 seconds does not cause premature RESULT_AMBIGUOUS
+        call("enhanceReset");
+        setupWorldState(1);
+        c.C = 0;
+        set("enhState", 13);
+        set("enhInFlightExecute", true);
+        set("enhWait", 150); // still waiting
+        set("enhResultDeadline", System.currentTimeMillis() + 5000L); // well beyond 3.7s
+        enhanceMethod.invoke(null);
+        check("13.2: Engine remains in WAITING_RESULT (13) during 3.7s native delay", ((Integer) get("enhState")).intValue() == 13);
+        check("13.2: No premature RESULT_AMBIGUOUS", get("enhErrorCode") == null);
+
+        // 13.3 & 13.4: Exactly one Opcode 67 execute is sent, zero retries
+        call("enhanceReset");
+        setupWorldState(1);
+        clearQueue();
+        set("enhState", 11); // READY_FOR_ATTEMPT
+        set("enhAttemptCount", 0);
+        set("enhMaxAttempts", 1);
+        set("enhExpectedLevel", 0);
+        set("enhTargetLevel", 1);
+        set("enhTemplateId", 67);
+        set("enhCategory", 3);
+        set("enhBaseName", "Kiem tap");
+        set("enhTier", 1);
+        bw.V = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1));
+        if (c.k == null) c.k = new b[16];
+        c.k[0] = new b();
+        c.k[0].c = 3000;
+        c.k[0].d = 0;
+        c.k[0].e = new byte[]{1, 1, 0, 0};
+        executeAttemptMethod.invoke(null);
+        int queuedPackets = queue().size();
+        check("13.3: Exactly one Opcode 67 packet sent on execute", queuedPackets == 1);
+        set("enhWait", 50);
+        set("enhResultDeadline", System.currentTimeMillis() + 2000L);
+        enhanceMethod.invoke(null);
+        check("13.4: Zero execute retries during result wait", queue().size() == 1);
+
+        // 13.5: Normal c.C == 4 (failure) remains correctly classified
+        call("enhanceReset");
+        setupWorldState(1);
+        bw.V = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1));
+        set("enhState", 13);
+        set("enhInFlightExecute", true);
+        set("snapTargetLevelBefore", 0);
+        c.C = 4;
+        enhanceMethod.invoke(null);
+        check("13.5: Normal c.C == 4 classified as FAILURE_PROTECTED", "FAILURE_PROTECTED".equals(get("enhLastResult")));
+        check("13.5: Settlement source is RESULT_CODE", "RESULT_CODE".equals(get("enhSettlementSource")));
+        check("13.5: Result code is 4", ((Integer) get("enhResultCode")).intValue() == 4);
+
+        // 13.6, 13.7, 13.8: Exact state fallback reconciliation produces STATE_RECONCILED_SUCCESS with result_code null
+        call("enhanceReset");
+        setupWorldState(1);
+        c.C = 0; // No c.C captured!
+        set("enhState", 13);
+        set("enhInFlightExecute", true);
+        set("enhWait", 0); // timeout expired
+        set("enhResultDeadline", System.currentTimeMillis() - 100L); // past deadline
+        set("snapRequestId", "req-13-uuid");
+        set("enhRequestId", "req-13-uuid");
+        set("snapTemplateId", 67);
+        set("enhTemplateId", 67);
+        set("snapCategory", 3);
+        set("enhCategory", 3);
+        set("snapBaseName", "Kiem tap");
+        set("enhBaseName", "Kiem tap");
+        set("snapTier", 1);
+        set("enhTier", 1);
+        set("snapExpectedLevel", 0);
+        set("enhExpectedLevel", 0);
+        set("snapTargetLevel", 1);
+        set("enhTargetLevel", 1);
+        set("snapPaymentType", 0);
+        set("enhPaymentType", 0);
+        set("snapRecipeGoldCost", 3000L);
+        set("snapRecipeGemCost", 0L);
+        set("snapRecipeMaterials", new long[]{1L, 1L, 0L, 0L});
+        set("snapResolvedCharmMode", 0);
+        set("snapCharmBefore", 0L);
+        set("snapGoldBefore", 10000L);
+        set("snapGemBefore", 50L);
+        set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
+        bw.V = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
+        cn.g.bD = 7000;
+        cn.g.bC = 50;
+        c.p = new int[]{9, 9, 0, 0};
+        enhanceMethod.invoke(null);
+        check("13.7: Exact state reconciliation produces STATE_RECONCILED_SUCCESS", "STATE_RECONCILED_SUCCESS".equals(get("enhSettlementProvenance")));
+        check("13.7: State transitions to TARGET_REACHED (17)", ((Integer) get("enhState")).intValue() == 17);
+        check("13.7: Settlement source is STATE_RECONCILED", "STATE_RECONCILED".equals(get("enhSettlementSource")));
+        check("13.8: Reconciled result code is -1 (NULL)", ((Integer) get("enhResultCode")).intValue() == -1);
+        String reconciledJson = (String) formatStatusMethod.invoke(null);
+        check("13.8: Status JSON has result_code: null", reconciledJson.indexOf("\"result_code\": null") >= 0);
+        check("13.8: Status JSON has last_result: STATE_RECONCILED_SUCCESS", reconciledJson.indexOf("\"last_result\": \"STATE_RECONCILED_SUCCESS\"") >= 0);
+        check("13.8: Status JSON has settlement_source: STATE_RECONCILED", reconciledJson.indexOf("\"settlement_source\": \"STATE_RECONCILED\"") >= 0);
+
+        // 13.9: Level advancement with mismatched resources remains ambiguous
+        call("enhanceReset");
+        setupWorldState(1);
+        c.C = 0;
+        set("enhState", 13);
+        set("enhInFlightExecute", true);
+        set("enhWait", 0);
+        set("enhResultDeadline", System.currentTimeMillis() - 100L);
+        set("snapRequestId", "req-13-uuid");
+        set("enhRequestId", "req-13-uuid");
+        set("snapTemplateId", 67);
+        set("enhTemplateId", 67);
+        set("snapCategory", 3);
+        set("enhCategory", 3);
+        set("snapBaseName", "Kiem tap");
+        set("enhBaseName", "Kiem tap");
+        set("snapTier", 1);
+        set("enhTier", 1);
+        set("snapExpectedLevel", 0);
+        set("enhExpectedLevel", 0);
+        set("snapTargetLevel", 1);
+        set("enhTargetLevel", 1);
+        set("snapPaymentType", 0);
+        set("snapRecipeGoldCost", 3000L);
+        set("snapRecipeGemCost", 0L);
+        set("snapRecipeMaterials", new long[]{1L, 1L, 0L, 0L});
+        set("snapResolvedCharmMode", 0);
+        set("snapCharmBefore", 0L);
+        set("snapGoldBefore", 10000L);
+        set("snapGemBefore", 50L);
+        set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
+        bw.V = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
+        cn.g.bD = 8000; // mismatch
+        cn.g.bC = 50;
+        c.p = new int[]{9, 9, 0, 0};
+        enhanceMethod.invoke(null);
+        check("13.9: Mismatched resources enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
+
+        // 13.10: Resource delta match without exact target level advancement remains ambiguous
+        call("enhanceReset");
+        setupWorldState(1);
+        c.C = 0;
+        set("enhState", 13);
+        set("enhInFlightExecute", true);
+        set("enhWait", 0);
+        set("enhResultDeadline", System.currentTimeMillis() - 100L);
+        set("snapRequestId", "req-13-uuid");
+        set("enhRequestId", "req-13-uuid");
+        set("snapTemplateId", 67);
+        set("enhTemplateId", 67);
+        set("snapCategory", 3);
+        set("enhCategory", 3);
+        set("snapBaseName", "Kiem tap");
+        set("enhBaseName", "Kiem tap");
+        set("snapTier", 1);
+        set("enhTier", 1);
+        set("snapExpectedLevel", 0);
+        set("snapTargetLevel", 1);
+        set("snapPaymentType", 0);
+        set("snapRecipeGoldCost", 3000L);
+        set("snapRecipeGemCost", 0L);
+        set("snapRecipeMaterials", new long[]{1L, 1L, 0L, 0L});
+        set("snapResolvedCharmMode", 0);
+        set("snapCharmBefore", 0L);
+        set("snapGoldBefore", 10000L);
+        set("snapGemBefore", 50L);
+        set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
+        bw.V = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1)); // unadvanced level 0
+        cn.g.bD = 7000;
+        cn.g.bC = 50;
+        c.p = new int[]{9, 9, 0, 0};
+        enhanceMethod.invoke(null);
+        check("13.10: Unadvanced level enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
+
+        // 13.11: Wrong fingerprint remains ambiguous
+        call("enhanceReset");
+        setupWorldState(1);
+        c.C = 0;
+        set("enhState", 13);
+        set("enhInFlightExecute", true);
+        set("enhWait", 0);
+        set("enhResultDeadline", System.currentTimeMillis() - 100L);
+        set("snapRequestId", "req-13-uuid");
+        set("enhRequestId", "req-13-uuid");
+        set("snapTemplateId", 67);
+        set("enhTemplateId", 67);
+        set("snapCategory", 3);
+        set("enhCategory", 3);
+        set("snapBaseName", "Kiem tap");
+        set("enhBaseName", "Kiem tap");
+        set("snapTier", 1);
+        set("enhTier", 1);
+        set("snapExpectedLevel", 0);
+        set("snapTargetLevel", 1);
+        set("snapPaymentType", 0);
+        set("snapRecipeGoldCost", 3000L);
+        set("snapRecipeGemCost", 0L);
+        set("snapRecipeMaterials", new long[]{1L, 1L, 0L, 0L});
+        set("snapResolvedCharmMode", 0);
+        set("snapCharmBefore", 0L);
+        set("snapGoldBefore", 10000L);
+        set("snapGemBefore", 50L);
+        set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
+        bw.V = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 2)); // tier 2 != tier 1
+        cn.g.bD = 7000;
+        cn.g.bC = 50;
+        c.p = new int[]{9, 9, 0, 0};
+        enhanceMethod.invoke(null);
+        check("13.11: Wrong fingerprint enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
+
+        // 13.12: Duplicate O+u remains ambiguous
+        call("enhanceReset");
+        setupWorldState(1);
+        c.C = 0;
+        set("enhState", 13);
+        set("enhInFlightExecute", true);
+        set("enhWait", 0);
+        set("enhResultDeadline", System.currentTimeMillis() - 100L);
+        set("snapRequestId", "req-13-uuid");
+        set("enhRequestId", "req-13-uuid");
+        set("snapTemplateId", 67);
+        set("enhTemplateId", 67);
+        set("snapCategory", 3);
+        set("enhCategory", 3);
+        set("snapBaseName", "Kiem tap");
+        set("enhBaseName", "Kiem tap");
+        set("snapTier", 1);
+        set("enhTier", 1);
+        set("snapExpectedLevel", 0);
+        set("snapTargetLevel", 1);
+        set("snapPaymentType", 0);
+        set("snapRecipeGoldCost", 3000L);
+        set("snapRecipeGemCost", 0L);
+        set("snapRecipeMaterials", new long[]{1L, 1L, 0L, 0L});
+        set("snapResolvedCharmMode", 0);
+        set("snapCharmBefore", 0L);
+        set("snapGoldBefore", 10000L);
+        set("snapGemBefore", 50L);
+        set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
+        bw.V = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1), makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
+        cn.g.bD = 7000;
+        cn.g.bC = 50;
+        c.p = new int[]{9, 9, 0, 0};
+        enhanceMethod.invoke(null);
+        check("13.12: Duplicate O+u enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
+
+        // 13.13: Wrong request UUID cannot reconcile
+        call("enhanceReset");
+        setupWorldState(1);
+        c.C = 0;
+        set("enhState", 13);
+        set("enhInFlightExecute", true);
+        set("enhWait", 0);
+        set("enhResultDeadline", System.currentTimeMillis() - 100L);
+        set("snapRequestId", "req-different-uuid");
+        set("enhRequestId", "req-13-uuid");
+        set("snapTemplateId", 67);
+        set("enhTemplateId", 67);
+        set("snapCategory", 3);
+        set("enhCategory", 3);
+        set("snapBaseName", "Kiem tap");
+        set("enhBaseName", "Kiem tap");
+        set("snapTier", 1);
+        set("enhTier", 1);
+        set("snapExpectedLevel", 0);
+        set("snapTargetLevel", 1);
+        set("snapPaymentType", 0);
+        set("snapRecipeGoldCost", 3000L);
+        set("snapRecipeGemCost", 0L);
+        set("snapRecipeMaterials", new long[]{1L, 1L, 0L, 0L});
+        set("snapResolvedCharmMode", 0);
+        set("snapCharmBefore", 0L);
+        set("snapGoldBefore", 10000L);
+        set("snapGemBefore", 50L);
+        set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
+        bw.V = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
+        cn.g.bD = 7000;
+        cn.g.bC = 50;
+        c.p = new int[]{9, 9, 0, 0};
+        enhanceMethod.invoke(null);
+        check("13.13: Request UUID mismatch enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
+
+        // 13.14: Unchanged target does not become fake failure or fake success
+        call("enhanceReset");
+        setupWorldState(1);
+        c.C = 0;
+        set("enhLastResult", null);
+        set("enhState", 13);
+        set("enhInFlightExecute", true);
+        set("enhWait", 0);
+        set("enhResultDeadline", System.currentTimeMillis() - 100L);
+        set("snapRequestId", "req-13-uuid");
+        set("enhRequestId", "req-13-uuid");
+        set("snapTemplateId", 67);
+        set("enhTemplateId", 67);
+        set("snapCategory", 3);
+        set("enhCategory", 3);
+        set("snapBaseName", "Kiem tap");
+        set("enhBaseName", "Kiem tap");
+        set("snapTier", 1);
+        set("enhTier", 1);
+        set("snapExpectedLevel", 0);
+        set("snapTargetLevel", 1);
+        bw.V = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1));
+        cn.g.bD = 10000;
+        cn.g.bC = 50;
+        enhanceMethod.invoke(null);
+        check("13.14: Unchanged target enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
+        check("13.14: Last result is null", get("enhLastResult") == null);
+        check("13.14: Result code is null (-1)", ((Integer) get("enhResultCode")).intValue() == -1);
+
         System.out.println("=== EnhancementEngineTest Total Failures: " + failures + " ===");
         if (failures > 0) {
             System.exit(1);

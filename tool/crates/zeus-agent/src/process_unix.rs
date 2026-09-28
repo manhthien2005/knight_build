@@ -674,7 +674,7 @@ mod tests {
         let child_d = spawn(leader_with_descendant).expect("spawn leader with descendant");
         assert!(child_d.alive(), "leader must be alive initially");
         assert!(child_d.pgid_alive(), "group must be alive initially");
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(300));
 
         // Stop with 200ms grace: leader terminates on SIGTERM, but descendant ignores SIGTERM.
         // stop() must NOT return Terminated based on leader death; it must escalate to SIGKILL

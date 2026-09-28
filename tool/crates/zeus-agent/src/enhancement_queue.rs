@@ -365,6 +365,12 @@ pub struct EnhancementQueueItemRow {
     pub attempt_settled_at: Option<String>,
     #[serde(default)]
     pub last_result_code: Option<String>,
+    #[serde(default)]
+    pub settlement_source: Option<String>,
+    #[serde(default)]
+    pub reconciled_at: Option<String>,
+    #[serde(default)]
+    pub reconciliation_reason: Option<String>,
 
     // Authoritative item spend
     pub actual_gold_spent: i64,
@@ -425,6 +431,9 @@ impl EnhancementQueueItemRow {
             execute_may_have_been_sent_at: None,
             attempt_settled_at: None,
             last_result_code: None,
+            settlement_source: None,
+            reconciled_at: None,
+            reconciliation_reason: None,
             actual_gold_spent: 0,
             actual_gem_spent: 0,
             actual_material_1_spent: 0,
@@ -661,6 +670,34 @@ pub fn build_settlement_commit_update(
     let new_mat4 = item.actual_material_4_spent.saturating_add(mat4);
     let new_charm = item.actual_charm_spent.saturating_add(telemetry.actual_charms_spent);
 
+    let is_reconciled = telemetry.settlement_provenance.as_deref() == Some("STATE_RECONCILED_SUCCESS")
+        || telemetry.settlement_source.as_deref() == Some("STATE_RECONCILED")
+        || telemetry.last_result.as_deref() == Some("STATE_RECONCILED_SUCCESS");
+
+    let (last_result_code, settlement_source, reconciled_at, reconciliation_reason) = if is_reconciled {
+        (
+            serde_json::Value::Null,
+            serde_json::Value::String("STATE_RECONCILED".to_string()),
+            serde_json::Value::String(crate::supabase_rest::now_rfc3339()),
+            serde_json::Value::String("EXACT_STATE_ADVANCEMENT_MATCH".to_string()),
+        )
+    } else {
+        let code_val = match telemetry.result_code {
+            Some(rc) => serde_json::Value::String(rc.to_string()),
+            None => match telemetry.last_result.as_deref() {
+                Some("SUCCESS") => serde_json::Value::String("3".to_string()),
+                Some(lr) => serde_json::Value::String(lr.to_string()),
+                None => serde_json::Value::Null,
+            },
+        };
+        (
+            code_val,
+            serde_json::Value::String("RESULT_CODE".to_string()),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        )
+    };
+
     let body = serde_json::json!({
         "actual_gold_spent": new_gold,
         "actual_gem_spent": new_gem,
@@ -672,7 +709,10 @@ pub fn build_settlement_commit_update(
         "current_level": telemetry.current_level,
         "attempt_phase": EnhancementAttemptPhase::Settled.as_str(),
         "attempt_settled_at": crate::supabase_rest::now_rfc3339(),
-        "last_result_code": telemetry.last_result,
+        "last_result_code": last_result_code,
+        "settlement_source": settlement_source,
+        "reconciled_at": reconciled_at,
+        "reconciliation_reason": reconciliation_reason,
     });
 
     Ok((path, body))
@@ -1120,7 +1160,12 @@ pub fn tick_account_enhancement_queue(
             let disk_status = crate::enhancement::read_enhancement_status(home_dir);
             let mut settled = false;
             if let Some(status) = disk_status {
-                if status.request_id == attempt.attempt_uuid && status.state == "SUCCESS" {
+                if status.request_id == attempt.attempt_uuid
+                    && (status.state == "SUCCESS"
+                        || status.state == "TARGET_REACHED"
+                        || status.last_result.as_deref() == Some("SUCCESS")
+                        || status.last_result.as_deref() == Some("STATE_RECONCILED_SUCCESS"))
+                {
                     if status.current_level == attempt.expected_level + 1 {
                         if let Ok(items) = rest.fetch_queue_items(&attempt.job_id, account_id) {
                             if let Some(item) = items.iter().find(|i| i.id == attempt.item_id) {
@@ -1865,6 +1910,9 @@ mod tests {
             actual_charms_spent: 1,
             accounting_status: "SETTLED".to_string(),
             validation_only: Some(false),
+            result_code: Some(3),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("RESULT_CODE_SUCCESS".to_string()),
             error_code: None,
             error_message: None,
             updated_at: "2026-09-26T00:01:00Z".to_string(),
@@ -1882,7 +1930,10 @@ mod tests {
         assert_eq!(body["actual_charm_spent"], 1);
         assert_eq!(body["current_level"], 5);
         assert_eq!(body["attempt_phase"], "SETTLED");
-        assert_eq!(body["last_result_code"], "SUCCESS");
+        assert_eq!(body["last_result_code"], "3");
+        assert_eq!(body["settlement_source"], "RESULT_CODE");
+        assert!(body["reconciled_at"].is_null());
+        assert!(body["reconciliation_reason"].is_null());
 
         // 2. Commit once -> CommittedOnce
         let mut settled_row = item.clone();
@@ -2102,6 +2153,9 @@ mod tests {
             actual_charms_spent: 0,
             accounting_status: "SETTLED".to_string(),
             validation_only: Some(false),
+            result_code: Some(3),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("RESULT_CODE_SUCCESS".to_string()),
             error_code: None,
             error_message: None,
             updated_at: "2026-09-26T00:01:00Z".to_string(),
@@ -2182,6 +2236,9 @@ mod tests {
             actual_charms_spent: 0,
             accounting_status: "SETTLED".to_string(),
             validation_only: Some(false),
+            result_code: Some(3),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("RESULT_CODE_SUCCESS".to_string()),
             error_code: None,
             error_message: None,
             updated_at: "2026-09-26T00:01:00Z".to_string(),
@@ -2326,6 +2383,9 @@ mod tests {
             actual_charms_spent: 0,
             accounting_status: "SETTLED".to_string(),
             validation_only: Some(false),
+            result_code: Some(3),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("RESULT_CODE_SUCCESS".to_string()),
             error_code: None,
             error_message: None,
             updated_at: "2026-09-26T00:00:00Z".to_string(),
@@ -2448,6 +2508,9 @@ mod tests {
             actual_charms_spent: 0,
             accounting_status: "SETTLED".to_string(),
             validation_only: Some(false),
+            result_code: Some(3),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("RESULT_CODE_SUCCESS".to_string()),
             error_code: None,
             error_message: None,
             updated_at: "2026-09-26T00:00:00Z".to_string(),
@@ -2620,6 +2683,9 @@ mod tests {
             actual_charms_spent: 0,
             accounting_status: "SETTLED".to_string(),
             validation_only: Some(false),
+            result_code: Some(3),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("RESULT_CODE_SUCCESS".to_string()),
             error_code: None,
             error_message: None,
             updated_at: "2026-09-26T00:00:00Z".to_string(),
@@ -2789,6 +2855,9 @@ mod tests {
                 actual_charms_spent: 0,
                 accounting_status: "IN_PROGRESS".to_string(),
                 validation_only: Some(false),
+                result_code: None,
+                settlement_source: None,
+                settlement_provenance: None,
                 error_code: None,
                 error_message: None,
                 updated_at: "2026-09-26T00:01:00Z".to_string(),
@@ -2865,6 +2934,9 @@ mod tests {
             actual_charms_spent: 0,
             accounting_status: "IN_PROGRESS".to_string(),
             validation_only: Some(false),
+            result_code: None,
+            settlement_source: None,
+            settlement_provenance: None,
             error_code: None,
             error_message: None,
             updated_at: "2026-09-26T00:01:00Z".to_string(),
@@ -2978,6 +3050,9 @@ mod tests {
             actual_charms_spent: 0,
             accounting_status: "IN_PROGRESS".to_string(),
             validation_only: Some(false),
+            result_code: None,
+            settlement_source: None,
+            settlement_provenance: None,
             error_code: None,
             error_message: None,
             updated_at: "2026-09-26T00:02:20Z".to_string(),
@@ -3018,6 +3093,219 @@ mod tests {
             }
             other => panic!("expected ManualReviewRequiredAndFreezeQueue, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_result_code_success_settlement_contract() {
+        let mut item = EnhancementQueueItemRow::mock("it-res-1", "job-1", 1, 0, 0, 1, "RUNNING");
+        item.active_attempt_uuid = Some("att-res-1".to_string());
+        item.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+
+        let telemetry = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: "att-res-1".to_string(),
+            state: "TARGET_REACHED".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm".to_string(),
+            start_level: 0,
+            current_level: 1,
+            target_level: 1,
+            configured_charm_mode: 0,
+            resolved_charm_mode: 0,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("SUCCESS".to_string()),
+            quoted_gold_cost: 3000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![1, 1, 0, 0],
+            actual_gold_spent: 3000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![1, 1, 0, 0],
+            actual_charms_spent: 0,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: Some(false),
+            result_code: Some(3),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("RESULT_CODE_SUCCESS".to_string()),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-28T00:00:00Z".to_string(),
+        };
+
+        let (_path, body) = build_settlement_commit_update(&item, "att-res-1", &telemetry)
+            .expect("must build settlement update");
+
+        // Normal result code success: last_result_code is preserved as "3", settlement_source is "RESULT_CODE"
+        assert_eq!(body["last_result_code"], "3");
+        assert_eq!(body["settlement_source"], "RESULT_CODE");
+        assert!(body["reconciled_at"].is_null());
+        assert!(body["reconciliation_reason"].is_null());
+        assert_eq!(body["actual_gold_spent"], 3000);
+        assert_eq!(body["actual_material_1_spent"], 1);
+        assert_eq!(body["actual_material_2_spent"], 1);
+        assert_eq!(body["current_level"], 1);
+        assert_eq!(body["attempt_phase"], "SETTLED");
+    }
+
+    #[test]
+    fn test_state_reconciled_success_settlement_contract() {
+        let mut item = EnhancementQueueItemRow::mock("it-recon-1", "job-1", 1, 0, 0, 1, "RUNNING");
+        item.active_attempt_uuid = Some("att-recon-1".to_string());
+        item.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+
+        let telemetry = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: "att-recon-1".to_string(),
+            state: "TARGET_REACHED".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm".to_string(),
+            start_level: 0,
+            current_level: 1,
+            target_level: 1,
+            configured_charm_mode: 0,
+            resolved_charm_mode: 0,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("STATE_RECONCILED_SUCCESS".to_string()),
+            quoted_gold_cost: 3000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![1, 1, 0, 0],
+            actual_gold_spent: 3000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![1, 1, 0, 0],
+            actual_charms_spent: 0,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: Some(false),
+            result_code: None, // CRITICAL: NEVER synthesize 3
+            settlement_source: Some("STATE_RECONCILED".to_string()),
+            settlement_provenance: Some("STATE_RECONCILED_SUCCESS".to_string()),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-28T00:00:00Z".to_string(),
+        };
+
+        let (_path, body) = build_settlement_commit_update(&item, "att-recon-1", &telemetry)
+            .expect("must build settlement update");
+
+        // CRITICAL CONTRACT: last_result_code MUST remain null, never fabricated
+        assert!(body["last_result_code"].is_null(), "state reconciled success must keep last_result_code null");
+        assert_eq!(body["settlement_source"], "STATE_RECONCILED");
+        assert!(body["reconciled_at"].is_string(), "reconciled_at timestamp must be populated");
+        assert_eq!(body["reconciliation_reason"], "EXACT_STATE_ADVANCEMENT_MATCH");
+        assert_eq!(body["actual_gold_spent"], 3000);
+        assert_eq!(body["actual_material_1_spent"], 1);
+        assert_eq!(body["actual_material_2_spent"], 1);
+        assert_eq!(body["current_level"], 1);
+        assert_eq!(body["attempt_phase"], "SETTLED");
+
+        // Exactly once settlement check
+        let mut settled_row = item.clone();
+        settled_row.attempt_phase = "SETTLED".to_string();
+        settled_row.actual_gold_spent = 3000;
+        let outcome = evaluate_settlement_commit_result(&[settled_row], "att-recon-1", "EXECUTE_MAY_HAVE_BEEN_SENT");
+        assert_eq!(outcome, SettlementCommitOutcome::CommittedOnce);
+
+        // Duplicate evaluation does not increment again
+        let repeated = evaluate_settlement_commit_result(&[], "att-recon-1", "SETTLED");
+        assert_eq!(repeated, SettlementCommitOutcome::AlreadySettledDoNotIncrementAgain);
+
+        // Restart recovery recognizes ReconcileSettledAttempt for state reconciled telemetry
+        let job = EnhancementQueueJobRow::mock("job-1", "acc-1", "dev-1", "RUNNING", "worker-1");
+        assert_eq!(
+            evaluate_restart_recovery_step(&job, Some(&item), Some(&telemetry)),
+            RestartRecoveryAction::ReconcileSettledAttempt(telemetry)
+        );
+    }
+
+    #[test]
+    fn test_candidate_b_blocked_by_unsettled_candidate_a() {
+        let item_a = EnhancementQueueItemRow::mock("it-a", "job-seq", 1, 0, 0, 1, "MANUAL_REVIEW_REQUIRED");
+        let item_b = EnhancementQueueItemRow::mock("it-b", "job-seq", 2, 1, 0, 1, "PENDING");
+
+        // Candidate A in MANUAL_REVIEW_REQUIRED blocks Candidate B from ever being selected
+        let outcome = select_next_executable_item(&[item_a.clone(), item_b.clone()]);
+        assert_eq!(outcome, ItemSelectionOutcome::HaltedOnManualReview("it-a".to_string()));
+
+        // Only after candidate A is COMPLETED can Candidate B be selected
+        let mut completed_a = item_a.clone();
+        completed_a.status = "COMPLETED".to_string();
+        completed_a.current_level = 1;
+
+        let outcome_completed = select_next_executable_item(&[completed_a, item_b]);
+        assert_eq!(outcome_completed, ItemSelectionOutcome::ProceedWithItem("it-b".to_string()));
+    }
+
+    #[test]
+    fn test_accounting_gold_and_materials_split() {
+        // Test scenario reproducing the historical failure:
+        // Initial gold before route: 100,000
+        // Route cost (teleport to blacksmith): 250 -> balance after route: 99,750
+        // Enhancement cost: 3000 -> balance after enhancement: 96,750
+        // Total balance delta: 100,000 - 96,750 = 3250
+        let initial_gold: i64 = 100_000;
+        let pre_execute_gold: i64 = 99_750;
+        let post_execute_gold: i64 = 96_750;
+
+        let routing_gold = initial_gold - pre_execute_gold;
+        let enhancement_gold = pre_execute_gold - post_execute_gold;
+        let total_delta = initial_gold - post_execute_gold;
+
+        assert_eq!(routing_gold, 250);
+        assert_eq!(enhancement_gold, 3000);
+        assert_eq!(total_delta, 3250);
+        assert_ne!(routing_gold, total_delta, "total delta must not be mislabeled as routing gold");
+
+        // Verify material delta mapping to DB columns
+        let mut item = EnhancementQueueItemRow::mock("it-mat", "job-1", 1, 0, 0, 1, "RUNNING");
+        item.active_attempt_uuid = Some("att-mat".to_string());
+        item.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+
+        let telemetry = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: "att-mat".to_string(),
+            state: "TARGET_REACHED".to_string(),
+            captured_slot: 0,
+            template_id: 67,
+            category: 3,
+            base_name: "Kiếm".to_string(),
+            start_level: 0,
+            current_level: 1,
+            target_level: 1,
+            configured_charm_mode: 0,
+            resolved_charm_mode: 0,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("SUCCESS".to_string()),
+            quoted_gold_cost: 3000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![1, 1, 0, 0],
+            actual_gold_spent: 3000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![1, 1, 0, 0],
+            actual_charms_spent: 0,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: Some(false),
+            result_code: Some(3),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("RESULT_CODE_SUCCESS".to_string()),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-28T00:00:00Z".to_string(),
+        };
+
+        let (_path, body) = build_settlement_commit_update(&item, "att-mat", &telemetry).unwrap();
+        assert_eq!(body["actual_gold_spent"], 3000);
+        assert_eq!(body["actual_material_1_spent"], 1);
+        assert_eq!(body["actual_material_2_spent"], 1);
+        assert_eq!(body["actual_material_3_spent"], 0);
+        assert_eq!(body["actual_material_4_spent"], 0);
     }
 }
 

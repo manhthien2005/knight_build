@@ -174,6 +174,12 @@ pub struct EnhancementStatusTelemetry {
     pub accounting_status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_provenance: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

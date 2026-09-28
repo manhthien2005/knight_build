@@ -766,6 +766,15 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         capabilities: &[
             JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
             JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+        ],
+    },
+    RuntimeContract {
+        name: "ENHANCEMENT_RECONCILED_V14",
+        jar_sha256: JarManifest::ENHANCEMENT_RECONCILED_COMPATIBLE_JAR_SHA256,
+        ctl_version: 14,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
             JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
         ],
     },
@@ -796,6 +805,8 @@ impl JarManifest {
         "17fd277537603d459471def5b92118064619b559e0d90b3ea8f1302174b4183f";
     pub const ENHANCEMENT_DIALOG_OWNED_COMPATIBLE_JAR_SHA256: &'static str =
         "5b8de74dc0135a1cda3cb111297b6f0c4676cdc5e6788e079c610bd59f256072";
+    pub const ENHANCEMENT_RECONCILED_COMPATIBLE_JAR_SHA256: &'static str =
+        "dc6a6548df170c7e674fbb1a27e8a4b1dbff805ac07ec81c3c23b67105b93e6c";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -3326,7 +3337,7 @@ mod tests {
 
         // 7. Test loading actual repository zeus-jar.json
         if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
-            assert_eq!(loaded_manifest.jar_sha256, JarManifest::ENHANCEMENT_DIALOG_OWNED_COMPATIBLE_JAR_SHA256);
+            assert_eq!(loaded_manifest.jar_sha256, JarManifest::ENHANCEMENT_RECONCILED_COMPATIBLE_JAR_SHA256);
             assert_eq!(loaded_manifest.ctl_version, 14);
             assert_eq!(loaded_manifest.ctl_key_count, 37);
             assert!(loaded_manifest.is_character_slot_compatible());
@@ -3545,9 +3556,26 @@ mod tests {
         };
         assert!(manifest_dialog_owned.is_character_slot_compatible(), "dialog_owned must be character-slot compatible");
         assert!(manifest_dialog_owned.is_visual_qol_compatible(), "dialog_owned must be visual-qol compatible");
-        assert!(manifest_dialog_owned.is_enhancement_queue_compatible(), "dialog_owned must be enhancement-queue compatible");
-        assert!(manifest_dialog_owned.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
-        assert_eq!(manifest_dialog_owned.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1");
+        assert!(!manifest_dialog_owned.is_enhancement_queue_compatible(), "old 5b8 JAR must NOT be enhancement-queue compatible");
+        assert!(!manifest_dialog_owned.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
+        assert_eq!(manifest_dialog_owned.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+
+        let manifest_reconciled = JarManifest {
+            jar_sha256: "dc6a6548df170c7e674fbb1a27e8a4b1dbff805ac07ec81c3c23b67105b93e6c".to_string(),
+            jar_size: 1148120,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-28T05:00:00Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(manifest_reconciled.is_character_slot_compatible(), "reconciled must be character-slot compatible");
+        assert!(manifest_reconciled.is_visual_qol_compatible(), "reconciled must be visual-qol compatible");
+        assert!(manifest_reconciled.is_enhancement_queue_compatible(), "reconciled must be enhancement-queue compatible");
+        assert!(manifest_reconciled.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
+        assert_eq!(manifest_reconciled.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1");
 
         // Unknown JAR must fail closed
         let unknown = JarManifest {
@@ -3570,7 +3598,35 @@ mod tests {
 
     #[test]
     fn test_enhancement_queue_v1_capability_matrix() {
-        // 1. Final 5b8 JAR alone receives enhancement-queue-v1
+        // 0. New reconciled dc6a65 JAR receives enhancement-queue-v1
+        let manifest_dc6 = JarManifest {
+            jar_sha256: "dc6a6548df170c7e674fbb1a27e8a4b1dbff805ac07ec81c3c23b67105b93e6c".to_string(),
+            jar_size: 1147500,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-28T05:30:00Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(manifest_dc6.is_character_slot_compatible());
+        assert!(manifest_dc6.is_visual_qol_compatible());
+        assert!(manifest_dc6.is_enhancement_queue_compatible());
+        assert_eq!(
+            manifest_dc6.capabilities(),
+            &[
+                JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+                JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+            ]
+        );
+        assert_eq!(
+            manifest_dc6.advertised_agent_version(),
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1"
+        );
+
+        // 1. Old 5b8 JAR must NO LONGER advertise enhancement-queue-v1
         let manifest_5b8 = JarManifest {
             jar_sha256: "5b8de74dc0135a1cda3cb111297b6f0c4676cdc5e6788e079c610bd59f256072".to_string(),
             jar_size: 1147120,
@@ -3584,18 +3640,17 @@ mod tests {
         };
         assert!(manifest_5b8.is_character_slot_compatible());
         assert!(manifest_5b8.is_visual_qol_compatible());
-        assert!(manifest_5b8.is_enhancement_queue_compatible());
+        assert!(!manifest_5b8.is_enhancement_queue_compatible(), "old 5b8 JAR must no longer advertise enhancement-queue-v1");
         assert_eq!(
             manifest_5b8.capabilities(),
             &[
                 JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
                 JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
-                JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
             ]
         );
         assert_eq!(
             manifest_5b8.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1"
         );
 
         // 2. 99479d does not get enhancement-queue-v1
@@ -3655,7 +3710,7 @@ mod tests {
         assert_eq!(unknown.advertised_agent_version(), "0.1.0");
 
         // 5. Deterministic token order preserved when metadata already had tokens in different order
-        let mut disordered = manifest_5b8.clone();
+        let mut disordered = manifest_dc6.clone();
         disordered.agent_version = "0.1.0+visual-qol-v1.enhancement-queue-v1.character-slot-v1".to_string();
         assert_eq!(
             disordered.advertised_agent_version(),
