@@ -3603,6 +3603,9 @@ public final class Zeus {
                     fu.p.f();
                     enhOwnsResultDialog = false;
                     fu.m();
+                    if (isEnhancementStateTerminal(enhState)) {
+                        cleanEnhancementRouting();
+                    }
                 }
             }
             return;
@@ -4543,9 +4546,26 @@ public final class Zeus {
         return false;
     }
 
+    private static final java.util.Vector processedRequestIds = new java.util.Vector();
     private static String lastEnhRequestId = null;
     private static long enhReqCheckedAt = 0L;
     private static int enhWait = 0;
+    private static int enhTerminalCleanupTicks = 0;
+
+    public static void resetEnhancementDeduplication() {
+        processedRequestIds.removeAllElements();
+        lastEnhRequestId = null;
+    }
+
+    public static int parseEnhancementState(String name) {
+        if (name == null) return -1;
+        for (int i = 0; i <= 39; i++) {
+            if (name.equals(getEnhancementStateName(i))) {
+                return i;
+            }
+        }
+        return -1;
+    }
 
     public static String getEnhancementStateName(int state) {
         switch (state) {
@@ -5167,6 +5187,58 @@ public final class Zeus {
         return false;
     }
 
+    private static void checkRestartRecovery(long now) {
+        if (enhStatusPath == null) return;
+        java.io.File sFile = new java.io.File(enhStatusPath);
+        if (!sFile.exists()) return;
+        String sText = readSmallFile(enhStatusPath);
+        if (sText == null) return;
+        String pReqId = parseJsonString(sText, "request_id");
+        if (pReqId == null || pReqId.length() == 0) return;
+        String pStateStr = parseJsonString(sText, "state");
+        int pState = parseEnhancementState(pStateStr);
+        if (pState < 0) return;
+
+        if (!processedRequestIds.contains(pReqId)) {
+            processedRequestIds.addElement(pReqId);
+        }
+        lastEnhRequestId = pReqId;
+
+        if (isEnhancementStateTerminal(pState)) {
+            enhRequestId = pReqId;
+            enhState = pState;
+            enhCapturedSlot = parseJsonInt(sText, "captured_slot", enhCapturedSlot);
+            enhTemplateId = parseJsonInt(sText, "template_id", enhTemplateId);
+            enhCategory = parseJsonInt(sText, "category", enhCategory);
+            enhBaseName = parseJsonString(sText, "base_name");
+            enhStartLevel = parseJsonInt(sText, "start_level", enhStartLevel);
+            enhCurrentLevel = parseJsonInt(sText, "current_level", enhCurrentLevel);
+            enhTargetLevel = parseJsonInt(sText, "target_level", enhTargetLevel);
+            enhAttemptCount = parseJsonInt(sText, "attempt_count", enhAttemptCount);
+            enhActualGoldSpent = parseJsonLong(sText, "actual_gold_spent", enhActualGoldSpent);
+            enhActualGemSpent = parseJsonLong(sText, "actual_gem_spent", enhActualGemSpent);
+            enhActualCharmsSpent = parseJsonLong(sText, "actual_charms_spent", enhActualCharmsSpent);
+            enhAccountingStatus = parseJsonString(sText, "accounting_status");
+            enhResultCode = parseJsonInt(sText, "result_code", enhResultCode);
+            enhSettlementSource = parseJsonString(sText, "settlement_source");
+            enhSettlementProvenance = parseJsonString(sText, "settlement_provenance");
+            enhLastResult = parseJsonString(sText, "last_result");
+            enhErrorCode = parseJsonString(sText, "error_code");
+            enhErrorMessage = parseJsonString(sText, "error_message");
+            return;
+        }
+
+        if (pState == 12 || pState == 13 || pState == 14) {
+            enhRequestId = pReqId;
+            enhState = 33; // MANUAL_REVIEW_REQUIRED
+            enhErrorCode = "MANUAL_REVIEW_REQUIRED";
+            enhErrorMessage = "Interrupted during in-flight enhancement attempt; manual review required";
+            cleanEnhancementRouting();
+            publishEnhancementStatus();
+            return;
+        }
+    }
+
     private static void enhSidecarTick(long now) {
         if (enhReqPath == null) {
             return;
@@ -5175,6 +5247,11 @@ public final class Zeus {
             return;
         }
         enhReqCheckedAt = now;
+
+        // Check restart recovery from persisted status if uninitialized
+        if (lastEnhRequestId == null) {
+            checkRestartRecovery(now);
+        }
 
         // Check cancellation
         if (enhCancelPath != null) {
@@ -5200,6 +5277,16 @@ public final class Zeus {
         // Check request file
         java.io.File reqFile = new java.io.File(enhReqPath);
         if (!reqFile.exists()) {
+            if (isEnhancementStateTerminal(enhState) && enhOwnsForgeScreen) {
+                if (!enhOwnsResultDialog) {
+                    cleanEnhancementRouting();
+                } else {
+                    enhTerminalCleanupTicks++;
+                    if (enhTerminalCleanupTicks >= 5) {
+                        cleanEnhancementRouting();
+                    }
+                }
+            }
             return;
         }
 
@@ -5213,13 +5300,36 @@ public final class Zeus {
             return;
         }
 
-        // Only start if new request ID and we are currently IDLE or terminal
-        if (reqId.equals(lastEnhRequestId) && enhState != 0 && !isEnhancementStateTerminal(enhState)) {
+        // EXACTLY-ONCE CONTRACT:
+        // Once a request UUID has been accepted, the same UUID must NEVER initialize
+        // a new enhancement attempt in the same JVM lifecycle.
+        // Terminal versus non-terminal state must not weaken this rule.
+        // Repeated reads of the same request file must become no-ops.
+        if (processedRequestIds.contains(reqId) || reqId.equals(lastEnhRequestId)) {
+            if (isEnhancementStateTerminal(enhState)) {
+                if (enhOwnsForgeScreen) {
+                    if (!enhOwnsResultDialog) {
+                        cleanEnhancementRouting();
+                    } else {
+                        enhTerminalCleanupTicks++;
+                        if (enhTerminalCleanupTicks >= 5) {
+                            cleanEnhancementRouting();
+                        }
+                    }
+                }
+            }
             return;
         }
 
+        // A new request UUID cannot interrupt an in-flight non-terminal attempt
+        if (enhState != 0 && !isEnhancementStateTerminal(enhState)) {
+            return;
+        }
+
+        processedRequestIds.addElement(reqId);
         lastEnhRequestId = reqId;
         enhRequestId = reqId;
+        enhTerminalCleanupTicks = 0;
         enhCapturedSlot = parseJsonInt(reqText, "captured_slot", -1);
         enhTemplateId = parseJsonInt(reqText, "template_id", 0);
         enhCategory = parseJsonInt(reqText, "category", 3);
@@ -5281,6 +5391,30 @@ public final class Zeus {
         if (end > start) {
             try {
                 return Integer.parseInt(text.substring(start, end));
+            } catch (Throwable ignored) {
+            }
+        }
+        return def;
+    }
+
+    private static long parseJsonLong(String text, String key, long def) {
+        if (text == null || key == null) return def;
+        String pattern = "\"" + key + "\"";
+        int idx = text.indexOf(pattern);
+        if (idx < 0) return def;
+        int colon = text.indexOf(':', idx + pattern.length());
+        if (colon < 0) return def;
+        int start = colon + 1;
+        while (start < text.length() && Character.isWhitespace(text.charAt(start))) {
+            start++;
+        }
+        int end = start;
+        while (end < text.length() && (Character.isDigit(text.charAt(end)) || text.charAt(end) == '-')) {
+            end++;
+        }
+        if (end > start) {
+            try {
+                return Long.parseLong(text.substring(start, end));
             } catch (Throwable ignored) {
             }
         }
@@ -5796,6 +5930,7 @@ public final class Zeus {
         enhValidationOnlyMalformed = false;
         enhErrorCode = null;
         enhErrorMessage = null;
+        enhTerminalCleanupTicks = 0;
         snapRequestId = null;
         snapTemplateId = 0;
         snapCategory = 3;

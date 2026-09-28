@@ -1193,10 +1193,230 @@ public class EnhancementEngineTest {
         check("13.14: Last result is null", get("enhLastResult") == null);
         check("13.14: Result code is null (-1)", ((Integer) get("enhResultCode")).intValue() == -1);
 
+        // ---------------------------------------------------------------------
+        // Test 14: Same-UUID Exactly-Once & Terminal Monotonicity (ENHANCE-05Q)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 14: Same-UUID exactly-once & terminal monotonicity ---");
+        Method enhSidecarTickMethod = Class.forName("Zeus").getDeclaredMethod("enhSidecarTick", long.class);
+        enhSidecarTickMethod.setAccessible(true);
+
+        java.io.File tempDir = new java.io.File(System.getProperty("java.io.tmpdir"), "zeus_test_" + System.currentTimeMillis());
+        tempDir.mkdirs();
+        java.io.File reqFile = new java.io.File(tempDir, "zeus-enhance.req");
+        java.io.File statusFile = new java.io.File(tempDir, "zeus-enhance-status.json");
+        java.io.File cancelFile = new java.io.File(tempDir, "zeus-enhance.cancel");
+
+        set("enhReqPath", reqFile.getAbsolutePath());
+        set("enhStatusPath", statusFile.getAbsolutePath());
+        set("enhCancelPath", cancelFile.getAbsolutePath());
+        set("enhReqCheckedAt", 0L);
+        call("enhanceReset");
+
+        // 14.1: Same UUID while non-terminal is not reinitialized
+        writeReqFile(reqFile, "uuid-test-14-same", 67, 1, 1);
+        long now = 1000L;
+        enhSidecarTickMethod.invoke(null, now);
+        check("14.1: New request accepted into VALIDATING_REQUEST (1)", ((Integer) get("enhState")).intValue() == 1);
+        set("enhState", 11); // Advance to READY_FOR_ATTEMPT
+        set("enhAttemptCount", 1);
+        now += 300L;
+        enhSidecarTickMethod.invoke(null, now);
+        check("14.1: Same UUID while in-flight is NOT reinitialized (state 11)", ((Integer) get("enhState")).intValue() == 11);
+        check("14.1: attempt_count preserved at 1", ((Integer) get("enhAttemptCount")).intValue() == 1);
+
+        // 14.2: Same UUID after TARGET_REACHED is not reinitialized
+        set("enhState", 17); // TARGET_REACHED
+        set("enhAttemptCount", 1);
+        set("enhActualGoldSpent", 3000L);
+        set("enhActualGemSpent", 0L);
+        set("enhActualCharmsSpent", 0L);
+        set("enhActualMaterialsSpent", new long[]{1L, 1L, 0L, 0L});
+        set("enhAccountingStatus", "SETTLED");
+        set("enhResultCode", 3);
+        set("enhSettlementProvenance", "RESULT_CODE_SUCCESS");
+        set("enhSettlementSource", "RESULT_CODE");
+        set("enhLastResult", "SUCCESS");
+        set("enhCurrentLevel", 1);
+        call("publishEnhancementStatus");
+
+        // Request file STILL exists on disk with same UUID "uuid-test-14-same"
+        now += 300L;
+        enhSidecarTickMethod.invoke(null, now);
+        check("14.2: Same UUID after TARGET_REACHED does NOT reinitialize to VALIDATING_REQUEST", ((Integer) get("enhState")).intValue() == 17);
+        check("14.2: attempt_count remains 1 after tick", ((Integer) get("enhAttemptCount")).intValue() == 1);
+        check("14.2: actual gold spent remains 3000", ((Long) get("enhActualGoldSpent")).longValue() == 3000L);
+        check("14.2: result_code remains 3", ((Integer) get("enhResultCode")).intValue() == 3);
+        check("14.2: settlement provenance remains RESULT_CODE_SUCCESS", "RESULT_CODE_SUCCESS".equals(get("enhSettlementProvenance")));
+        check("14.2: current_level remains 1", ((Integer) get("enhCurrentLevel")).intValue() == 1);
+        // 14.3: Terminal TARGET_REACHED remains stable over multiple sidecar ticks
+        for (int t = 0; t < 5; t++) {
+            now += 300L;
+            enhSidecarTickMethod.invoke(null, now);
+        }
+        check("14.3: Terminal TARGET_REACHED stable over multiple ticks", ((Integer) get("enhState")).intValue() == 17);
+        check("14.3: attempt_count stable over multiple ticks", ((Integer) get("enhAttemptCount")).intValue() == 1);
+        String sJson = readStatusJson(statusFile);
+        check("14.3: Status file on disk has TARGET_REACHED", sJson != null && sJson.contains("\"TARGET_REACHED\""));
+        check("14.3: Status file on disk has result_code 3", sJson != null && sJson.contains("\"result_code\": 3"));
+        check("14.3: Status file on disk has attempt_count 1", sJson != null && sJson.contains("\"attempt_count\": 1"));
+
+        // 14.4: Same UUID after terminal failure is not reinitialized
+        set("enhState", 18); // ATTEMPT_LIMIT_REACHED
+        set("enhLastResult", "ATTEMPT_LIMIT_REACHED");
+        call("publishEnhancementStatus");
+        now += 300L;
+        enhSidecarTickMethod.invoke(null, now);
+        check("14.4: Same UUID after ATTEMPT_LIMIT_REACHED is NOT reinitialized (18)", ((Integer) get("enhState")).intValue() == 18);
+
+        // 14.5: Distinct new UUID can start after previous lifecycle is complete
+        writeReqFile(reqFile, "uuid-test-14-brand-new", 67, 1, 1);
+        now += 300L;
+        enhSidecarTickMethod.invoke(null, now);
+        check("14.5: Genuinely new UUID transitions to VALIDATING_REQUEST (1)", ((Integer) get("enhState")).intValue() == 1);
+        check("14.5: New request ID adopted", "uuid-test-14-brand-new".equals(get("enhRequestId")));
+
+        // 14.6: Forge cleanup after terminal does not overwrite status
+        set("enhState", 17); // TARGET_REACHED
+        set("enhOwnsForgeScreen", true);
+        set("enhOwnsResultDialog", false);
+        call("cleanEnhancementRouting");
+        check("14.6: Forge ownership cleared by cleanup", !((Boolean) get("enhOwnsForgeScreen")).booleanValue());
+        check("14.6: Status remains TARGET_REACHED (17)", ((Integer) get("enhState")).intValue() == 17);
+
+        // 14.7: Owned result-dialog cleanup sends zero Opcode 67
+        clearQueue();
+        set("enhOwnsForgeScreen", true);
+        set("enhOwnsResultDialog", true);
+        fu.p.a = true;
+        fr.d = 1;
+        dialogRecoveryMethod.invoke(null);
+        check("14.7: Dialog dismissal emits zero packets", queue().size() == 0);
+
+        // ---------------------------------------------------------------------
+        // Test 15: Cross-Restart Stale Replay Protection (ENHANCE-05Q)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 15: Cross-restart stale replay protection ---");
+        // 15.1: Restart with terminal status for same UUID prevents stale re-execution
+        call("enhanceReset");
+        set("lastEnhRequestId", null);
+        set("enhState", 0);
+        call("resetEnhancementDeduplication");
+
+        writeReqFile(reqFile, "uuid-test-15-terminal", 67, 1, 1);
+        String termStatusJson = "{\n"
+            + "  \"version\": 1,\n"
+            + "  \"request_id\": \"uuid-test-15-terminal\",\n"
+            + "  \"state\": \"TARGET_REACHED\",\n"
+            + "  \"captured_slot\": 0,\n"
+            + "  \"template_id\": 67,\n"
+            + "  \"category\": 3,\n"
+            + "  \"base_name\": \"Kiem tap\",\n"
+            + "  \"start_level\": 0,\n"
+            + "  \"current_level\": 1,\n"
+            + "  \"target_level\": 1,\n"
+            + "  \"attempt_count\": 1,\n"
+            + "  \"quoted_gold_cost\": 3000,\n"
+            + "  \"quoted_gem_cost\": 0,\n"
+            + "  \"quoted_material_requirements\": [1, 1, 0, 0],\n"
+            + "  \"actual_gold_spent\": 3000,\n"
+            + "  \"actual_gem_spent\": 0,\n"
+            + "  \"actual_materials_spent\": [1, 1, 0, 0],\n"
+            + "  \"actual_charms_spent\": 0,\n"
+            + "  \"accounting_status\": \"SETTLED\",\n"
+            + "  \"result_code\": 3,\n"
+            + "  \"settlement_source\": \"RESULT_CODE\",\n"
+            + "  \"settlement_provenance\": \"RESULT_CODE_SUCCESS\",\n"
+            + "  \"updated_at\": \"2026-09-28T05:00:00Z\"\n"
+            + "}\n";
+        java.io.FileOutputStream fos = new java.io.FileOutputStream(statusFile);
+        fos.write(termStatusJson.getBytes("UTF-8"));
+        fos.close();
+
+        now += 300L;
+        enhSidecarTickMethod.invoke(null, now);
+        check("15.1: Restart with terminal status does NOT re-enter VALIDATING_REQUEST", ((Integer) get("enhState")).intValue() != 1);
+        check("15.1: Terminal state TARGET_REACHED preserved across restart", ((Integer) get("enhState")).intValue() == 17);
+        check("15.1: Terminal result_code preserved (3)", ((Integer) get("enhResultCode")).intValue() == 3);
+
+        // 15.2: Restart with post-fence non-terminal status enters MANUAL_REVIEW_REQUIRED (33)
+        call("enhanceReset");
+        set("lastEnhRequestId", null);
+        set("enhState", 0);
+        call("resetEnhancementDeduplication");
+
+        writeReqFile(reqFile, "uuid-test-15-postfence", 67, 1, 1);
+        String postFenceStatusJson = "{\n"
+            + "  \"version\": 1,\n"
+            + "  \"request_id\": \"uuid-test-15-postfence\",\n"
+            + "  \"state\": \"WAITING_RESULT\",\n"
+            + "  \"captured_slot\": 0,\n"
+            + "  \"template_id\": 67,\n"
+            + "  \"category\": 3,\n"
+            + "  \"base_name\": \"Kiem tap\",\n"
+            + "  \"start_level\": 0,\n"
+            + "  \"current_level\": 0,\n"
+            + "  \"target_level\": 1,\n"
+            + "  \"attempt_count\": 1,\n"
+            + "  \"quoted_gold_cost\": 3000,\n"
+            + "  \"quoted_gem_cost\": 0,\n"
+            + "  \"quoted_material_requirements\": [1, 1, 0, 0],\n"
+            + "  \"actual_gold_spent\": 0,\n"
+            + "  \"actual_gem_spent\": 0,\n"
+            + "  \"actual_materials_spent\": [0, 0, 0, 0],\n"
+            + "  \"actual_charms_spent\": 0,\n"
+            + "  \"accounting_status\": \"PENDING\",\n"
+            + "  \"updated_at\": \"2026-09-28T05:00:00Z\"\n"
+            + "}\n";
+        fos = new java.io.FileOutputStream(statusFile);
+        fos.write(postFenceStatusJson.getBytes("UTF-8"));
+        fos.close();
+
+        clearQueue();
+        now += 300L;
+        enhSidecarTickMethod.invoke(null, now);
+        check("15.2: Post-fence restart transitions to MANUAL_REVIEW_REQUIRED (33)", ((Integer) get("enhState")).intValue() == 33);
+        check("15.2: Post-fence restart emits ZERO Opcode 67 packets", queue().size() == 0);
+
+        // 15.3: Genuinely new request UUID after restart is accepted
+        writeReqFile(reqFile, "uuid-test-15-brand-new", 67, 1, 1);
+        now += 300L;
+        enhSidecarTickMethod.invoke(null, now);
+        check("15.3: Genuinely new UUID after restart accepted into VALIDATING_REQUEST (1)", ((Integer) get("enhState")).intValue() == 1);
+        check("15.3: New UUID adopted", "uuid-test-15-brand-new".equals(get("enhRequestId")));
+
         System.out.println("=== EnhancementEngineTest Total Failures: " + failures + " ===");
         if (failures > 0) {
             System.exit(1);
         }
+    }
+
+    static void writeReqFile(java.io.File file, String reqId, int templateId, int targetLevel, int maxAttempts) throws Exception {
+        String json = "{\n"
+            + "  \"request_id\": \"" + reqId + "\",\n"
+            + "  \"captured_slot\": 0,\n"
+            + "  \"template_id\": " + templateId + ",\n"
+            + "  \"category\": 3,\n"
+            + "  \"base_name\": \"Kiem tap\",\n"
+            + "  \"tier\": 1,\n"
+            + "  \"expected_level\": 0,\n"
+            + "  \"target_level\": " + targetLevel + ",\n"
+            + "  \"charm_mode\": 0,\n"
+            + "  \"payment_type\": 0,\n"
+            + "  \"max_attempts\": " + maxAttempts + ",\n"
+            + "  \"validation_only\": false\n"
+            + "}\n";
+        java.io.FileOutputStream fos = new java.io.FileOutputStream(file);
+        fos.write(json.getBytes("UTF-8"));
+        fos.close();
+    }
+
+    static String readStatusJson(java.io.File file) throws Exception {
+        if (!file.exists()) return null;
+        java.io.FileInputStream fis = new java.io.FileInputStream(file);
+        byte[] b = new byte[(int) file.length()];
+        int read = fis.read(b);
+        fis.close();
+        return new String(b, 0, read, "UTF-8");
     }
 
     static ev makeForgePopup() {
