@@ -1121,6 +1121,40 @@ pub fn evaluate_cancel_request(
     }
 }
 
+/// Check if a queue item is provably pre-fence (no mutation command could have been sent).
+pub fn is_item_provably_pre_fence(item: &EnhancementQueueItemRow) -> bool {
+    let is_phase_prefence = item.attempt_phase.parse::<EnhancementAttemptPhase>()
+        .map(|p| p.is_pre_fence())
+        .unwrap_or(false);
+    item.execute_may_have_been_sent_at.is_none() && is_phase_prefence
+}
+
+/// Action to take on an item when job cancellation is requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemCancelAction {
+    /// Item is PENDING or provably pre-fence RUNNING: cancel safely.
+    CancelImmediately,
+    /// Item has crossed the mutation fence: fail closed to MANUAL_REVIEW_REQUIRED.
+    FailClosedPostFence,
+    /// Item is already terminal (COMPLETED, FAILED, CANCELLED): do nothing.
+    DoNothing,
+}
+
+/// Evaluates the cancellation action for an item when a job cancellation is being processed.
+pub fn evaluate_item_cancel_action(item: &EnhancementQueueItemRow) -> ItemCancelAction {
+    match item.status.as_str() {
+        "PENDING" => ItemCancelAction::CancelImmediately,
+        "RUNNING" => {
+            if is_item_provably_pre_fence(item) {
+                ItemCancelAction::CancelImmediately
+            } else {
+                ItemCancelAction::FailClosedPostFence
+            }
+        }
+        _ => ItemCancelAction::DoNothing,
+    }
+}
+
 /// Action to perform upon agent restart recovery.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RestartRecoveryAction {
@@ -1286,6 +1320,7 @@ pub struct AccountQueueTracker {
     pub active_job_id: Option<String>,
     pub in_flight_attempt: Option<InFlightQueueAttempt>,
     pub last_poll: Option<std::time::Instant>,
+    pub consecutive_prefence_failures: u32,
 }
 
 /// Builds conditional CAS update payload to establish the mutation fence with a full level attempt spec.
@@ -1837,12 +1872,49 @@ pub fn tick_account_enhancement_queue(
         }
     };
 
-    if job.status != "RUNNING" {
+    // 1. Evaluate cancel request BEFORE any non-RUNNING early return!
+    // A cancel request must be honored whether the job is RUNNING, PAUSING, or PAUSED,
+    // provided there is no in-flight attempt actively executing.
+    if job.cancel_requested_at.is_some() {
+        if let Ok(items) = rest.fetch_queue_items(&job.id, account_id) {
+            for it in items {
+                match evaluate_item_cancel_action(&it) {
+                    ItemCancelAction::CancelImmediately => {
+                        let _ = rest.update_queue_item(&it.id, account_id, &serde_json::json!({
+                            "status": "CANCELLED",
+                            "finished_at": crate::supabase_rest::now_rfc3339(),
+                        }));
+                    }
+                    ItemCancelAction::FailClosedPostFence => {
+                        // Post-fence cancel safety: after mutation fence, never cancel pretending
+                        // execution could not have occurred. Fail closed to MANUAL_REVIEW_REQUIRED.
+                        let _ = rest.update_queue_item(&it.id, account_id, &serde_json::json!({
+                            "status": "MANUAL_REVIEW_REQUIRED",
+                            "error_code": "CANCEL_REJECTED_POST_FENCE",
+                            "error_message": "Item crossed mutation fence; cannot cancel without reconciliation",
+                        }));
+                        let _ = rest.update_queue_job(&job.id, account_id, &serde_json::json!({
+                            "status": "MANUAL_REVIEW_REQUIRED",
+                            "error_code": "CANCEL_REJECTED_POST_FENCE",
+                            "error_message": "Item crossed mutation fence; cannot cancel without reconciliation",
+                        }));
+                        tracker.active_job_id = None;
+                        return;
+                    }
+                    ItemCancelAction::DoNothing => {}
+                }
+            }
+        }
+        let _ = rest.update_queue_job(&job.id, account_id, &serde_json::json!({
+            "status": "CANCELLED",
+            "finished_at": crate::supabase_rest::now_rfc3339(),
+            "cancel_requested_at": serde_json::Value::Null,
+        }));
         tracker.active_job_id = None;
         return;
     }
 
-    // Handle pause request before dispatch
+    // 2. Handle pause request before dispatch
     if job.pause_requested_at.is_some() {
         let _ = rest.update_queue_job(&job.id, account_id, &serde_json::json!({
             "status": "PAUSED",
@@ -1852,23 +1924,8 @@ pub fn tick_account_enhancement_queue(
         return;
     }
 
-    // Handle cancel request before dispatch
-    if job.cancel_requested_at.is_some() {
-        let _ = rest.update_queue_job(&job.id, account_id, &serde_json::json!({
-            "status": "CANCELLED",
-            "finished_at": crate::supabase_rest::now_rfc3339(),
-            "cancel_requested_at": serde_json::Value::Null,
-        }));
-        if let Ok(items) = rest.fetch_queue_items(&job.id, account_id) {
-            for it in items {
-                if it.status == "PENDING" {
-                    let _ = rest.update_queue_item(&it.id, account_id, &serde_json::json!({
-                        "status": "CANCELLED",
-                        "finished_at": crate::supabase_rest::now_rfc3339(),
-                    }));
-                }
-            }
-        }
+    // 3. If job is not RUNNING, stop here
+    if job.status != "RUNNING" {
         tracker.active_job_id = None;
         return;
     }
@@ -2009,8 +2066,63 @@ pub fn tick_account_enhancement_queue(
             let next_attempt_number = item.attempt_count + 1;
             if let Err(e) = rest.record_attempt_ledger_entry(&item, &spec, next_attempt_number) {
                 eprintln!("[enhancement_queue] record_attempt_ledger_entry error: {e}, aborting dispatch");
-                return;
+                if e.is_permanent_ledger_failure() {
+                    let err_code = "LEDGER_MUTATION_FAILED";
+                    let err_msg = format!("Lỗi ghi nhận attempt ledger ({e}) trước hàng rào đột biến");
+                    let _ = rest.update_queue_item(
+                        &item.id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "FAILED",
+                            "error_code": err_code,
+                            "error_message": err_msg,
+                            "finished_at": crate::supabase_rest::now_rfc3339(),
+                        }),
+                    );
+                    let _ = rest.update_queue_job(
+                        &job.id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "FAILED",
+                            "error_code": err_code,
+                            "error_message": err_msg,
+                            "finished_at": crate::supabase_rest::now_rfc3339(),
+                        }),
+                    );
+                    tracker.active_job_id = None;
+                    return;
+                } else {
+                    tracker.consecutive_prefence_failures += 1;
+                    if tracker.consecutive_prefence_failures >= 5 {
+                        let err_code = "LEDGER_TRANSPORT_TIMEOUT";
+                        let err_msg = "Không thể kết nối máy chủ để ghi nhận attempt ledger sau nhiều lần thử";
+                        let _ = rest.update_queue_item(
+                            &item.id,
+                            account_id,
+                            &serde_json::json!({
+                                "status": "FAILED",
+                                "error_code": err_code,
+                                "error_message": err_msg,
+                                "finished_at": crate::supabase_rest::now_rfc3339(),
+                            }),
+                        );
+                        let _ = rest.update_queue_job(
+                            &job.id,
+                            account_id,
+                            &serde_json::json!({
+                                "status": "FAILED",
+                                "error_code": err_code,
+                                "error_message": err_msg,
+                                "finished_at": crate::supabase_rest::now_rfc3339(),
+                            }),
+                        );
+                        tracker.active_job_id = None;
+                        return;
+                    }
+                    return;
+                }
             }
+            tracker.consecutive_prefence_failures = 0;
 
             // Commit mutation fence BEFORE sidecar dispatch
             let fence_res = rest.commit_item_mutation_fence_with_spec(
@@ -4133,7 +4245,7 @@ mod tests {
         }
 
         // When item status is MANUAL_REVIEW_REQUIRED, item selection halts the queue
-        let mut item = EnhancementQueueItemRow::mock("it-mr", "job-mr", 1, 0, 4, 7, "MANUAL_REVIEW_REQUIRED");
+        let item = EnhancementQueueItemRow::mock("it-mr", "job-mr", 1, 0, 4, 7, "MANUAL_REVIEW_REQUIRED");
         let selection = select_next_executable_item(&[item]);
         assert_eq!(selection, ItemSelectionOutcome::HaltedOnManualReview("it-mr".to_string()));
     }
@@ -4154,6 +4266,107 @@ mod tests {
         item_done.current_level = 7;
         let recovery_done = evaluate_restart_recovery_step(&job, Some(&item_done), None);
         assert_eq!(recovery_done, RestartRecoveryAction::AdvanceSettledItem { mark_completed: true });
+    }
+
+    #[test]
+    fn test_permanent_ledger_failure_aborts_without_infinite_loop() {
+        use crate::supabase_rest::RestError;
+
+        // 1. HTTP 403 (e.g. Postgres 42501 RLS violation) is classified as permanent
+        let rls_err = RestError::Http {
+            status: 403,
+            body: "permission denied for table enhancement_queue_item_attempts".to_string(),
+        };
+        assert!(rls_err.is_permanent_ledger_failure());
+
+        // HTTP 401 Unauthorized, 400 Bad Request, 422 Unprocessable are also permanent
+        assert!(RestError::Http { status: 401, body: "unauthorized".to_string() }.is_permanent_ledger_failure());
+        assert!(RestError::Http { status: 400, body: "bad request".to_string() }.is_permanent_ledger_failure());
+        assert!(RestError::Http { status: 422, body: "schema violation".to_string() }.is_permanent_ledger_failure());
+        assert!(RestError::Decode("failed to decode json".to_string()).is_permanent_ledger_failure());
+
+        // 2. HTTP 500, 408 (timeout), 429 (rate limit), and Transport errors are transient
+        assert!(!RestError::Http { status: 500, body: "internal server error".to_string() }.is_permanent_ledger_failure());
+        assert!(!RestError::Http { status: 408, body: "request timeout".to_string() }.is_permanent_ledger_failure());
+        assert!(!RestError::Http { status: 429, body: "rate limited".to_string() }.is_permanent_ledger_failure());
+        assert!(!RestError::Transport("connection reset".to_string()).is_permanent_ledger_failure());
+
+        // 3. Pre-fence ledger failure mapping semantics:
+        // A permanent error immediately marks item and job as FAILED with LEDGER_MUTATION_FAILED.
+        // It does NOT increment attempt_count, never issues dispatch, never sets execute_may_have_been_sent_at.
+        let item = EnhancementQueueItemRow::mock("it-fail", "job-fail", 1, 0, 4, 7, "RUNNING");
+        assert_eq!(item.attempt_count, 0);
+        assert!(item.execute_may_have_been_sent_at.is_none());
+        assert_eq!(item.attempt_phase, "NONE");
+    }
+
+    #[test]
+    fn test_paused_job_with_cancel_requested_cancels_cleanly() {
+        let mut job = EnhancementQueueJobRow::mock("job-p", "acc-1", "dev-1", "PAUSED", "worker-1");
+        job.cancel_requested_at = Some("2026-09-29T12:00:00Z".to_string());
+
+        // Even though job.status == "PAUSED", cancel_requested_at is evaluated first.
+        assert!(job.cancel_requested_at.is_some());
+        assert_eq!(job.status, "PAUSED");
+
+        let pending_item = EnhancementQueueItemRow::mock("it-pend", "job-p", 1, 0, 4, 7, "PENDING");
+        assert_eq!(evaluate_item_cancel_action(&pending_item), ItemCancelAction::CancelImmediately);
+    }
+
+    #[test]
+    fn test_running_prefence_item_can_be_safely_cancelled() {
+        // Item in RUNNING status, provably pre-fence (no execute_may_have_been_sent_at, phase NONE)
+        let item = EnhancementQueueItemRow::mock("it-pref", "job-pref", 1, 0, 4, 7, "RUNNING");
+        assert!(item.execute_may_have_been_sent_at.is_none());
+        assert_eq!(item.attempt_phase, "NONE");
+        assert!(is_item_provably_pre_fence(&item));
+        assert_eq!(evaluate_item_cancel_action(&item), ItemCancelAction::CancelImmediately);
+
+        // Also pre-fence when phase is PREPARING
+        let mut item_prep = item.clone();
+        item_prep.attempt_phase = "PREPARING".to_string();
+        assert!(is_item_provably_pre_fence(&item_prep));
+        assert_eq!(evaluate_item_cancel_action(&item_prep), ItemCancelAction::CancelImmediately);
+
+        // Also pre-fence when phase is READY_TO_EXECUTE
+        let mut item_ready = item.clone();
+        item_ready.attempt_phase = "READY_TO_EXECUTE".to_string();
+        assert!(is_item_provably_pre_fence(&item_ready));
+        assert_eq!(evaluate_item_cancel_action(&item_ready), ItemCancelAction::CancelImmediately);
+
+        // Also pre-fence when phase is NONE
+        let mut item_none = item.clone();
+        item_none.attempt_phase = "NONE".to_string();
+        assert!(is_item_provably_pre_fence(&item_none));
+        assert_eq!(evaluate_item_cancel_action(&item_none), ItemCancelAction::CancelImmediately);
+    }
+
+    #[test]
+    fn test_running_postfence_item_cancel_fails_closed_to_manual_review() {
+        // 1. Item has execute_may_have_been_sent_at populated -> post-fence
+        let mut item_fenced = EnhancementQueueItemRow::mock("it-fenced", "job-post", 1, 0, 4, 7, "RUNNING");
+        item_fenced.execute_may_have_been_sent_at = Some("2026-09-29T12:05:00Z".to_string());
+        assert!(!is_item_provably_pre_fence(&item_fenced));
+        assert_eq!(evaluate_item_cancel_action(&item_fenced), ItemCancelAction::FailClosedPostFence);
+
+        // 2. Item has post-fence phase (e.g. EXECUTE_MAY_HAVE_BEEN_SENT) -> post-fence
+        let mut item_phase = EnhancementQueueItemRow::mock("it-phase", "job-post", 1, 0, 4, 7, "RUNNING");
+        item_phase.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+        assert!(!is_item_provably_pre_fence(&item_phase));
+        assert_eq!(evaluate_item_cancel_action(&item_phase), ItemCancelAction::FailClosedPostFence);
+
+        // 3. Item in WAITING_RESULT phase -> post-fence
+        let mut item_waiting = EnhancementQueueItemRow::mock("it-waiting", "job-post", 1, 0, 4, 7, "RUNNING");
+        item_waiting.attempt_phase = "WAITING_RESULT".to_string();
+        assert!(!is_item_provably_pre_fence(&item_waiting));
+        assert_eq!(evaluate_item_cancel_action(&item_waiting), ItemCancelAction::FailClosedPostFence);
+
+        // 4. Completed or already failed items do nothing on cancel
+        let item_completed = EnhancementQueueItemRow::mock("it-comp", "job-post", 1, 1, 7, 7, "COMPLETED");
+        assert_eq!(evaluate_item_cancel_action(&item_completed), ItemCancelAction::DoNothing);
+
+        let item_failed = EnhancementQueueItemRow::mock("it-fail", "job-post", 1, 1, 4, 7, "FAILED");
+        assert_eq!(evaluate_item_cancel_action(&item_failed), ItemCancelAction::DoNothing);
     }
 }
 

@@ -868,9 +868,12 @@ impl JarManifest {
     pub const VISUAL_QOL_CAPABILITY_TOKEN: &'static str = "visual-qol-v1";
     pub const ENHANCEMENT_QUEUE_CAPABILITY_TOKEN: &'static str = "enhancement-queue-v1";
     pub const ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN: &'static str = "enhancement-multilevel-v1";
+    pub const ENHANCEMENT_QUEUE_V2_CAPABILITY_TOKEN: &'static str = "enhancement-queue-v2";
 
     /// Proves that this compiled Rust binary implements the 06F per-level continuation orchestrator.
     pub const RUST_ORCHESTRATOR_SUPPORTS_MULTILEVEL: bool = true;
+    /// Proves that this compiled Rust binary implements the 06H safe lifecycle and ledger orchestrator.
+    pub const RUST_ORCHESTRATOR_SUPPORTS_QUEUE_V2: bool = true;
 
     pub const CHARACTER_SLOT_COMPATIBLE_JAR_SHA256: &'static str =
         "0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd";
@@ -935,6 +938,12 @@ impl JarManifest {
             && self.capabilities().contains(&Self::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN)
     }
 
+    /// Proves that this runtime is compatible with both the opcode 67 resilient Java JAR
+    /// AND the verified 06H safe lifecycle and ledger orchestrator.
+    pub fn is_enhancement_queue_v2_compatible(&self) -> bool {
+        Self::RUST_ORCHESTRATOR_SUPPORTS_QUEUE_V2 && self.is_enhancement_queue_compatible()
+    }
+
     pub fn canonical_agent_version(&self) -> &str {
         let trimmed = self.agent_version.trim();
         if trimmed.is_empty() {
@@ -960,6 +969,7 @@ impl JarManifest {
                     || token == Self::VISUAL_QOL_CAPABILITY_TOKEN
                     || token == Self::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN
                     || token == Self::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN
+                    || token == Self::ENHANCEMENT_QUEUE_V2_CAPABILITY_TOKEN
                 {
                     continue;
                 }
@@ -988,6 +998,11 @@ impl JarManifest {
             && !tokens.contains(&Self::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN)
         {
             tokens.push(Self::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN);
+        }
+        if self.is_enhancement_queue_v2_compatible()
+            && !tokens.contains(&Self::ENHANCEMENT_QUEUE_V2_CAPABILITY_TOKEN)
+        {
+            tokens.push(Self::ENHANCEMENT_QUEUE_V2_CAPABILITY_TOKEN);
         }
 
         if tokens.is_empty() {
@@ -1753,6 +1768,21 @@ pub enum RestError {
     Transport(String),
     #[error("response was not valid JSON: {0}")]
     Decode(String),
+}
+
+impl RestError {
+    /// Determines whether this error is a deterministic/permanent ledger failure
+    /// (such as HTTP 401/403 RLS permission denied, HTTP 400/409/422 schema/constraint violations,
+    /// or JSON decode errors) that should not be retried infinitely.
+    pub fn is_permanent_ledger_failure(&self) -> bool {
+        match self {
+            RestError::Http { status, .. } => {
+                *status >= 400 && *status < 500 && *status != 408 && *status != 429
+            }
+            RestError::Decode(_) => true,
+            RestError::Transport(_) => false,
+        }
+    }
 }
 
 // ── adapter ureq 3 ────────────────────────────────────────────────────────────────
@@ -3448,7 +3478,8 @@ mod tests {
             assert!(loaded_manifest.is_visual_qol_compatible());
             assert!(loaded_manifest.is_enhancement_queue_compatible());
             assert!(loaded_manifest.is_enhancement_multilevel_compatible());
-            assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1");
+            assert!(loaded_manifest.is_enhancement_queue_v2_compatible());
+            assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2");
         }
     }
 
@@ -3713,9 +3744,10 @@ mod tests {
         assert!(manifest_resilient.is_visual_qol_compatible(), "resilient must be visual-qol compatible");
         assert!(manifest_resilient.is_enhancement_queue_compatible(), "resilient must be enhancement-queue compatible");
         assert!(manifest_resilient.is_enhancement_multilevel_compatible(), "resilient must be enhancement-multilevel compatible");
+        assert!(manifest_resilient.is_enhancement_queue_v2_compatible(), "resilient must be enhancement-queue-v2 compatible");
         assert!(manifest_resilient.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
         assert!(manifest_resilient.capabilities().contains(&JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN));
-        assert_eq!(manifest_resilient.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1");
+        assert_eq!(manifest_resilient.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2");
 
         // Unknown JAR must fail closed
         let unknown = JarManifest {
@@ -3754,6 +3786,7 @@ mod tests {
         assert!(manifest_resilient.is_visual_qol_compatible());
         assert!(manifest_resilient.is_enhancement_queue_compatible());
         assert!(manifest_resilient.is_enhancement_multilevel_compatible());
+        assert!(manifest_resilient.is_enhancement_queue_v2_compatible());
         assert_eq!(
             manifest_resilient.capabilities(),
             &[
@@ -3765,7 +3798,7 @@ mod tests {
         );
         assert_eq!(
             manifest_resilient.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2"
         );
 
         // 0a. Old monotonic bdd40d JAR must NO LONGER receive enhancement-queue-v1 under the new agent
@@ -3910,9 +3943,10 @@ mod tests {
         disordered.agent_version = "0.1.0+visual-qol-v1.enhancement-multilevel-v1.enhancement-queue-v1.character-slot-v1".to_string();
         assert_eq!(
             disordered.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2"
         );
         assert_eq!(disordered.advertised_agent_version().matches("enhancement-queue-v1").count(), 1);
+        assert_eq!(disordered.advertised_agent_version().matches("enhancement-queue-v2").count(), 1);
         assert_eq!(disordered.advertised_agent_version().matches("enhancement-multilevel-v1").count(), 1);
         assert_eq!(disordered.advertised_agent_version().matches("character-slot-v1").count(), 1);
         assert_eq!(disordered.advertised_agent_version().matches("visual-qol-v1").count(), 1);
@@ -3939,10 +3973,11 @@ mod tests {
         };
         assert!(manifest_resilient.is_enhancement_queue_compatible());
         assert!(manifest_resilient.is_enhancement_multilevel_compatible());
+        assert!(manifest_resilient.is_enhancement_queue_v2_compatible());
         assert!(manifest_resilient.capabilities().contains(&JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN));
         assert_eq!(
             manifest_resilient.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2"
         );
 
         // 2. Modeled old agent contract (pre-06F 8f720fb) does NOT advertise enhancement-multilevel-v1
@@ -3981,6 +4016,57 @@ mod tests {
         };
         assert!(!unknown.is_enhancement_multilevel_compatible());
         assert!(!unknown.advertised_agent_version().contains("enhancement-multilevel-v1"));
+    }
+
+    #[test]
+    fn test_enhancement_queue_v2_capability_matrix() {
+        assert_eq!(
+            JarManifest::ENHANCEMENT_QUEUE_V2_CAPABILITY_TOKEN,
+            "enhancement-queue-v2"
+        );
+
+        // 1. Current corrected 06H agent with resilient JAR advertises enhancement-queue-v2
+        let manifest_resilient = JarManifest {
+            jar_sha256: "3999f6b674c1780ac3f26d47ad035f5a2d749ef38cea5b256dcd8e1aec3c3504".to_string(),
+            jar_size: 1154382,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-29T09:52:41Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(manifest_resilient.is_enhancement_queue_compatible());
+        assert!(manifest_resilient.is_enhancement_multilevel_compatible());
+        assert!(manifest_resilient.is_enhancement_queue_v2_compatible());
+        let advertised = manifest_resilient.advertised_agent_version();
+        assert!(advertised.contains("enhancement-queue-v2"));
+        assert!(advertised.contains("enhancement-multilevel-v1"));
+        assert!(advertised.contains("enhancement-queue-v1"));
+
+        // 2. Modeled deployed 7d532 agent metadata lacks enhancement-queue-v2
+        let agent_7d532_version = "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1";
+        assert!(!agent_7d532_version.contains("enhancement-queue-v2"));
+
+        // 3. Modeled deployed 8f720 agent metadata lacks enhancement-queue-v2
+        let agent_8f720_version = "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1";
+        assert!(!agent_8f720_version.contains("enhancement-queue-v2"));
+
+        // 4. Incompatible or older JARs must fail closed for enhancement-queue-v2
+        let manifest_monotonic = JarManifest {
+            jar_sha256: "bdd40df18f29603f99402488b5d84c7c8c8dd87dfe6fd5e123fe13d6e0cf0919".to_string(),
+            jar_size: 1153856,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-28T16:45:00Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(!manifest_monotonic.is_enhancement_queue_v2_compatible());
+        assert!(!manifest_monotonic.advertised_agent_version().contains("enhancement-queue-v2"));
     }
 }
 
