@@ -4681,6 +4681,12 @@ public final class Zeus {
             enhActiveTargetSlot = -1;
             return;
         }
+        if (enhCapturedSlot >= 0 && matchedSlot != enhCapturedSlot) {
+            enhState = 20; // ITEM_MISSING_OR_CHANGED
+            enhErrorMessage = "Target item slot mismatch after dispatch: expected slot " + enhCapturedSlot + ", found at " + matchedSlot;
+            enhActiveTargetSlot = -1;
+            return;
+        }
         enhCurrentLevel = matchedItem.z;
         enhStartLevel = matchedItem.z;
         enhActiveTargetSlot = matchedSlot;
@@ -4713,20 +4719,7 @@ public final class Zeus {
             }
             j item = (j) obj;
             if (item.u == 7 && item.A == 11) {
-                boolean matchesMode = false;
-                String name = norm(item.g != null ? item.g : "");
-                String base = norm(item.i != null ? item.i : "");
-                if (desiredMode == 1) {
-                    if (name.indexOf("3 la") >= 0 || name.indexOf("3 lá") >= 0
-                            || base.indexOf("3 la") >= 0 || base.indexOf("3 lá") >= 0) {
-                        matchesMode = true;
-                    }
-                } else if (desiredMode == 2) {
-                    if (name.indexOf("4 la") >= 0 || name.indexOf("4 lá") >= 0
-                            || base.indexOf("4 la") >= 0 || base.indexOf("4 lá") >= 0) {
-                        matchesMode = true;
-                    }
-                }
+                boolean matchesMode = isSemanticCharm(item.g, item.i, desiredMode);
                 if (matchesMode) {
                     Integer idObj = new Integer(item.O);
                     if (!charmTemplates.contains(idObj)) {
@@ -7464,6 +7457,65 @@ public final class Zeus {
             out.append(at < 0 ? c : target.charAt(at));
         }
         return out.toString();
+    }
+
+    /** Centralized semantic normalization helper: lowercases, strips accents, collapses whitespace. */
+    public static String normSemantic(String value) {
+        if (value == null) {
+            return "";
+        }
+        String stripped = norm(value).trim();
+        StringBuffer out = new StringBuffer(stripped.length());
+        boolean lastSpace = false;
+        for (int i = 0; i < stripped.length(); i++) {
+            char c = stripped.charAt(i);
+            if (c <= ' ') {
+                if (!lastSpace && out.length() > 0) {
+                    out.append(' ');
+                    lastSpace = true;
+                }
+            } else {
+                out.append(c);
+                lastSpace = false;
+            }
+        }
+        return out.toString();
+    }
+
+    public static boolean isSemanticCharm(String name, String base, int desiredMode) {
+        return isSemanticCharmText(normSemantic(name), desiredMode)
+                || isSemanticCharmText(normSemantic(base), desiredMode);
+    }
+
+    public static boolean isSemanticCharmText(String s, int desiredMode) {
+        if (s == null || s.length() == 0) {
+            return false;
+        }
+        String spaced = " " + s + " ";
+        if (desiredMode == 1) { // 3-leaf charm
+            boolean has3Leaf = s.indexOf("co ba la") >= 0
+                    || s.indexOf("co 3 la") >= 0
+                    || s.indexOf("co 3la") >= 0
+                    || spaced.indexOf(" 3 la ") >= 0
+                    || spaced.indexOf(" ba la ") >= 0
+                    || spaced.indexOf(" 3la ") >= 0;
+            boolean has4Conflict = s.indexOf("bon la") >= 0
+                    || s.indexOf("4 la") >= 0
+                    || s.indexOf("4la") >= 0;
+            return has3Leaf && !has4Conflict;
+        } else if (desiredMode == 2) { // 4-leaf charm
+            boolean has4Leaf = s.indexOf("co bon la") >= 0
+                    || s.indexOf("co 4 la") >= 0
+                    || s.indexOf("co 4la") >= 0
+                    || spaced.indexOf(" 4 la ") >= 0
+                    || spaced.indexOf(" bon la ") >= 0
+                    || spaced.indexOf(" 4la ") >= 0;
+            boolean has3Conflict = s.indexOf("ba la") >= 0
+                    || s.indexOf("3 la") >= 0
+                    || s.indexOf("3la") >= 0;
+            return has4Leaf && !has3Conflict;
+        }
+        return false;
     }
 
     public static boolean action(int cmd, int arg) {

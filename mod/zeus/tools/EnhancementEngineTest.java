@@ -240,6 +240,102 @@ public class EnhancementEngineTest {
         state = ((Integer) get("enhState")).intValue();
         check("Mode 2 cannot fall back to Co 3 la -> CHARM_MISSING (24)", state == 24);
 
+        // Subtest 3.6: Explicit Cỏ bốn lá resolves when bag text uses Vietnamese word form
+        j charm4Word = makeCharm(777, "Cỏ bốn lá", "Cỏ bốn lá", 2);
+        bw.V = bag(swordValid, charm4Word);
+        set("enhConfiguredCharmMode", 2);
+        set("enhState", 8);
+        resolveCharmMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        resolvedCharm = ((Integer) get("enhResolvedCharmMode")).intValue();
+        check("Explicit Cỏ bốn lá resolves when bag text uses Vietnamese word form", state == 9 && resolvedCharm == 2);
+
+        // Subtest 3.7: Explicit Cỏ bốn lá resolves after normalized diacritics
+        j charm4NoDiacritics = makeCharm(778, "Co bon la", "Co bon la", 2);
+        bw.V = bag(swordValid, charm4NoDiacritics);
+        set("enhConfiguredCharmMode", 2);
+        set("enhState", 8);
+        resolveCharmMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        resolvedCharm = ((Integer) get("enhResolvedCharmMode")).intValue();
+        check("Explicit Cỏ bốn lá resolves after normalized diacritics", state == 9 && resolvedCharm == 2);
+
+        // Subtest 3.8: Explicit Cỏ 4 lá remains compatible
+        j charm4Digit = makeCharm(779, "Cỏ 4 lá", "Cỏ 4 lá", 2);
+        bw.V = bag(swordValid, charm4Digit);
+        set("enhConfiguredCharmMode", 2);
+        set("enhState", 8);
+        resolveCharmMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        resolvedCharm = ((Integer) get("enhResolvedCharmMode")).intValue();
+        check("Explicit Cỏ 4 lá remains compatible", state == 9 && resolvedCharm == 2);
+
+        // Subtest 3.9: Explicit Cỏ ba lá resolves
+        j charm3Word = makeCharm(780, "Cỏ ba lá", "Cỏ ba lá", 1);
+        bw.V = bag(swordValid, charm3Word);
+        set("enhConfiguredCharmMode", 1);
+        set("enhState", 8);
+        resolveCharmMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        resolvedCharm = ((Integer) get("enhResolvedCharmMode")).intValue();
+        check("Explicit Cỏ ba lá resolves", state == 9 && resolvedCharm == 1);
+
+        // Subtest 3.10: Unrelated similarly named items do not match
+        j unrelatedA = makeCharm(801, "Bánh bao", "Bánh bao", 0);
+        j unrelatedB = makeCharm(802, "Bình máu 4", "Bình máu 4", 0);
+        j unrelatedC = makeCharm(803, "Cỏ bốn góc", "Cỏ bốn góc", 0);
+        bw.V = bag(swordValid, unrelatedA, unrelatedB, unrelatedC);
+        set("enhConfiguredCharmMode", 1);
+        set("enhState", 8);
+        resolveCharmMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("Unrelated items with ba do not match Mode 1 -> CHARM_MISSING (24)", state == 24);
+
+        set("enhConfiguredCharmMode", 2);
+        set("enhState", 8);
+        resolveCharmMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("Unrelated items with 4/bon do not match Mode 2 -> CHARM_MISSING (24)", state == 24);
+
+        // Subtest 3.11: No hardcoded charm template ID is required for runtime matching
+        j customTemplateCharm = makeCharm(9999, "Cỏ bốn lá", "Cỏ bốn lá", 2);
+        bw.V = bag(swordValid, customTemplateCharm);
+        set("enhConfiguredCharmMode", 2);
+        set("enhState", 8);
+        resolveCharmMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        int selectedTemplateId = ((Integer) get("snapSelectedCharmTemplateId")).intValue();
+        check("No hardcoded charm template ID is required (template 9999 resolved)", state == 9 && selectedTemplateId == 9999);
+
+        // Subtest 3.12: Missing requested charm produces CHARM_MISSING before Opcode67
+        clearQueue();
+        bw.V = bag(swordValid);
+        set("enhConfiguredCharmMode", 2);
+        set("enhState", 8);
+        resolveCharmMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("Missing requested charm produces CHARM_MISSING (24) before Opcode67", state == 24 && queue().isEmpty());
+
+        // Subtest 3.13: AUTO_POLICY remains unchanged
+        check("Auto policy level 4 resolves Mode 0", ((Integer) autoCharmMethod.invoke(null, 4)).intValue() == 0);
+        check("Auto policy level 7 resolves Mode 1", ((Integer) autoCharmMethod.invoke(null, 7)).intValue() == 1);
+        check("Auto policy level 12 resolves Mode 2", ((Integer) autoCharmMethod.invoke(null, 12)).intValue() == 2);
+
+        // Subtest 3.14: Java strict post-dispatch slot validation (no roaming remap)
+        set("enhTemplateId", 101);
+        set("enhCategory", 3);
+        set("enhBaseName", "Kiem ngan");
+        set("enhTier", 2);
+        set("enhExpectedLevel", 5);
+        set("enhCapturedSlot", 3); // Expected at slot 3
+        bw.V = bag(swordValid); // Placed at slot 0
+        set("enhState", 3);
+        validateTargetMethod.invoke(null);
+        state = ((Integer) get("enhState")).intValue();
+        check("Post-fence item slot mismatch strictly rejected with ITEM_MISSING_OR_CHANGED (20)", state == 20);
+        set("enhCapturedSlot", -1); // Reset slot constraint
+
+
         // ---------------------------------------------------------------------
         // Test 4: Payment Preflight
         // ---------------------------------------------------------------------

@@ -525,6 +525,92 @@ pub fn generate_attempt_uuid() -> String {
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
+/// Resolution outcome when looking up a target item within the inventory catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ItemSlotResolution {
+    /// Found exactly at captured_slot and matches identity contract
+    ExactSlotMatch(i32),
+    /// Found relocated at a different slot, unique match across all items in catalog
+    RelocatedUnique { old_slot: i32, new_slot: i32 },
+    /// More than one item matching the identity contract exists in the catalog
+    AmbiguousMatch(Vec<i32>),
+    /// Item was not found in catalog (missing or changed)
+    NotFound,
+}
+
+/// Resolves an item's location in the inventory catalog using its identity contract:
+/// (template_id, category, base_name, tier, expected_level, icon).
+pub fn resolve_item_slot_in_catalog(
+    catalog: &serde_json::Value,
+    item: &EnhancementQueueItemRow,
+) -> ItemSlotResolution {
+    let items = match catalog.get("items").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return ItemSlotResolution::NotFound,
+    };
+
+    let mut matching_slots: Vec<i32> = Vec::new();
+
+    for it in items {
+        let slot = match it.get("slot").and_then(|v| v.as_i64()) {
+            Some(s) => s as i32,
+            None => continue,
+        };
+        let template_id = match it.get("template_id").and_then(|v| v.as_i64()) {
+            Some(t) => t as i32,
+            None => continue,
+        };
+        let category = match it.get("category").and_then(|v| v.as_i64()) {
+            Some(c) => c as i32,
+            None => continue,
+        };
+        let base_name = match it.get("base_name").and_then(|v| v.as_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let tier = match it.get("tier").and_then(|v| v.as_i64()) {
+            Some(t) => t as i32,
+            None => continue,
+        };
+        let level = match it.get("level").and_then(|v| v.as_i64()) {
+            Some(l) => l as i32,
+            None => continue,
+        };
+        let cat_icon = it.get("icon").and_then(|v| v.as_i64()).map(|v| v as i32);
+
+        // Identity contract comparison
+        if template_id == item.template_id
+            && category == item.category
+            && base_name == item.base_name
+            && tier == item.tier
+            && level == item.current_level
+        {
+            if let (Some(expected_icon), Some(actual_icon)) = (item.icon, cat_icon) {
+                if expected_icon != actual_icon {
+                    continue;
+                }
+            }
+            matching_slots.push(slot);
+        }
+    }
+
+    if matching_slots.len() > 1 {
+        ItemSlotResolution::AmbiguousMatch(matching_slots)
+    } else if matching_slots.len() == 1 {
+        let found_slot = matching_slots[0];
+        if found_slot == item.captured_slot {
+            ItemSlotResolution::ExactSlotMatch(found_slot)
+        } else {
+            ItemSlotResolution::RelocatedUnique {
+                old_slot: item.captured_slot,
+                new_slot: found_slot,
+            }
+        }
+    } else {
+        ItemSlotResolution::NotFound
+    }
+}
+
 /// Prepares the exact single-level enhancement attempt spec for an active item.
 ///
 /// Enforces:
@@ -1600,6 +1686,98 @@ pub fn tick_account_enhancement_queue(
                     "status": "RUNNING",
                     "started_at": crate::supabase_rest::now_rfc3339(),
                 }));
+            }
+
+            // Safe pre-fence inventory verification and bounded refresh
+            let inv_path = home_dir.join(crate::inventory::INVENTORY_FILE_NAME);
+            let mut resolved_slot = None;
+            let mut resolution_error = None;
+
+            for cycle in 0..3 {
+                if let Some(catalog) = crate::inventory::read_inventory_catalog(&inv_path) {
+                    match resolve_item_slot_in_catalog(&catalog, &item) {
+                        ItemSlotResolution::ExactSlotMatch(slot) => {
+                            resolved_slot = Some(slot);
+                            break;
+                        }
+                        ItemSlotResolution::RelocatedUnique { old_slot: _, new_slot } => {
+                            resolved_slot = Some(new_slot);
+                            break;
+                        }
+                        ItemSlotResolution::AmbiguousMatch(slots) => {
+                            resolution_error = Some((
+                                "AMBIGUOUS_WIRE_TARGET",
+                                format!(
+                                    "Multiple items ({}) match identity contract in bag; wire target cannot be uniquely identified",
+                                    slots.len()
+                                ),
+                            ));
+                            break;
+                        }
+                        ItemSlotResolution::NotFound => {
+                            if cycle < 2 {
+                                std::thread::sleep(std::time::Duration::from_millis(650));
+                            }
+                        }
+                    }
+                } else if cycle < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(650));
+                }
+            }
+
+            let active_slot = match resolved_slot {
+                Some(s) => s,
+                None => {
+                    let (err_code, err_msg) = resolution_error.unwrap_or((
+                        "ITEM_MISSING_OR_CHANGED",
+                        format!(
+                            "Item {} (template_id={}, category={}) not found in live inventory after bounded refresh",
+                            item.base_name, item.template_id, item.category
+                        ),
+                    ));
+                    eprintln!(
+                        "[enhancement_queue] pre-fence resolution failed for item {}: {} - {}",
+                        item.id, err_code, err_msg
+                    );
+                    let _ = rest.update_queue_item(
+                        &item.id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "FAILED",
+                            "error_code": err_code,
+                            "error_message": err_msg,
+                            "finished_at": crate::supabase_rest::now_rfc3339(),
+                        }),
+                    );
+                    let _ = rest.update_queue_job(
+                        &job.id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "FAILED",
+                            "error_code": err_code,
+                            "error_message": err_msg,
+                            "finished_at": crate::supabase_rest::now_rfc3339(),
+                        }),
+                    );
+                    tracker.active_job_id = None;
+                    return;
+                }
+            };
+
+            let mut item = item;
+            if active_slot != item.captured_slot {
+                eprintln!(
+                    "[enhancement_queue] safe pre-fence rebinding item {} from slot {} to {}",
+                    item.id, item.captured_slot, active_slot
+                );
+                item.captured_slot = active_slot;
+                let _ = rest.update_queue_item(
+                    &item.id,
+                    account_id,
+                    &serde_json::json!({
+                        "captured_slot": active_slot,
+                    }),
+                );
             }
 
             let spec = match prepare_level_attempt(&item) {
@@ -3306,6 +3484,192 @@ mod tests {
         assert_eq!(body["actual_material_2_spent"], 1);
         assert_eq!(body["actual_material_3_spent"], 0);
         assert_eq!(body["actual_material_4_spent"], 0);
+    }
+
+    #[test]
+    fn test_resolve_item_slot_in_catalog_exact_match() {
+        let catalog = serde_json::json!({
+            "version": 1,
+            "bag_capacity": 28,
+            "items": [
+                {
+                    "slot": 4,
+                    "template_id": 101,
+                    "category": 3,
+                    "base_name": "Kiếm ngắn",
+                    "display_name": "Kiếm ngắn +2",
+                    "level": 2,
+                    "tier": 2,
+                    "count": 1,
+                    "icon": 12,
+                    "candidate_for_enhancement": true
+                }
+            ]
+        });
+
+        let mut item = EnhancementQueueItemRow::mock("it-1", "job-1", 1, 4, 2, 3, "PENDING");
+        item.icon = Some(12);
+
+        let res = resolve_item_slot_in_catalog(&catalog, &item);
+        assert_eq!(res, ItemSlotResolution::ExactSlotMatch(4));
+    }
+
+    #[test]
+    fn test_resolve_item_slot_in_catalog_relocated_unique() {
+        let catalog = serde_json::json!({
+            "version": 1,
+            "bag_capacity": 28,
+            "items": [
+                {
+                    "slot": 9,
+                    "template_id": 101,
+                    "category": 3,
+                    "base_name": "Kiếm ngắn",
+                    "display_name": "Kiếm ngắn +2",
+                    "level": 2,
+                    "tier": 2,
+                    "count": 1,
+                    "icon": 12,
+                    "candidate_for_enhancement": true
+                }
+            ]
+        });
+
+        // Item was initially captured at slot 4, but user moved it to slot 9
+        let mut item = EnhancementQueueItemRow::mock("it-1", "job-1", 1, 4, 2, 3, "PENDING");
+        item.icon = Some(12);
+
+        let res = resolve_item_slot_in_catalog(&catalog, &item);
+        assert_eq!(
+            res,
+            ItemSlotResolution::RelocatedUnique {
+                old_slot: 4,
+                new_slot: 9
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_item_slot_in_catalog_ambiguous_match() {
+        let catalog = serde_json::json!({
+            "version": 1,
+            "bag_capacity": 28,
+            "items": [
+                {
+                    "slot": 3,
+                    "template_id": 101,
+                    "category": 3,
+                    "base_name": "Kiếm ngắn",
+                    "display_name": "Kiếm ngắn +2",
+                    "level": 2,
+                    "tier": 2,
+                    "count": 1,
+                    "icon": 12,
+                    "candidate_for_enhancement": true
+                },
+                {
+                    "slot": 8,
+                    "template_id": 101,
+                    "category": 3,
+                    "base_name": "Kiếm ngắn",
+                    "display_name": "Kiếm ngắn +2",
+                    "level": 2,
+                    "tier": 2,
+                    "count": 1,
+                    "icon": 12,
+                    "candidate_for_enhancement": true
+                }
+            ]
+        });
+
+        let mut item = EnhancementQueueItemRow::mock("it-1", "job-1", 1, 3, 2, 3, "PENDING");
+        item.icon = Some(12);
+
+        let res = resolve_item_slot_in_catalog(&catalog, &item);
+        assert_eq!(res, ItemSlotResolution::AmbiguousMatch(vec![3, 8]));
+    }
+
+    #[test]
+    fn test_resolve_item_slot_in_catalog_not_found_or_level_changed() {
+        let catalog = serde_json::json!({
+            "version": 1,
+            "bag_capacity": 28,
+            "items": [
+                {
+                    "slot": 3,
+                    "template_id": 101,
+                    "category": 3,
+                    "base_name": "Kiếm ngắn",
+                    "display_name": "Kiếm ngắn +5",
+                    "level": 5, // level has changed from expected 2
+                    "tier": 2,
+                    "count": 1,
+                    "icon": 12,
+                    "candidate_for_enhancement": true
+                }
+            ]
+        });
+
+        let mut item = EnhancementQueueItemRow::mock("it-1", "job-1", 1, 3, 2, 3, "PENDING");
+        item.icon = Some(12);
+
+        let res = resolve_item_slot_in_catalog(&catalog, &item);
+        assert_eq!(res, ItemSlotResolution::NotFound);
+    }
+
+    #[test]
+    fn test_resolve_item_slot_in_catalog_icon_mismatch_rejected() {
+        let catalog = serde_json::json!({
+            "version": 1,
+            "bag_capacity": 28,
+            "items": [
+                {
+                    "slot": 3,
+                    "template_id": 101,
+                    "category": 3,
+                    "base_name": "Kiếm ngắn",
+                    "display_name": "Kiếm ngắn +2",
+                    "level": 2,
+                    "tier": 2,
+                    "count": 1,
+                    "icon": 99, // different icon
+                    "candidate_for_enhancement": true
+                }
+            ]
+        });
+
+        let mut item = EnhancementQueueItemRow::mock("it-1", "job-1", 1, 3, 2, 3, "PENDING");
+        item.icon = Some(12);
+
+        let res = resolve_item_slot_in_catalog(&catalog, &item);
+        assert_eq!(res, ItemSlotResolution::NotFound);
+    }
+
+    #[test]
+    fn test_post_fence_immutability_guarantee() {
+        // Once the mutation fence has been established (EXECUTE_MAY_HAVE_BEEN_SENT),
+        // attempting to re-establish or relocate fence must fail-closed.
+        let spec = LevelAttemptSpec {
+            attempt_uuid: "att-post-fence-test".to_string(),
+            captured_slot: 5,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm ngắn".to_string(),
+            tier: 2,
+            expected_level: 2,
+            target_level: 3,
+            charm_mode: 0,
+            payment_type: 0,
+            max_attempts: 1,
+        };
+
+        let err = build_mutation_fence_update_with_spec(
+            "it-1",
+            "acc-1",
+            &spec,
+            EnhancementAttemptPhase::ExecuteMayHaveBeenSent.as_str(),
+        );
+        assert!(err.is_err(), "must reject fence creation from post-fence phase");
     }
 }
 

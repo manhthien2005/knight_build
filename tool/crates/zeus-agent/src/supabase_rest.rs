@@ -784,6 +784,15 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         capabilities: &[
             JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
             JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+        ],
+    },
+    RuntimeContract {
+        name: "ENHANCEMENT_RESILIENT_V14",
+        jar_sha256: JarManifest::ENHANCEMENT_RESILIENT_COMPATIBLE_JAR_SHA256,
+        ctl_version: 14,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
             JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
         ],
     },
@@ -818,6 +827,8 @@ impl JarManifest {
         "dc6a6548df170c7e674fbb1a27e8a4b1dbff805ac07ec81c3c23b67105b93e6c";
     pub const ENHANCEMENT_MONOTONIC_COMPATIBLE_JAR_SHA256: &'static str =
         "bdd40df18f29603f99402488b5d84c7c8c8dd87dfe6fd5e123fe13d6e0cf0919";
+    pub const ENHANCEMENT_RESILIENT_COMPATIBLE_JAR_SHA256: &'static str =
+        "3999f6b674c1780ac3f26d47ad035f5a2d749ef38cea5b256dcd8e1aec3c3504";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -3348,7 +3359,7 @@ mod tests {
 
         // 7. Test loading actual repository zeus-jar.json
         if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
-            assert_eq!(loaded_manifest.jar_sha256, JarManifest::ENHANCEMENT_MONOTONIC_COMPATIBLE_JAR_SHA256);
+            assert_eq!(loaded_manifest.jar_sha256, JarManifest::ENHANCEMENT_RESILIENT_COMPATIBLE_JAR_SHA256);
             assert_eq!(loaded_manifest.ctl_version, 14);
             assert_eq!(loaded_manifest.ctl_key_count, 37);
             assert!(loaded_manifest.is_character_slot_compatible());
@@ -3601,9 +3612,25 @@ mod tests {
         };
         assert!(manifest_monotonic.is_character_slot_compatible(), "monotonic must be character-slot compatible");
         assert!(manifest_monotonic.is_visual_qol_compatible(), "monotonic must be visual-qol compatible");
-        assert!(manifest_monotonic.is_enhancement_queue_compatible(), "monotonic must be enhancement-queue compatible");
-        assert!(manifest_monotonic.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
-        assert_eq!(manifest_monotonic.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1");
+        assert!(!manifest_monotonic.is_enhancement_queue_compatible(), "old monotonic must not be enhancement-queue compatible under new agent");
+        assert_eq!(manifest_monotonic.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+
+        let manifest_resilient = JarManifest {
+            jar_sha256: "3999f6b674c1780ac3f26d47ad035f5a2d749ef38cea5b256dcd8e1aec3c3504".to_string(),
+            jar_size: 1154382,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-29T09:52:41Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(manifest_resilient.is_character_slot_compatible(), "resilient must be character-slot compatible");
+        assert!(manifest_resilient.is_visual_qol_compatible(), "resilient must be visual-qol compatible");
+        assert!(manifest_resilient.is_enhancement_queue_compatible(), "resilient must be enhancement-queue compatible");
+        assert!(manifest_resilient.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
+        assert_eq!(manifest_resilient.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1");
 
         // Unknown JAR must fail closed
         let unknown = JarManifest {
@@ -3626,7 +3653,35 @@ mod tests {
 
     #[test]
     fn test_enhancement_queue_v1_capability_matrix() {
-        // 0. New monotonic bdd40d JAR receives enhancement-queue-v1
+        // 0. New resilient 3999f6 JAR receives enhancement-queue-v1
+        let manifest_resilient = JarManifest {
+            jar_sha256: "3999f6b674c1780ac3f26d47ad035f5a2d749ef38cea5b256dcd8e1aec3c3504".to_string(),
+            jar_size: 1154382,
+            ctl_version: 14,
+            snapshot_version: 6,
+            ctl_key_count: 37,
+            snapshot_key_count: 48,
+            built_at: "2026-09-29T09:52:41Z".to_string(),
+            patcher_sha256: "89cac9ea1e3485efa757eea68b43d31dfbc374577de81cc3ea25bbb037d81a3c".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert!(manifest_resilient.is_character_slot_compatible());
+        assert!(manifest_resilient.is_visual_qol_compatible());
+        assert!(manifest_resilient.is_enhancement_queue_compatible());
+        assert_eq!(
+            manifest_resilient.capabilities(),
+            &[
+                JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+                JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+            ]
+        );
+        assert_eq!(
+            manifest_resilient.advertised_agent_version(),
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1"
+        );
+
+        // 0a. Old monotonic bdd40d JAR must NO LONGER receive enhancement-queue-v1 under the new agent
         let manifest_monotonic = JarManifest {
             jar_sha256: "bdd40df18f29603f99402488b5d84c7c8c8dd87dfe6fd5e123fe13d6e0cf0919".to_string(),
             jar_size: 1153856,
@@ -3640,18 +3695,17 @@ mod tests {
         };
         assert!(manifest_monotonic.is_character_slot_compatible());
         assert!(manifest_monotonic.is_visual_qol_compatible());
-        assert!(manifest_monotonic.is_enhancement_queue_compatible());
+        assert!(!manifest_monotonic.is_enhancement_queue_compatible(), "old monotonic JAR must lose enhancement-queue-v1");
         assert_eq!(
             manifest_monotonic.capabilities(),
             &[
                 JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
                 JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
-                JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
             ]
         );
         assert_eq!(
             manifest_monotonic.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1"
         );
 
         // 0b. Defective dc6a65 JAR must NO LONGER receive enhancement-queue-v1 under the new agent
@@ -3765,7 +3819,7 @@ mod tests {
         assert_eq!(unknown.advertised_agent_version(), "0.1.0");
 
         // 5. Deterministic token order preserved when metadata already had tokens in different order
-        let mut disordered = manifest_monotonic.clone();
+        let mut disordered = manifest_resilient.clone();
         disordered.agent_version = "0.1.0+visual-qol-v1.enhancement-queue-v1.character-slot-v1".to_string();
         assert_eq!(
             disordered.advertised_agent_version(),
