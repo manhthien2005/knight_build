@@ -451,6 +451,106 @@ impl EnhancementQueueItemRow {
     }
 }
 
+/// Append-only per-level attempt ledger row representing `public.enhancement_queue_item_attempts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnhancementQueueItemAttemptRow {
+    pub id: String,
+    pub job_id: String,
+    pub item_id: String,
+    pub account_id: String,
+    pub user_id: String,
+    pub attempt_uuid: String,
+    pub attempt_number: i32,
+    pub expected_level: i32,
+    pub step_target_level: i32,
+    pub queue_item_final_target_level: i32,
+    pub attempt_phase: String,
+    #[serde(default)]
+    pub result_code: Option<String>,
+    #[serde(default)]
+    pub settlement_source: Option<String>,
+    pub payment_type: String,
+    pub charm_mode: String,
+    pub quoted_gold: i64,
+    pub quoted_gems: i64,
+    pub recipe_materials: serde_json::Value,
+    pub actual_gold_spent: i64,
+    pub actual_gem_spent: i64,
+    pub actual_material_1_spent: i64,
+    pub actual_material_2_spent: i64,
+    pub actual_material_3_spent: i64,
+    pub actual_material_4_spent: i64,
+    pub actual_charm_spent: i64,
+    #[serde(default)]
+    pub attempt_started_at: Option<String>,
+    #[serde(default)]
+    pub execute_may_have_been_sent_at: Option<String>,
+    #[serde(default)]
+    pub result_received_at: Option<String>,
+    #[serde(default)]
+    pub attempt_settled_at: Option<String>,
+    #[serde(default)]
+    pub reconciled_at: Option<String>,
+    #[serde(default)]
+    pub reconciliation_reason: Option<String>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl EnhancementQueueItemAttemptRow {
+    #[cfg(test)]
+    pub fn mock(
+        job_id: &str,
+        item_id: &str,
+        attempt_uuid: &str,
+        attempt_number: i32,
+        expected_level: i32,
+        final_target_level: i32,
+    ) -> Self {
+        Self {
+            id: format!("att-id-{attempt_number}"),
+            job_id: job_id.to_string(),
+            item_id: item_id.to_string(),
+            account_id: "acc-1".to_string(),
+            user_id: "user-1".to_string(),
+            attempt_uuid: attempt_uuid.to_string(),
+            attempt_number,
+            expected_level,
+            step_target_level: expected_level + 1,
+            queue_item_final_target_level: final_target_level,
+            attempt_phase: "SETTLED".to_string(),
+            result_code: Some("3".to_string()),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            payment_type: "GOLD".to_string(),
+            charm_mode: "NONE".to_string(),
+            quoted_gold: 500,
+            quoted_gems: 0,
+            recipe_materials: serde_json::json!({}),
+            actual_gold_spent: 500,
+            actual_gem_spent: 0,
+            actual_material_1_spent: 0,
+            actual_material_2_spent: 0,
+            actual_material_3_spent: 0,
+            actual_material_4_spent: 0,
+            actual_charm_spent: 0,
+            attempt_started_at: Some("2026-09-26T00:00:00Z".to_string()),
+            execute_may_have_been_sent_at: Some("2026-09-26T00:00:01Z".to_string()),
+            result_received_at: Some("2026-09-26T00:00:02Z".to_string()),
+            attempt_settled_at: Some("2026-09-26T00:00:02Z".to_string()),
+            reconciled_at: None,
+            reconciliation_reason: None,
+            error_code: None,
+            error_message: None,
+            created_at: "2026-09-26T00:00:00Z".to_string(),
+            updated_at: "2026-09-26T00:00:02Z".to_string(),
+        }
+    }
+}
+
 /// Outcome of selecting the next item to process in a queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemSelectionOutcome {
@@ -785,6 +885,7 @@ pub fn build_settlement_commit_update(
     };
 
     let body = serde_json::json!({
+        "attempt_count": item.attempt_count + 1,
         "actual_gold_spent": new_gold,
         "actual_gem_spent": new_gem,
         "actual_material_1_spent": new_mat1,
@@ -819,6 +920,108 @@ pub fn evaluate_settlement_commit_result(
         return SettlementCommitOutcome::AlreadySettledDoNotIncrementAgain;
     }
     SettlementCommitOutcome::CommitFailed
+}
+
+/// Builds JSON payload for inserting an append-only attempt ledger row into public.enhancement_queue_item_attempts.
+pub fn build_insert_attempt_ledger_payload(
+    item: &EnhancementQueueItemRow,
+    spec: &LevelAttemptSpec,
+    attempt_number: i32,
+) -> serde_json::Value {
+    let now = crate::supabase_rest::now_rfc3339();
+    serde_json::json!({
+        "job_id": item.job_id,
+        "item_id": item.id,
+        "account_id": item.account_id,
+        "user_id": item.user_id,
+        "attempt_uuid": spec.attempt_uuid,
+        "attempt_number": attempt_number,
+        "expected_level": spec.expected_level,
+        "step_target_level": spec.target_level,
+        "queue_item_final_target_level": item.target_level,
+        "attempt_phase": EnhancementAttemptPhase::Preparing.as_str(),
+        "payment_type": item.payment_type,
+        "charm_mode": item.charm_mode,
+        "quoted_gold": 0,
+        "quoted_gems": 0,
+        "recipe_materials": serde_json::json!({}),
+        "actual_gold_spent": 0,
+        "actual_gem_spent": 0,
+        "actual_material_1_spent": 0,
+        "actual_material_2_spent": 0,
+        "actual_material_3_spent": 0,
+        "actual_material_4_spent": 0,
+        "actual_charm_spent": 0,
+        "attempt_started_at": now,
+        "created_at": now,
+        "updated_at": now,
+    })
+}
+
+/// Builds conditional PostgREST update path and body to record the mutation fence in the attempt ledger.
+pub fn build_fence_attempt_ledger_update(attempt_uuid: &str) -> (String, serde_json::Value) {
+    let now = crate::supabase_rest::now_rfc3339();
+    let path = format!(
+        "/rest/v1/enhancement_queue_item_attempts?attempt_uuid=eq.{attempt_uuid}&attempt_phase=in.(NONE,PREPARING,READY_TO_EXECUTE)"
+    );
+    let body = serde_json::json!({
+        "attempt_phase": EnhancementAttemptPhase::ExecuteMayHaveBeenSent.as_str(),
+        "execute_may_have_been_sent_at": now,
+        "updated_at": now,
+    });
+    (path, body)
+}
+
+/// Builds conditional PostgREST update path and body to settle an attempt ledger row.
+pub fn build_settle_attempt_ledger_update(
+    attempt_uuid: &str,
+    telemetry: &crate::enhancement::EnhancementStatusTelemetry,
+) -> (String, serde_json::Value) {
+    let now = crate::supabase_rest::now_rfc3339();
+    let path = format!(
+        "/rest/v1/enhancement_queue_item_attempts?attempt_uuid=eq.{attempt_uuid}&attempt_phase=neq.SETTLED"
+    );
+    let mat1 = telemetry.actual_materials_spent.get(0).copied().unwrap_or(0);
+    let mat2 = telemetry.actual_materials_spent.get(1).copied().unwrap_or(0);
+    let mat3 = telemetry.actual_materials_spent.get(2).copied().unwrap_or(0);
+    let mat4 = telemetry.actual_materials_spent.get(3).copied().unwrap_or(0);
+
+    let body = serde_json::json!({
+        "attempt_phase": EnhancementAttemptPhase::Settled.as_str(),
+        "result_code": telemetry.result_code.map(|c| c.to_string()),
+        "settlement_source": telemetry.settlement_source.as_deref().unwrap_or("RESULT_CODE"),
+        "actual_gold_spent": telemetry.actual_gold_spent,
+        "actual_gem_spent": telemetry.actual_gem_spent,
+        "actual_material_1_spent": mat1,
+        "actual_material_2_spent": mat2,
+        "actual_material_3_spent": mat3,
+        "actual_material_4_spent": mat4,
+        "actual_charm_spent": telemetry.actual_charms_spent,
+        "result_received_at": now,
+        "attempt_settled_at": now,
+        "error_code": telemetry.error_code,
+        "error_message": telemetry.error_message,
+        "updated_at": now,
+    });
+    (path, body)
+}
+
+/// Builds conditional PostgREST update path and body to transition an item whose previous level settled
+/// to PREPARING for the next level.
+pub fn build_prepare_next_level_update(item_id: &str, account_id: &str) -> (String, serde_json::Value) {
+    let now = crate::supabase_rest::now_rfc3339();
+    let path = format!(
+        "/rest/v1/enhancement_queue_items?id=eq.{item_id}&account_id=eq.{account_id}&status=eq.RUNNING"
+    );
+    let body = serde_json::json!({
+        "attempt_phase": EnhancementAttemptPhase::Preparing.as_str(),
+        "active_attempt_uuid": serde_json::Value::Null,
+        "attempt_expected_level": serde_json::Value::Null,
+        "attempt_target_level": serde_json::Value::Null,
+        "execute_may_have_been_sent_at": serde_json::Value::Null,
+        "updated_at": now,
+    });
+    (path, body)
 }
 
 /// Mapped queue outcome for an item failure.
@@ -1070,7 +1273,8 @@ pub struct InFlightQueueAttempt {
     pub item_id: String,
     pub attempt_uuid: String,
     pub expected_level: i32,
-    pub target_level: i32,
+    pub step_target_level: i32,
+    pub item_final_target_level: i32,
     pub started_at: std::time::Instant,
     pub last_progress_at: std::time::Instant,
     pub last_progress_signature: Option<crate::enhancement::EnhancementProgressSignature>,
@@ -1162,6 +1366,7 @@ pub fn recover_account_enhancement_queue_on_boot(
         }
         RestartRecoveryAction::ReconcileSettledAttempt(telemetry) => {
             let item = active_item.unwrap();
+            let _ = rest.settle_attempt_ledger_row(&telemetry.request_id, &telemetry);
             let _ = rest.commit_item_settlement(item, &telemetry.request_id, &telemetry);
             if telemetry.current_level >= item.target_level {
                 let _ = rest.update_queue_item(
@@ -1172,6 +1377,8 @@ pub fn recover_account_enhancement_queue_on_boot(
                         "finished_at": crate::supabase_rest::now_rfc3339()
                     }),
                 );
+            } else {
+                let _ = rest.transition_item_to_preparing_next_level(&item.id, account_id);
             }
             crate::enhancement::clean_enhancement_files(home_dir);
             Ok(Some(job.id))
@@ -1213,6 +1420,8 @@ pub fn recover_account_enhancement_queue_on_boot(
                         }),
                     );
                 }
+            } else if let Some(item) = active_item {
+                let _ = rest.transition_item_to_preparing_next_level(&item.id, account_id);
             }
             crate::enhancement::clean_enhancement_files(home_dir);
             Ok(Some(job.id))
@@ -1440,6 +1649,9 @@ pub fn tick_account_enhancement_queue(
                     return;
                 }
 
+                // Settle attempt ledger row first
+                let _ = rest.settle_attempt_ledger_row(&attempt.attempt_uuid, &status);
+
                 // Settle item idempotently
                 if let Ok(items) = rest.fetch_queue_items(&attempt.job_id, account_id) {
                     if let Some(item) = items.iter().find(|i| i.id == attempt.item_id) {
@@ -1476,7 +1688,7 @@ pub fn tick_account_enhancement_queue(
                             }
                         }
 
-                        if status.current_level >= attempt.target_level {
+                        if status.current_level >= attempt.item_final_target_level {
                             let _ = rest.update_queue_item(
                                 &attempt.item_id,
                                 account_id,
@@ -1499,13 +1711,19 @@ pub fn tick_account_enhancement_queue(
                                 );
                                 tracker.active_job_id = None;
                             }
+                        } else {
+                            // Intermediate level succeeded! Transition item to PREPARING for the next level
+                            let _ = rest.transition_item_to_preparing_next_level(&attempt.item_id, account_id);
                         }
                     }
                 }
                 crate::enhancement::clean_enhancement_files(home_dir);
                 return;
             }
-            crate::enhancement::EnhancementPollOutcome::TerminalFailure { state, error_message, .. } => {
+            crate::enhancement::EnhancementPollOutcome::TerminalFailure { state, error_message, telemetry } => {
+                if let Some(t) = &telemetry {
+                    let _ = rest.settle_attempt_ledger_row(&attempt.attempt_uuid, t);
+                }
                 let outcome = map_runtime_failure_to_queue_outcome(&state, None, error_message.as_deref());
                 match outcome {
                     QueueFailureOutcome::ItemFailedAndStopQueue { error_code, error_message } => {
@@ -1788,6 +2006,12 @@ pub fn tick_account_enhancement_queue(
                 }
             };
 
+            let next_attempt_number = item.attempt_count + 1;
+            if let Err(e) = rest.record_attempt_ledger_entry(&item, &spec, next_attempt_number) {
+                eprintln!("[enhancement_queue] record_attempt_ledger_entry error: {e}, aborting dispatch");
+                return;
+            }
+
             // Commit mutation fence BEFORE sidecar dispatch
             let fence_res = rest.commit_item_mutation_fence_with_spec(
                 &item.id,
@@ -1798,6 +2022,7 @@ pub fn tick_account_enhancement_queue(
 
             match fence_res {
                 Ok(true) => {
+                    let _ = rest.commit_attempt_ledger_fence(&spec.attempt_uuid);
                     // Fence committed! Dispatch single-item command to Zeus sidecar
                     let req_payload = build_single_item_request(&spec);
                     if let Err(e) = crate::enhancement::write_enhancement_request_file(home_dir, &req_payload) {
@@ -1809,7 +2034,8 @@ pub fn tick_account_enhancement_queue(
                         item_id: item.id,
                         attempt_uuid: spec.attempt_uuid,
                         expected_level: spec.expected_level,
-                        target_level: spec.target_level,
+                        step_target_level: spec.target_level,
+                        item_final_target_level: item.target_level,
                         started_at: now,
                         last_progress_at: now,
                         last_progress_signature: None,
@@ -2488,7 +2714,8 @@ mod tests {
             item_id: "it-1".to_string(),
             attempt_uuid: "att-1".to_string(),
             expected_level: 0,
-            target_level: 1,
+            step_target_level: 1,
+            item_final_target_level: 1,
             started_at: now,
             last_progress_at: now,
             last_progress_signature: None,
@@ -2911,7 +3138,8 @@ mod tests {
             item_id: "item-1".to_string(),
             attempt_uuid: "attempt-1".to_string(),
             expected_level: 0,
-            target_level: 1,
+            step_target_level: 1,
+            item_final_target_level: 1,
             started_at: now,
             last_progress_at: now,
             last_progress_signature: None,
@@ -2978,7 +3206,8 @@ mod tests {
             item_id: "item-long".to_string(),
             attempt_uuid: attempt_uuid.to_string(),
             expected_level: 0,
-            target_level: 1,
+            step_target_level: 1,
+            item_final_target_level: 1,
             started_at,
             last_progress_at,
             last_progress_signature: None,
@@ -3138,7 +3367,8 @@ mod tests {
             item_id: "item-stalled".to_string(),
             attempt_uuid: attempt_uuid.to_string(),
             expected_level: 0,
-            target_level: 1,
+            step_target_level: 1,
+            item_final_target_level: 1,
             started_at,
             last_progress_at,
             last_progress_signature: Some(sig),
@@ -3243,7 +3473,8 @@ mod tests {
             item_id: "item-wait".to_string(),
             attempt_uuid: attempt_uuid.to_string(),
             expected_level: 0,
-            target_level: 1,
+            step_target_level: 1,
+            item_final_target_level: 1,
             started_at,
             last_progress_at,
             last_progress_signature: None,
@@ -3670,6 +3901,259 @@ mod tests {
             EnhancementAttemptPhase::ExecuteMayHaveBeenSent.as_str(),
         );
         assert!(err.is_err(), "must reject fence creation from post-fence phase");
+    }
+
+    #[test]
+    fn test_durable_attempt_count_increment_in_settlement_update() {
+        let mut item = EnhancementQueueItemRow::mock("it-1", "job-1", 1, 0, 3, 7, "RUNNING");
+        item.attempt_count = 0;
+        item.actual_gold_spent = 1000;
+
+        let telemetry = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: "attempt-uuid-1".to_string(),
+            state: "TARGET_REACHED".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm ngắn".to_string(),
+            start_level: 3,
+            current_level: 4,
+            target_level: 4,
+            configured_charm_mode: 0,
+            resolved_charm_mode: 0,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("SUCCESS".to_string()),
+            quoted_gold_cost: 500,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![],
+            actual_gold_spent: 500,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![],
+            actual_charms_spent: 0,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: None,
+            result_code: Some(3),
+            settlement_source: None,
+            settlement_provenance: None,
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-29T12:00:00Z".to_string(),
+        };
+
+        let (_path, body) = build_settlement_commit_update(&item, "attempt-uuid-1", &telemetry)
+            .expect("must build settlement commit update");
+
+        // The update MUST explicitly increment durable attempt_count from 0 to 1!
+        assert_eq!(body["attempt_count"], 1, "attempt_count must be incremented by 1");
+        assert_eq!(body["actual_gold_spent"], 1500, "spend must be cumulative");
+        assert_eq!(body["current_level"], 4);
+    }
+
+    #[test]
+    fn test_multi_level_progression_four_distinct_uuids_and_cumulative_spend() {
+        let mut item = EnhancementQueueItemRow::mock("it-prog", "job-prog", 1, 0, 3, 7, "RUNNING");
+        item.attempt_count = 0;
+        item.actual_gold_spent = 0;
+
+        let mut attempt_uuids = std::collections::HashSet::new();
+        let mut cumulative_gold = 0i64;
+
+        // Transitions: 3->4, 4->5, 5->6, 6->7
+        for expected in 3..7 {
+            assert_eq!(item.current_level, expected);
+            assert!(item.current_level < item.target_level);
+
+            // Step 1: Prepare level attempt
+            let spec = prepare_level_attempt(&item).expect("must prepare spec");
+            assert_eq!(spec.expected_level, expected);
+            assert_eq!(spec.target_level, expected + 1);
+            assert!(
+                attempt_uuids.insert(spec.attempt_uuid.clone()),
+                "attempt UUID {} was reused across levels!",
+                spec.attempt_uuid
+            );
+
+            // Step 2: Insert ledger payload verification
+            let ledger_payload = build_insert_attempt_ledger_payload(&item, &spec, item.attempt_count + 1);
+            assert_eq!(ledger_payload["attempt_uuid"], spec.attempt_uuid);
+            assert_eq!(ledger_payload["attempt_number"], item.attempt_count + 1);
+            assert_eq!(ledger_payload["expected_level"], expected);
+            assert_eq!(ledger_payload["step_target_level"], expected + 1);
+            assert_eq!(ledger_payload["queue_item_final_target_level"], 7);
+
+            // Step 3: Establish fence on item and ledger
+            let (_f_path, f_body) = build_fence_attempt_ledger_update(&spec.attempt_uuid);
+            assert_eq!(f_body["attempt_phase"], "EXECUTE_MAY_HAVE_BEEN_SENT");
+
+            // Step 4: Simulate successful execution telemetry
+            let step_gold = 1000 * (expected as i64 + 1);
+            cumulative_gold += step_gold;
+            let telemetry = crate::enhancement::EnhancementStatusTelemetry {
+                version: 1,
+                request_id: spec.attempt_uuid.clone(),
+                state: "TARGET_REACHED".to_string(),
+                captured_slot: 0,
+                template_id: 101,
+                category: 3,
+                base_name: "Kiếm ngắn".to_string(),
+                start_level: expected,
+                current_level: expected + 1,
+                target_level: expected + 1,
+                configured_charm_mode: 0,
+                resolved_charm_mode: 0,
+                payment_type: 0,
+                attempt_count: 1,
+                max_attempts: 1,
+                last_result: Some("SUCCESS".to_string()),
+                quoted_gold_cost: step_gold,
+                quoted_gem_cost: 0,
+                quoted_material_requirements: vec![],
+                actual_gold_spent: step_gold,
+                actual_gem_spent: 0,
+                actual_materials_spent: vec![],
+                actual_charms_spent: 0,
+                accounting_status: "SETTLED".to_string(),
+                validation_only: None,
+                result_code: Some(3),
+                settlement_source: Some("RESULT_CODE".to_string()),
+                settlement_provenance: None,
+                error_code: None,
+                error_message: None,
+                updated_at: "2026-09-29T12:00:00Z".to_string(),
+            };
+
+            // Settle ledger
+            let (_s_path, s_body) = build_settle_attempt_ledger_update(&spec.attempt_uuid, &telemetry);
+            assert_eq!(s_body["attempt_phase"], "SETTLED");
+            assert_eq!(s_body["actual_gold_spent"], step_gold);
+
+            // Settle item
+            let (_i_path, i_body) = build_settlement_commit_update(&item, &spec.attempt_uuid, &telemetry).unwrap();
+            assert_eq!(i_body["attempt_count"], item.attempt_count + 1);
+            assert_eq!(i_body["actual_gold_spent"], cumulative_gold);
+            assert_eq!(i_body["current_level"], expected + 1);
+
+            // Apply to item state
+            item.current_level = expected + 1;
+            item.attempt_count += 1;
+            item.actual_gold_spent = cumulative_gold;
+            item.attempt_phase = "SETTLED".to_string();
+
+            if item.current_level < item.target_level {
+                // Must NOT complete prematurely!
+                let (_prep_path, prep_body) = build_prepare_next_level_update(&item.id, &item.account_id);
+                assert_eq!(prep_body["attempt_phase"], "PREPARING");
+                assert_eq!(prep_body["active_attempt_uuid"], serde_json::Value::Null);
+                item.attempt_phase = "PREPARING".to_string();
+                item.active_attempt_uuid = None;
+            } else {
+                // Final level reached (+6 -> +7)
+                assert_eq!(item.current_level, 7);
+                assert_eq!(item.current_level, item.target_level);
+            }
+        }
+
+        // Exactly four distinct UUIDs generated
+        assert_eq!(attempt_uuids.len(), 4);
+        assert_eq!(item.attempt_count, 4);
+        assert_eq!(item.current_level, 7);
+        assert_eq!(item.actual_gold_spent, cumulative_gold);
+    }
+
+    #[test]
+    fn test_multi_level_failure_halts_queue_and_settles_ledger() {
+        let mut item = EnhancementQueueItemRow::mock("it-fail", "job-fail", 1, 0, 4, 7, "RUNNING");
+        item.attempt_count = 1;
+
+        let spec = prepare_level_attempt(&item).expect("must prepare +4 -> +5 attempt");
+        assert_eq!(spec.expected_level, 4);
+        assert_eq!(spec.target_level, 5);
+
+        // Simulate failure at +4 -> +5
+        let telemetry = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: spec.attempt_uuid.clone(),
+            state: "FAILED".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm ngắn".to_string(),
+            start_level: 4,
+            current_level: 4,
+            target_level: 5,
+            configured_charm_mode: 0,
+            resolved_charm_mode: 0,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("FAILED".to_string()),
+            quoted_gold_cost: 2000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![],
+            actual_gold_spent: 2000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![],
+            actual_charms_spent: 0,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: None,
+            result_code: Some(4),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: None,
+            error_code: Some("ENHANCE_FAILED".to_string()),
+            error_message: Some("Item burned during enhancement".to_string()),
+            updated_at: "2026-09-29T12:00:00Z".to_string(),
+        };
+
+        let (_s_path, s_body) = build_settle_attempt_ledger_update(&spec.attempt_uuid, &telemetry);
+        assert_eq!(s_body["attempt_phase"], "SETTLED");
+        assert_eq!(s_body["result_code"], "4");
+        assert_eq!(s_body["error_code"], "ENHANCE_FAILED");
+
+        // Queue failure mapping
+        let outcome = map_runtime_failure_to_queue_outcome("FAILED", Some("FAILED"), Some("Item burned"));
+        match outcome {
+            QueueFailureOutcome::ItemFailedAndStopQueue { error_code, .. } => {
+                assert_eq!(error_code, "FAILED");
+            }
+            other => panic!("expected ItemFailedAndStopQueue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_multi_level_manual_review_at_intermediate_level_blocks_continuation() {
+        let outcome = map_runtime_failure_to_queue_outcome("ACCOUNTING_UNSETTLED", None, Some("ambiguous result"));
+        match outcome {
+            QueueFailureOutcome::ManualReviewRequiredAndFreezeQueue { error_code, .. } => {
+                assert_eq!(error_code, "ACCOUNTING_UNSETTLED");
+            }
+            other => panic!("expected ManualReviewRequiredAndFreezeQueue, got {:?}", other),
+        }
+
+        // When item status is MANUAL_REVIEW_REQUIRED, item selection halts the queue
+        let mut item = EnhancementQueueItemRow::mock("it-mr", "job-mr", 1, 0, 4, 7, "MANUAL_REVIEW_REQUIRED");
+        let selection = select_next_executable_item(&[item]);
+        assert_eq!(selection, ItemSelectionOutcome::HaltedOnManualReview("it-mr".to_string()));
+    }
+
+    #[test]
+    fn test_boot_restart_between_levels_resumes_from_durable_level() {
+        let job = EnhancementQueueJobRow::mock("job-b", "acc-1", "dev-1", "RUNNING", "worker-1");
+        // Item settled at +4 with final target 7, phase SETTLED
+        let mut item = EnhancementQueueItemRow::mock("it-b", "job-b", 1, 0, 4, 7, "RUNNING");
+        item.attempt_phase = "SETTLED".to_string();
+
+        let recovery = evaluate_restart_recovery_step(&job, Some(&item), None);
+        // Because current_level (4) < target_level (7), mark_completed MUST be false!
+        assert_eq!(recovery, RestartRecoveryAction::AdvanceSettledItem { mark_completed: false });
+
+        // Once current_level (7) >= target_level (7), mark_completed is true
+        let mut item_done = item.clone();
+        item_done.current_level = 7;
+        let recovery_done = evaluate_restart_recovery_step(&job, Some(&item_done), None);
+        assert_eq!(recovery_done, RestartRecoveryAction::AdvanceSettledItem { mark_completed: true });
     }
 }
 

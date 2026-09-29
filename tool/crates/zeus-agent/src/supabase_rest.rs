@@ -638,6 +638,70 @@ impl SupabaseRest {
             &item.attempt_phase,
         ))
     }
+
+    /// Inserts a new attempt ledger row into public.enhancement_queue_item_attempts.
+    pub fn record_attempt_ledger_entry(
+        &self,
+        item: &crate::enhancement_queue::EnhancementQueueItemRow,
+        spec: &crate::enhancement_queue::LevelAttemptSpec,
+        attempt_number: i32,
+    ) -> Result<(), RestError> {
+        let payload = crate::enhancement_queue::build_insert_attempt_ledger_payload(item, spec, attempt_number);
+        self.request("POST", "/rest/v1/enhancement_queue_item_attempts")
+            .prefer("return=minimal")
+            .send_json(&payload)?;
+        Ok(())
+    }
+
+    /// Updates attempt ledger row to EXECUTE_MAY_HAVE_BEEN_SENT when mutation fence commits.
+    pub fn commit_attempt_ledger_fence(&self, attempt_uuid: &str) -> Result<(), RestError> {
+        let (path, body) = crate::enhancement_queue::build_fence_attempt_ledger_update(attempt_uuid);
+        self.request("PATCH", &path)
+            .prefer("return=minimal")
+            .send_json(&body)?;
+        Ok(())
+    }
+
+    /// Settles attempt ledger row when sidecar result arrives.
+    pub fn settle_attempt_ledger_row(
+        &self,
+        attempt_uuid: &str,
+        telemetry: &crate::enhancement::EnhancementStatusTelemetry,
+    ) -> Result<(), RestError> {
+        let (path, body) = crate::enhancement_queue::build_settle_attempt_ledger_update(attempt_uuid, telemetry);
+        self.request("PATCH", &path)
+            .prefer("return=minimal")
+            .send_json(&body)?;
+        Ok(())
+    }
+
+    /// Transitions an item whose prior level attempt settled to PREPARING for the next level.
+    pub fn transition_item_to_preparing_next_level(
+        &self,
+        item_id: &str,
+        account_id: &str,
+    ) -> Result<(), RestError> {
+        let (path, body) = crate::enhancement_queue::build_prepare_next_level_update(item_id, account_id);
+        self.request("PATCH", &path)
+            .prefer("return=minimal")
+            .send_json(&body)?;
+        Ok(())
+    }
+
+    /// Fetches all attempt ledger rows for an item in chronological order.
+    pub fn fetch_item_attempt_ledger(
+        &self,
+        item_id: &str,
+    ) -> Result<Vec<crate::enhancement_queue::EnhancementQueueItemAttemptRow>, RestError> {
+        let response = self
+            .request(
+                "GET",
+                &format!("/rest/v1/enhancement_queue_item_attempts?item_id=eq.{item_id}&order=attempt_number.asc"),
+            )
+            .call()?;
+        let rows = response.json()?;
+        Ok(rows)
+    }
 }
 
 // ── payloads ────────────────────────────────────────────────────────────────────
