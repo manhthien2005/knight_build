@@ -621,6 +621,7 @@ mod tests {
             dungeon_why: 0,
             dungeon_runs: 0,
             dungeon_goal: None,
+            dungeon_fails: 0,
             // ---- end DUNGEON ----
         }
     }

@@ -465,6 +465,12 @@ fn dungeon(reading: &UiPlayerInfo) -> String {
             3 => "đi bị kẹt".to_owned(),
             // Reaching the limit is a finish worth reporting rather than a fault to diagnose.
             4 => return "đủ lượt — dừng".to_owned(),
+            5 => return "đạt giới hạn thất bại — dừng".to_owned(),
+            6 => "hết thời gian PB".to_owned(),
+            7 => "về làng sau tử vong".to_owned(),
+            8 => "mất kết nối".to_owned(),
+            9 => "nhường di chuyển thủ công".to_owned(),
+            10 => "thoát không rõ lý do".to_owned(),
             // A reason this panel does not model is a mod newer than the tool. Saying so beats
             // naming the wrong one.
             _ => "không rõ lý do".to_owned(),
@@ -482,6 +488,9 @@ fn dungeon(reading: &UiPlayerInfo) -> String {
             grouped(i64::from(reading.dungeon_runs))
         ),
         5 => format!("xong lượt {}", grouped(i64::from(reading.dungeon_runs))),
+        6 => "tử vong".to_owned(),
+        7 => "thất bại".to_owned(),
+        8 => "cần can thiệp".to_owned(),
         _ => "không rõ bước".to_owned(),
     }
 }
@@ -588,6 +597,7 @@ mod tests {
             dungeon_why: 0,
             dungeon_runs: 0,
             dungeon_goal: None,
+            dungeon_fails: 0,
             // ---- end DUNGEON ----
         }
     }

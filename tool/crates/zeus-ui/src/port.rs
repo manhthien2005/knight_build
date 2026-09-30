@@ -628,6 +628,7 @@ mod windows_adapter {
             dungeon_why: snapshot.dungeon_why,
             dungeon_runs: snapshot.dungeon_runs,
             dungeon_goal: snapshot.dungeon_goal,
+            dungeon_fails: snapshot.dungeon_fails,
             // ---- end DUNGEON ----
         }
     }

@@ -1521,7 +1521,7 @@ fn account_player_snapshot_crosses_the_boundary_as_values_and_is_cleared_on_stop
             // ---- end ENHANCE ----
             // The dungeon module's own keys, mirroring the live fixture in `player.rs`: the
             // snapshot parser requires them, so a body without them is rejected outright.
-            "dungeonstate=0\ndungeonwhy=0\ndungeonruns=0\ndungeongoal=-1\n",
+            "dungeonstate=0\ndungeonwhy=0\ndungeonruns=0\ndungeongoal=-1\ndungeonfails=0\n",
         ),
     )
     .expect("the profile snapshot is writable");

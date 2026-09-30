@@ -149,6 +149,8 @@ pub struct PlayerSnapshot {
     /// [`Self::travel_goal`]: the mod publishes -1 rather than omitting the key, so an un-armed
     /// loop is a value rather than a missing one.
     pub dungeon_goal: Option<u16>,
+    /// Failed or aborted runs this session.
+    pub dungeon_fails: u16,
     // ---- end DUNGEON ----
 }
 
@@ -324,11 +326,11 @@ pub fn parse_snapshot(text: &str) -> CoreResult<PlayerSnapshot> {
     // before these: a state or reason id the tool does not model is a mod newer than the tool, and
     // guessing would render a wrong label as fact.
     let dungeon_state = parse_u32(take("dungeonstate")?)?;
-    if dungeon_state > 5 {
+    if dungeon_state > 12 {
         return Err(snapshot_error("player_snapshot_dungeon_state_out_of_range"));
     }
     let dungeon_why = parse_u32(take("dungeonwhy")?)?;
-    if dungeon_why > 4 {
+    if dungeon_why > 10 {
         return Err(snapshot_error("player_snapshot_dungeon_why_out_of_range"));
     }
     let dungeon_runs = parse_u32(take("dungeonruns")?)?;
@@ -338,6 +340,10 @@ pub fn parse_snapshot(text: &str) -> CoreResult<PlayerSnapshot> {
     let dungeon_goal = parse_i32(take("dungeongoal")?)?;
     if !(-1..=255).contains(&dungeon_goal) {
         return Err(snapshot_error("player_snapshot_dungeon_goal_out_of_range"));
+    }
+    let dungeon_fails = parse_u32(take("dungeonfails")?)?;
+    if dungeon_fails > 1_000 {
+        return Err(snapshot_error("player_snapshot_dungeon_fails_out_of_range"));
     }
     // ---- end DUNGEON ----
     // The three pickup bytes come back together: the client either has a record or has none, and a
@@ -436,6 +442,7 @@ pub fn parse_snapshot(text: &str) -> CoreResult<PlayerSnapshot> {
         dungeon_why: dungeon_why as u8,
         dungeon_runs: dungeon_runs as u16,
         dungeon_goal: (dungeon_goal >= 0).then_some(dungeon_goal as u16),
+        dungeon_fails: dungeon_fails as u16,
         // ---- end DUNGEON ----
     };
 
@@ -491,6 +498,7 @@ pub fn parse_snapshot(text: &str) -> CoreResult<PlayerSnapshot> {
         "dungeonwhy",
         "dungeonruns",
         "dungeongoal",
+        "dungeonfails",
         // ---- end DUNGEON ----
     ];
     if let Some((unknown, _)) = fields.iter().find(|(key, _)| !KNOWN_KEYS.contains(key)) {
@@ -600,7 +608,7 @@ mod tests {
         "pkrank=1\npkmphp=0\npkgold=0\nbuffs=101\ndrops=1-0110\n",
         "travel=3\ntravelwhy=0\ntravelgoal=43\ntravelhops=2\n",
         "enhancephase=0\nenhancewhy=0\nenhancedone=0\n",
-        "dungeonstate=0\ndungeonwhy=0\ndungeonruns=0\ndungeongoal=-1\n",
+        "dungeonstate=0\ndungeonwhy=0\ndungeonruns=0\ndungeongoal=-1\ndungeonfails=0\n",
     );
 
     struct TestHome(PathBuf);
@@ -686,6 +694,7 @@ mod tests {
         assert_eq!(snapshot.travel_goal, Some(43));
         assert_eq!(snapshot.travel_hops, 2);
         assert_eq!(snapshot.settings_agreed, Some(true));
+        assert_eq!(snapshot.dungeon_fails, 0);
     }
 
     #[test]
@@ -717,10 +726,11 @@ mod tests {
             "enhancephase=8",
             "enhancewhy=5",
             "enhancedone=10000",
-            "dungeonstate=6",
-            "dungeonwhy=5",
+            "dungeonstate=13",
+            "dungeonwhy=11",
             "dungeonruns=1001",
             "dungeongoal=256",
+            "dungeonfails=1001",
         ] {
             let (key, _) = wire.split_once('=').expect("the probe is a key=value pair");
             let body = LIVE_SNAPSHOT.replace(
@@ -732,7 +742,7 @@ mod tests {
                         "travelgoal" => "43",
                         "travelhops" => "2",
                         "enhancephase" | "enhancewhy" | "enhancedone" => "0",
-                        "dungeonstate" | "dungeonwhy" | "dungeonruns" => "0",
+                        "dungeonstate" | "dungeonwhy" | "dungeonruns" | "dungeonfails" => "0",
                         "dungeongoal" => "-1",
                         _ => unreachable!("the probe list and this match are one list"),
                     }

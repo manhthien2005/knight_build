@@ -796,6 +796,8 @@ pub struct UiPlayerInfo {
     /// [`Self::travel_goal`]: the mod publishes `-1` rather than omitting the key, so an un-armed loop
     /// is a value the panel can name rather than a reading it has to guess at.
     pub dungeon_goal: Option<u16>,
+    /// Failed or aborted runs this session.
+    pub dungeon_fails: u16,
     // ---- end DUNGEON ----
 }
 

@@ -3680,7 +3680,7 @@ mod tests {
             pkrank=1\npkmphp=0\npkgold=0\nbuffs=101\ndrops=1-0110\n\
             travel=3\ntravelwhy=0\ntravelgoal=1\ntravelhops=2\n\
             enhancephase=0\nenhancewhy=0\nenhancedone=0\n\
-            dungeonstate=0\ndungeonwhy=0\ndungeonruns=0\ndungeongoal=-1\n"
+            dungeonstate=0\ndungeonwhy=0\ndungeonruns=0\ndungeongoal=-1\ndungeonfails=0\n"
         );
         std::fs::write(home.join(zeus_core::wire::SNAPSHOT_FILE_NAME), content).unwrap();
     }

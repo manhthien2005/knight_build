@@ -3192,6 +3192,7 @@ public final class Zeus {
         // "nowhere" apart from a real map id, and 48 is a real map id. Reporting the dungeon as
         // the destination of a trip that is not running would be a destination nobody armed.
         out.append("dungeongoal=").append(dungeonEnabled ? DUNGEON_MAP : -1).append('\n');
+        out.append("dungeonfails=").append(dungeonFails).append('\n');
         // ---- end DUNGEON ------------------------------------------------------
         write(out.toString());
     }
@@ -3501,6 +3502,7 @@ public final class Zeus {
         navSessionReset();
         cleanEnhancementRouting();
         recoverEnhancementSession();
+        dungeonSessionReset();
     }
 
     private static void sessionTick() {
@@ -3728,6 +3730,9 @@ public final class Zeus {
         }
         if (enhNavigating) {
             return BLACKSMITH_MAP;
+        }
+        if (dungeonNavigating) {
+            return DUNGEON_NPC_MAP;
         }
         return -1;
     }
@@ -6178,85 +6183,298 @@ public final class Zeus {
     //     would fight `bq.W` rather than serve it. Recorded here as a known gap.
 
     /** Dungeon states. The same discipline as {@link #TV_OFF}: anything else is a reason to stop. */
-    private static final int DN_OFF = 0, DN_IDLE = 1, DN_GOTO_NPC = 2, DN_INTERACT = 3,
-            DN_IN_DUNGEON = 4, DN_DONE = 5;
+    public static final int DN_OFF = 0;
+    public static final int DN_IDLE = 1;
+    public static final int DN_ROUTING = 2;
+    public static final int DN_PREPARATION = 3;
+    public static final int DN_COMBAT = 4;
+    public static final int DN_COMPLETION_WAIT = 5;
+    public static final int DN_DEATH = 6;
+    public static final int DN_FAILURE = 7;
+    public static final int DN_MANUAL_REVIEW = 8;
+
+    // Backward-compatible aliases:
+    public static final int DN_GOTO_NPC = DN_ROUTING;
+    public static final int DN_INTERACT = DN_PREPARATION;
+    public static final int DN_IN_DUNGEON = DN_COMBAT;
+    public static final int DN_DONE = DN_COMPLETION_WAIT;
 
     /** The dungeon's map id, and the two ways it is recognised. See {@link #dungeonInDungeon}. */
-    private static final int DUNGEON_MAP = 48;
-    private static final String DUNGEON_NAME = "nga tu";
+    public static final int DUNGEON_MAP = 48;
+    public static final String DUNGEON_NAME = "nga tu";
 
     /** The guide's map, name and fallback template id. */
-    private static final int DUNGEON_NPC_MAP = 1;
-    private static final String DUNGEON_NPC_NAME = "pho chi huy";
-    private static final int DUNGEON_NPC_CU = -37;
-    /**
-     * Where to walk when the guide is not in the scene stream at all.
-     *
-     * A degraded path rather than the normal one: {@link #dungeonNpc} finds the guide by name in
-     * almost every tick, and this is only reached when the entity list has no NPC matching either
-     * the name or the fallback id.
-     */
-    private static final int DUNGEON_NPC_X = 552;
-    private static final int DUNGEON_NPC_Y = 504;
+    public static final int DUNGEON_NPC_MAP = 1;
+    public static final String DUNGEON_NPC_NAME = "pho chi huy";
+    public static final int DUNGEON_NPC_CU = -37;
+    public static final int DUNGEON_NPC_X = 552;
+    public static final int DUNGEON_NPC_Y = 504;
+
+    /** Dungeon combat anchor coordinates and scan radius, source-proven from V2 reference. */
+    public static final int DUNGEON_COMBAT_X = 672;
+    public static final int DUNGEON_COMBAT_Y = 600;
+    public static final int DUNGEON_SCAN_RADIUS = 600;
+    public static final int DUNGEON_LEASH_RADIUS = 48;
+    public static final int DUNGEON_IDLE_LEASH_TICKS = 20;
 
     /** Asks before giving up on anything. Three is the budget KnightMod's own module used. */
-    private static final int DN_MAX_TRIES = 3;
+    public static final int DN_MAX_TRIES = 3;
     /**
      * Ticks with no movement at all before a walk is called a stall: 2.4 s at the loop's 25 ticks/s,
      * the same order {@link #travel} uses. A path that never completes is a stall, not a walk.
      */
-    private static final int DN_STALL_TICKS = 60;
-    /**
-     * Ticks to stand still after a run before asking for the next, and the ceiling the snapshot
-     * contract puts on the tally: `dungeonruns` is rejected outright past 1000 rather than clamped,
-     * so counting past it would break the whole snapshot instead of one field.
-     */
-    private static final int DN_BETWEEN_RUNS = 100;
-    private static final int DUNGEON_RUNS_MAX = 1000;
+    public static final int DN_STALL_TICKS = 60;
+    /** Ticks to stand still after a run before asking for the next. */
+    public static final int DN_BETWEEN_RUNS = 100;
+    public static final int DUNGEON_RUNS_MAX = 1000;
+
+    /** Max runtime in ticks (300 seconds at 25 ticks/s = 7500 ticks). */
+    public static final int DN_MAX_RUN_TICKS = 7500;
+
+    /** Consecutive failure cap before hard-stopping to manual review. */
+    public static final int DN_CONSECUTIVE_FAIL_CAP = 2;
 
     /**
      * DUNGEON's own settings and state.
-     *
-     * `dungeonMaxRuns` and `dungeonSchedule` both take -1 as off, because 0 is a real value inside
-     * each range. `dungeonWait` is a tick budget in the shape of {@link #travelWait}: a menu reply
-     * is a packet, so the module arms a deadline and hands the tick back instead of polling.
-     * `dungeonTried` bounds every ask, in the shape of {@link #travelStoneTried}. `dungeonStep`
-     * says which of the NPC's two menus is expected next: 0 the dialogue, 1 the dungeon row.
-     * `dungeonWasIn` is what makes a run countable — leaving map 48 means nothing on its own, since
-     * a death town-port leaves it too.
      */
-    private static boolean dungeonEnabled = false;
-    private static int dungeonMaxRuns = -1;
-    private static int dungeonSchedule = -1;
-    private static int dungeonState = DN_OFF;
-    private static int dungeonWhy = 0;
-    private static int dungeonRuns = 0;
-    private static int dungeonWait = 0;
-    private static int dungeonTried = 0;
-    private static int dungeonStep = 0;
-    private static boolean dungeonWasIn = false;
-    private static int dungeonNpcCu = -1;
-    private static int dungeonScheduleDay = -1;
-    /** True between the first ask of a trip and its run limit, so the schedule gates the trip and not each run. */
-    private static boolean dungeonTripActive = false;
-    private static int dungeonStallTicks = 0;
-    private static int dungeonLastX = Integer.MIN_VALUE;
-    private static int dungeonLastY = Integer.MIN_VALUE;
-    private static int dungeonMapSeen = Integer.MIN_VALUE;
+    static boolean dungeonEnabled = false;
+    static int dungeonMaxRuns = -1;
+    static int dungeonSchedule = -1;
+    static int dungeonState = DN_OFF;
+    static int dungeonWhy = 0;
+    static int dungeonRuns = 0;
+    static int dungeonFails = 0;
+    static int dungeonConsecutiveFails = 0;
+    static int dungeonWait = 0;
+    static int dungeonTried = 0;
+    static int dungeonStep = 0;
+    static boolean dungeonWasIn = false;
+    static int dungeonNpcCu = -1;
+    static int dungeonScheduleDay = -1;
+    static boolean dungeonTripActive = false;
+    static int dungeonStallTicks = 0;
+    static int dungeonLastX = Integer.MIN_VALUE;
+    static int dungeonLastY = Integer.MIN_VALUE;
+    static int dungeonMapSeen = Integer.MIN_VALUE;
+
+    /** Internal Dungeon navigation ownership flag. */
+    static boolean dungeonNavigating = false;
+    /** True once live combat with a valid monster was engaged inside Map 48. */
+    static boolean dungeonCombatEngaged = false;
+    /** True if death occurred while inside Map 48. */
+    static boolean dungeonDiedInRun = false;
+    /** True if manual travel or escape was triggered during the run. */
+    static boolean dungeonManualEscaped = false;
+    /** True if a completion dialog or completion candidate signal was observed. */
+    static boolean dungeonClearCandidate = false;
+    /** True if 0 monsters were sustained for >= 50 ticks after engaging combat. */
+    static boolean dungeonMonstersCleared = false;
+    static int dungeonMonstersZeroTicks = 0;
+    static int dungeonNoTargetTicks = 0;
+    static int dungeonRunTicks = 0;
 
     /** Labels of the server menu currently open, captured by {@link #serverMenu}. Its own trio: never TRAVEL's. */
-    private static String[] dungeonMenu = null;
-    private static int dungeonMenuNpc = Integer.MIN_VALUE;
-    private static int dungeonMenuId = 0;
+    static String[] dungeonMenu = null;
+    static int dungeonMenuNpc = Integer.MIN_VALUE;
+    static int dungeonMenuId = 0;
+
+    /** Backup fields for user Auto Farm / combat configuration. */
+    static boolean dungeonCombatBackedUp = false;
+    static int dungeonUserAtkMode = 0;
+    static int dungeonUserAtkMap = 0;
+    static int dungeonUserAtkX = -1;
+    static int dungeonUserAtkY = -1;
+    static int dungeonUserAtkRadius = 120;
+    static boolean dungeonUserAtkFarmOnArrival = true;
+
+    /** Backs up the operator's Auto Farm combat configuration before Dungeon takes over combat. */
+    public static void dungeonBackupCombat() {
+        if (!dungeonCombatBackedUp) {
+            dungeonUserAtkMode = atkMode;
+            dungeonUserAtkMap = atkMap;
+            dungeonUserAtkX = atkX;
+            dungeonUserAtkY = atkY;
+            dungeonUserAtkRadius = atkRadius;
+            dungeonUserAtkFarmOnArrival = atkFarmOnArrival;
+            dungeonCombatBackedUp = true;
+        }
+    }
+
+    /** Restores the operator's Auto Farm combat configuration on exit or termination. */
+    public static void dungeonRestoreCombat() {
+        if (dungeonCombatBackedUp) {
+            atkMode = dungeonUserAtkMode;
+            atkMap = dungeonUserAtkMap;
+            atkX = dungeonUserAtkX;
+            atkY = dungeonUserAtkY;
+            atkRadius = dungeonUserAtkRadius;
+            atkFarmOnArrival = dungeonUserAtkFarmOnArrival;
+            dungeonCombatBackedUp = false;
+        }
+        if (cn.g != null) {
+            cn.g.bi = NATIVE_RADIUS;
+        }
+        bq.o = (byte) -1;
+        bq.Y = false;
+        bq.W = false;
+        cn.i = null;
+    }
+
+    /**
+     * Normalizes entity name and checks whether it contains 'thien thach'.
+     */
+    public static boolean isMeteorTarget(fa target) {
+        if (target == null || target.cC == null) {
+            return false;
+        }
+        String name = normSemantic(target.cC);
+        return name.indexOf("thien thach") >= 0;
+    }
+
+    /**
+     * Validates whether an entity is a live, valid non-meteor monster target.
+     */
+    public static boolean isValidDungeonTarget(fa target) {
+        if (target == null || target.cv != 1 || target.bs <= 0 || target.cG == 4) {
+            return false;
+        }
+        return !isMeteorTarget(target);
+    }
+
+    /**
+     * Finds the nearest valid live non-meteor monster entity relative to the dungeon center anchor.
+     */
+    public static fa findBestDungeonTarget() {
+        if (cn.j == null) {
+            return null;
+        }
+        fa best = null;
+        int minDistance = Integer.MAX_VALUE;
+        for (int i = 0; i < cn.j.c(); i++) {
+            Object entry = cn.j.a(i);
+            if (!(entry instanceof fa)) {
+                continue;
+            }
+            fa candidate = (fa) entry;
+            if (!isValidDungeonTarget(candidate)) {
+                continue;
+            }
+            int dist = Math.abs(DUNGEON_COMBAT_X - candidate.aZ) + Math.abs(DUNGEON_COMBAT_Y - candidate.ba);
+            if (dist < minDistance) {
+                minDistance = dist;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Counts live, valid non-meteor monster entities currently in the scene.
+     */
+    public static int countLiveDungeonMonsters() {
+        if (cn.j == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int i = 0; i < cn.j.c(); i++) {
+            Object entry = cn.j.a(i);
+            if (!(entry instanceof fa)) {
+                continue;
+            }
+            fa candidate = (fa) entry;
+            if (isValidDungeonTarget(candidate)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Inspects active dialogs for clear candidate keywords while inside Map 48.
+     */
+    public static void checkDungeonCompletionDialog() {
+        try {
+            if (fu.s instanceof ah) {
+                ah dialog = (ah) fu.s;
+                String text = normSemantic(dialogText(dialog));
+                if (text.indexOf("hoan thanh") >= 0
+                        || text.indexOf("chien thang") >= 0
+                        || text.indexOf("thanh cong") >= 0
+                        || text.indexOf("vuot qua") >= 0
+                        || text.indexOf("ket qua") >= 0
+                        || text.indexOf("phan thuong") >= 0) {
+                    dungeonClearCandidate = true;
+                }
+            }
+        } catch (Throwable t) {
+            // Guard against UI reflection/dialog failures
+        }
+    }
+
+    /**
+     * Autonomous combat loop inside Map 48.
+     */
+    public static void dungeonCombat() {
+        dungeonBackupCombat();
+        if (cn.g != null) {
+            cn.g.bi = DUNGEON_SCAN_RADIUS;
+        }
+        if (++dungeonRunTicks > DN_MAX_RUN_TICKS) {
+            trace("DUNGEON run timed out after " + dungeonRunTicks + " ticks");
+            dungeonFailRun(6, "dungeon run timed out (>300s)");
+            return;
+        }
+
+        checkDungeonCompletionDialog();
+
+        // Release meteor target immediately if held
+        if (cn.i != null && (isMeteorTarget(cn.i) || cn.i.cv != 1 || cn.i.bs <= 0 || cn.i.cG == 4)) {
+            cn.i = null;
+        }
+        if (cn.i == null) {
+            cn.i = findBestDungeonTarget();
+        }
+
+        if (cn.i != null) {
+            dungeonCombatEngaged = true;
+            dungeonNoTargetTicks = 0;
+            dungeonMonstersZeroTicks = 0;
+            bq.R = cn.i.aZ;
+            bq.S = cn.i.ba;
+            bq.o = (byte) 1;
+            bq.Y = true;
+            bq.W = true;
+            skills();
+            potions();
+        } else {
+            bq.o = (byte) -1;
+            bq.Y = false;
+            bq.W = false;
+            ++dungeonNoTargetTicks;
+            if (dungeonNoTargetTicks >= DUNGEON_IDLE_LEASH_TICKS) {
+                if (cn.g != null) {
+                    int drift = Math.abs(cn.g.aZ - DUNGEON_COMBAT_X) + Math.abs(cn.g.ba - DUNGEON_COMBAT_Y);
+                    if (drift > DUNGEON_LEASH_RADIUS && canMove()) {
+                        travelMove(DUNGEON_MAP, DUNGEON_COMBAT_X, DUNGEON_COMBAT_Y);
+                    }
+                }
+            }
+            potions();
+            int liveCount = countLiveDungeonMonsters();
+            if (liveCount == 0) {
+                if (++dungeonMonstersZeroTicks >= 50) {
+                    dungeonMonstersCleared = true;
+                }
+            } else {
+                dungeonMonstersZeroTicks = 0;
+            }
+        }
+    }
 
     /**
      * Forgets one trip.
-     *
-     * `dungeonRuns` survives, because a tally of what already happened is not a piece of in-flight
-     * state — `enhanceDone`'s rule. The switch turning back on clears it separately, since a limit
-     * of three runs left over from the last trip would be a limit of three runs already spent.
      */
-    private static void dungeonReset() {
+    public static void dungeonReset() {
         dungeonState = DN_OFF;
         dungeonWhy = 0;
         dungeonWait = 0;
@@ -6272,91 +6490,184 @@ public final class Zeus {
         dungeonMapSeen = Integer.MIN_VALUE;
         dungeonMenu = null;
         dungeonMenuNpc = Integer.MIN_VALUE;
+        dungeonNavigating = false;
+        dungeonCombatEngaged = false;
+        dungeonDiedInRun = false;
+        dungeonManualEscaped = false;
+        dungeonClearCandidate = false;
+        dungeonMonstersCleared = false;
+        dungeonMonstersZeroTicks = 0;
+        dungeonNoTargetTicks = 0;
+        dungeonRunTicks = 0;
+        dungeonConsecutiveFails = 0;
+        dungeonRestoreCombat();
     }
 
-    /** Stops and says why, in the shape of {@link #travelStop}. `dungeonWhy != 0` is what holds DN_OFF. */
-    private static void dungeonStop(int why, String reason) {
-        dungeonState = DN_OFF;
+    /** Stops and says why. If why == 5, transitions to DN_MANUAL_REVIEW. */
+    public static void dungeonStop(int why, String reason) {
+        dungeonState = (why == 5) ? DN_MANUAL_REVIEW : DN_OFF;
         dungeonWhy = why;
         dungeonTripActive = false;
-        // A stop mid-conversation leaves a panel up that nothing will read, and a panel left up
-        // blocks every module that gates on ready().
+        dungeonNavigating = false;
         dungeonCloseMenu();
         dungeonMenu = null;
         dungeonMenuNpc = Integer.MIN_VALUE;
+        dungeonRestoreCombat();
         trace("DUNGEON stopped (" + why + "): " + reason);
+    }
+
+    /** Handles run failure, bounds consecutive failures, and triggers manual review when cap reached. */
+    public static void dungeonFailRun(int why, String reason) {
+        if (dungeonFails < DUNGEON_RUNS_MAX) {
+            ++dungeonFails;
+        }
+        ++dungeonConsecutiveFails;
+        dungeonRestoreCombat();
+        trace("DUNGEON run failed (" + why + "): " + reason + " (fails=" + dungeonFails
+                + " consec=" + dungeonConsecutiveFails + ")");
+        if (dungeonConsecutiveFails >= DN_CONSECUTIVE_FAIL_CAP) {
+            dungeonStop(5, "consecutive failure cap of " + DN_CONSECUTIVE_FAIL_CAP + " reached");
+            dungeonState = DN_MANUAL_REVIEW;
+            return;
+        }
+        dungeonState = DN_FAILURE;
+        dungeonWhy = why;
+        dungeonWait = DN_BETWEEN_RUNS;
+        dungeonTried = 0;
+        dungeonStep = 0;
+        dungeonNpcCu = -1;
+        dungeonClearCandidate = false;
+        dungeonMonstersCleared = false;
+        dungeonMonstersZeroTicks = 0;
+        dungeonNoTargetTicks = 0;
+        dungeonRunTicks = 0;
+        dungeonCombatEngaged = false;
+        dungeonDiedInRun = false;
+        dungeonManualEscaped = false;
+    }
+
+    /** Resets session-local transient menu and navigation state on world entry/disconnect. */
+    public static void dungeonSessionReset() {
+        dungeonCloseMenu();
+        dungeonMenu = null;
+        dungeonMenuNpc = Integer.MIN_VALUE;
+        dungeonWait = 0;
+        dungeonStep = 0;
+        dungeonTried = 0;
+        dungeonNavigating = false;
+        if (dungeonState == DN_PREPARATION || dungeonState == DN_ROUTING) {
+            dungeonState = DN_IDLE;
+        }
+        if (dungeonWasIn && (fu.q == null || fu.q.d != DUNGEON_MAP)) {
+            dungeonWasIn = false;
+            dungeonFailRun(8, "reconnect outside dungeon during active run");
+        }
     }
 
     /**
      * One step of the trip, or nothing at all.
-     *
-     * Runs outside `items()`, which gates on ready(): ready() requires no dialog, and an NPC menu
-     * is exactly the state this module has to act in. Gated there it would wait for the operator to
-     * dismiss a menu it had opened itself — the bug that moved `drops()` and `zone()` out.
      */
     private static void dungeon() {
         try {
             if (!dungeonEnabled) {
-                // Off is a state rather than a no-op: a menu captured on the way down has to be
-                // dropped with it, or it stays up blocking everything that gates on ready().
                 if (dungeonState != DN_OFF || dungeonMenuNpc != Integer.MIN_VALUE) {
                     dungeonCloseMenu();
                     dungeonReset();
                 }
                 return;
             }
-            if (!inGame() || !sceneReady() || !alive() || captcha()
+            if (!inGame() || !sceneReady() || captcha()
                     || cn.g == null || fu.q == null) {
-                return;             // keep the intent; a load screen is not a failure
+                return; // keep intent; loading screen is not a failure
             }
-            // Deliberately NOT ready(): that requires no dialog, and this module lives inside NPC
-            // menus. Gating on it would deadlock on the first reply.
+
             int here = fu.q.d;
             if (here != dungeonMapSeen) {
                 dungeonMapSeen = here;
-                dungeonWait = 12;   // let the scene settle before reading it
+                dungeonWait = 12; // let the scene settle
                 dungeonStallTicks = 0;
                 dungeonLastX = Integer.MIN_VALUE;
                 dungeonLastY = Integer.MIN_VALUE;
-                // Any walk from the previous map is void, and the movement lock outlives it: left
-                // set, canMove() stays false forever and every module that walks silently stops.
-                // Released only while THIS module is the one walking — a lock TRAVEL holds belongs
-                // to TRAVEL, and taking it would stop a route the operator armed.
-                if (dungeonState == DN_GOTO_NPC) {
+                if (dungeonState == DN_ROUTING || dungeonState == DN_GOTO_NPC) {
                     bq.m = false;
                     cn.g.cO = null;
                 }
             }
-            // Entry and exit are read before the wait budget, not after it: the teleport sets that
-            // budget on the same tick it changes the map, and a run counted twelve ticks late is a
-            // run counted after the next ask has already gone out.
+
             if (dungeonInDungeon()) {
                 dungeonWasIn = true;
                 dungeonTried = 0;
-                if (dungeonState != DN_IN_DUNGEON) {
-                    dungeonState = DN_IN_DUNGEON;
+                dungeonNavigating = false;
+                if (dungeonState != DN_COMBAT) {
+                    dungeonState = DN_COMBAT;
                     dungeonWhy = 0;
+                    dungeonRunTicks = 0;
+                    dungeonClearCandidate = false;
+                    dungeonMonstersCleared = false;
+                    dungeonMonstersZeroTicks = 0;
+                    dungeonNoTargetTicks = 0;
                     trace("DUNGEON entered map " + here);
                 }
-                // ATTACK fights here when a spot is armed on this map; this module has nothing to
-                // add and does not duplicate a target selection it does not own.
+
+                // Check death state inside dungeon
+                if (cn.g != null && cn.g.cG == 4) {
+                    dungeonDiedInRun = true;
+                    dungeonState = DN_DEATH;
+                    return;
+                }
+
+                dungeonCombat();
                 return;
             }
-            if (here == DUNGEON_NPC_MAP && dungeonWasIn) {
-                // Back on the guide's map having been inside: that is a finished run. Any other map
-                // would count a death town-port or a manual walk as one.
+
+            // Map 48 exit evaluation
+            if (dungeonWasIn) {
                 dungeonWasIn = false;
-                dungeonState = DN_DONE;
-                return;
+                dungeonNavigating = false;
+
+                boolean success = (here == DUNGEON_NPC_MAP)
+                        && dungeonCombatEngaged
+                        && !dungeonDiedInRun
+                        && !dungeonManualEscaped
+                        && alive()
+                        && (dungeonClearCandidate || dungeonMonstersCleared);
+
+                if (success) {
+                    dungeonState = DN_COMPLETION_WAIT;
+                    dungeonRestoreCombat();
+                    dungeonDone();
+                    return;
+                } else {
+                    int failWhy = 10;
+                    String reason = "ambiguous exit from dungeon";
+                    if (dungeonDiedInRun) {
+                        failWhy = 7;
+                        reason = "died in dungeon and returned to town";
+                    } else if (dungeonManualEscaped) {
+                        failWhy = 9;
+                        reason = "manual escape or travel conflict during dungeon";
+                    } else if (dungeonRunTicks > DN_MAX_RUN_TICKS) {
+                        failWhy = 6;
+                        reason = "dungeon run timed out";
+                    } else if (!dungeonCombatEngaged) {
+                        failWhy = 10;
+                        reason = "exited dungeon without combat engagement";
+                    } else if (!dungeonClearCandidate && !dungeonMonstersCleared) {
+                        failWhy = 10;
+                        reason = "exited dungeon without completion signals";
+                    }
+                    dungeonFailRun(failWhy, reason);
+                    return;
+                }
             }
+
             if (dungeonWait > 0) {
                 --dungeonWait;
                 return;
             }
+
             switch (dungeonState) {
                 case DN_OFF:
-                    // A non-zero why is a deliberate stop, not a module that never started. Holding
-                    // here is what "never loop" means; re-arming is the operator's switch.
                     if (dungeonWhy == 0) {
                         dungeonState = DN_IDLE;
                     }
@@ -6364,14 +6675,28 @@ public final class Zeus {
                 case DN_IDLE:
                     dungeonIdle();
                     return;
-                case DN_GOTO_NPC:
+                case DN_ROUTING: // DN_GOTO_NPC
                     dungeonGotoNpc(here);
                     return;
-                case DN_INTERACT:
+                case DN_PREPARATION: // DN_INTERACT
                     dungeonInteract();
                     return;
-                case DN_DONE:
+                case DN_COMPLETION_WAIT: // DN_DONE
                     dungeonDone();
+                    return;
+                case DN_FAILURE:
+                    if (dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
+                        dungeonStop(4, "run limit reached");
+                        return;
+                    }
+                    dungeonState = DN_IDLE;
+                    return;
+                case DN_DEATH:
+                    if (dungeonInDungeon() && alive()) {
+                        dungeonState = DN_COMBAT;
+                    }
+                    return;
+                case DN_MANUAL_REVIEW:
                     return;
                 default:
                     dungeonStop(3, "unknown state " + dungeonState);
@@ -6387,20 +6712,16 @@ public final class Zeus {
             dungeonStop(4, "run limit of " + dungeonMaxRuns + " already reached");
             return;
         }
-        // The schedule gates the TRIP, not each run: once a trip is under way it runs to its limit,
-        // which is what makes "ten runs at 20:00" mean ten runs and not one.
         if (!dungeonTripActive) {
             if (dungeonSchedule >= 0) {
                 if (!dungeonScheduleDue()) {
-                    return;         // still before the slot; IDLE is the honest state to publish
+                    return;
                 }
-                // Stamped when the trip starts, so it cannot re-fire today. -1 on an unreadable
-                // clock, which simply leaves the gate open — the fail-open choice above.
                 dungeonScheduleDay = dungeonDayNow();
             }
             dungeonTripActive = true;
         }
-        dungeonState = DN_GOTO_NPC;
+        dungeonState = DN_ROUTING;
         dungeonTried = 0;
         dungeonStep = 0;
         dungeonStallTicks = 0;
@@ -6409,22 +6730,38 @@ public final class Zeus {
         trace("DUNGEON starting a run (done=" + dungeonRuns + " max=" + dungeonMaxRuns + ")");
     }
 
-    /** Walks to the guide and asks it. Holds rather than routing when the character is elsewhere. */
+    /** Walks to the guide and asks it. Autonomously routes to Map 1 when standing elsewhere. */
     private static void dungeonGotoNpc(int here) {
-        if (here != DUNGEON_NPC_MAP) {
-            // Not the guide's map, and no route is invented here. TRAVEL owns the movement lock and
-            // the operator arms `nav.target` separately; two modules pathing at once is how a
-            // character ends up walked somewhere neither of them asked for. Hold, and say why.
-            if (dungeonWhy != 1) {
-                dungeonWhy = 1;
-                trace("DUNGEON needs map " + DUNGEON_NPC_MAP + ", standing on " + here
-                        + "; waiting for TRAVEL");
+        if (navTarget >= 0 && !navDone) {
+            if (dungeonNavigating) {
+                dungeonNavigating = false;
+            }
+            if (dungeonWhy != 9) {
+                dungeonWhy = 9;
+                trace("DUNGEON yielding to manual travel (navTarget=" + navTarget + ")");
             }
             return;
         }
+
+        if (here != DUNGEON_NPC_MAP) {
+            int hop = mapNextHop(here, DUNGEON_NPC_MAP);
+            if (hop < 0 || mapDistance(here, DUNGEON_NPC_MAP) < 0 || travelState == TV_BLOCKED) {
+                dungeonStop(1, "no route from map " + here + " to dungeon NPC map " + DUNGEON_NPC_MAP);
+                return;
+            }
+            dungeonNavigating = true;
+            if (dungeonWhy != 0) {
+                dungeonWhy = 0;
+            }
+            return;
+        }
+
+        // Authoritative arrival on Map 1
+        dungeonNavigating = false;
         if (dungeonWhy != 0) {
             dungeonWhy = 0;
         }
+
         fa npc = dungeonNpc();
         int x = DUNGEON_NPC_X;
         int y = DUNGEON_NPC_Y;
@@ -6433,10 +6770,6 @@ public final class Zeus {
             y = npc.ba;
         }
         if (!travelArrive(x, y, 80)) {
-            // The client's own pathfinder, through the helper TRAVEL uses. No movement at all for a
-            // whole budget is a stall: the pathfinder can hand back a route that never completes,
-            // and without this the state would never change and the tool would show a walk that is
-            // not walking.
             if (cn.g.aZ == dungeonLastX && cn.g.ba == dungeonLastY) {
                 if (++dungeonStallTicks > DN_STALL_TICKS) {
                     dungeonStop(3, "stalled walking to the dungeon NPC on map " + here);
@@ -6451,8 +6784,6 @@ public final class Zeus {
             return;
         }
         if (npc == null) {
-            // At the surveyed spot with nothing to talk to. Bounded, then a reason: waiting forever
-            // on an NPC that is not in the scene stream is the failure this file records for TRAVEL.
             if (++dungeonTried >= DN_MAX_TRIES) {
                 dungeonStop(1, "no dungeon NPC on map " + here);
                 return;
@@ -6461,7 +6792,7 @@ public final class Zeus {
             return;
         }
         if (dungeonClickNpc(npc)) {
-            dungeonState = DN_INTERACT;
+            dungeonState = DN_PREPARATION;
             dungeonStep = 0;
             dungeonTried = 0;
             dungeonStallTicks = 0;
@@ -6473,11 +6804,6 @@ public final class Zeus {
 
     /**
      * Drives the NPC's two menus: the dialogue row, then the dungeon row.
-     *
-     * Both are read out of the labels {@link #serverMenu} captured rather than out of a hard-coded
-     * index, because the index is whatever position the server put the row in and the server is the
-     * only thing that knows. Each ask arms a deadline and hands the tick back; the reply lands in
-     * the capture branch and is acted on here on a later tick.
      */
     private static void dungeonInteract() {
         if (dungeonMenu == null) {
@@ -6491,24 +6817,16 @@ public final class Zeus {
                 return;
             }
             if (dungeonStep != 0) {
-                // The submenu never came. Start the conversation over from the NPC rather than
-                // poking a panel this module can no longer address: re-selecting the open menu is
-                // what KnightMod did by setting its cursor, and that field (`fr.h`) is private in
-                // this build. Asking the NPC again is the same conversation over a packet that
-                // exists here.
                 dungeonStep = 0;
             }
             dungeonAskNpc();
             return;
         }
-        // The dialogue row first and the shop never: "giao dich" is the exclusion, tested on the
-        // whole word. Opening the shop instead is the documented failure mode of this trip.
+
         String needle = dungeonStep == 0 ? "giao tiep" : DUNGEON_NAME;
         String reject = dungeonStep == 0 ? "giao dich" : null;
         int pick = dungeonMenuPick(needle, reject);
         if (pick < 0) {
-            // Not the menu that was asked for — the operator opened something, or the server sent a
-            // page this trip has no use for. Closed rather than left up, and bounded.
             dungeonCloseMenu();
             dungeonMenu = null;
             dungeonMenuNpc = Integer.MIN_VALUE;
@@ -6530,22 +6848,29 @@ public final class Zeus {
             trace("DUNGEON picked the dialogue, waiting on the submenu");
             return;
         }
-        // The teleport is the server's to make. Nothing to poll: the map change ends this state, and
-        // the budget is only how long to wait before calling that a failure.
+
         dungeonTried = 0;
         dungeonWait = 40;
         trace("DUNGEON asked for the dungeon, waiting on the teleport");
     }
 
-    /** Counts the run, then either stops at the limit or goes round again. */
-    private static void dungeonDone() {
+    /** Counts the run, resets failure streak, then either stops at the limit or goes round again. */
+    public static void dungeonDone() {
         if (dungeonRuns < DUNGEON_RUNS_MAX) {
             ++dungeonRuns;
         }
+        dungeonConsecutiveFails = 0;
+        dungeonRestoreCombat();
+        dungeonCombatEngaged = false;
+        dungeonClearCandidate = false;
+        dungeonMonstersCleared = false;
+        dungeonMonstersZeroTicks = 0;
+        dungeonNoTargetTicks = 0;
+        dungeonRunTicks = 0;
+        dungeonDiedInRun = false;
+        dungeonManualEscaped = false;
         trace("DUNGEON run " + dungeonRuns + " complete");
         if (dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
-            // Stops, and stays stopped. Looping back for one more run past a limit the operator set
-            // is the one failure this module must not have.
             dungeonStop(4, "run limit of " + dungeonMaxRuns + " reached");
             return;
         }
@@ -6622,6 +6947,9 @@ public final class Zeus {
 
     private static void attack() {
         try {
+            if (dungeonEnabled && fu.q != null && fu.q.d == DUNGEON_MAP) {
+                return;
+            }
             if (atkMode == 0 || atkX < 0 || atkY < 0) {
                 combatOff();
                 return;
