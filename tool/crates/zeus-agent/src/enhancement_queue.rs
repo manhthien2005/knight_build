@@ -326,6 +326,10 @@ impl EnhancementQueueJobRow {
     }
 }
 
+fn default_max_attempts() -> i32 {
+    10
+}
+
 /// Row structure representing `public.enhancement_queue_items`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnhancementQueueItemRow {
@@ -348,6 +352,8 @@ pub struct EnhancementQueueItemRow {
     pub charm_mode: String,
     pub status: String,
     pub attempt_count: i32,
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: i32,
 
     // Durable attempt fields
     #[serde(default)]
@@ -423,6 +429,7 @@ impl EnhancementQueueItemRow {
             charm_mode: "NONE".to_string(),
             status: status.to_string(),
             attempt_count: 0,
+            max_attempts: 10,
             active_attempt_uuid: None,
             attempt_phase: "NONE".to_string(),
             attempt_expected_level: None,
@@ -614,6 +621,8 @@ pub enum LevelAttemptError {
     InvalidPaymentType(String),
     #[error("charm mode parse error: {0}")]
     InvalidCharmMode(String),
+    #[error("maximum execution attempts ({max_attempts}) reached (current: {attempt_count})")]
+    AttemptCapReached { attempt_count: i32, max_attempts: i32 },
 }
 
 /// Generates a standard RFC 4122 UUID v4 for each fresh level attempt.
@@ -723,6 +732,12 @@ pub fn prepare_level_attempt(item: &EnhancementQueueItemRow) -> Result<LevelAtte
     }
     if item.current_level < 0 || item.current_level > 14 {
         return Err(LevelAttemptError::CurrentLevelOutOfBounds(item.current_level));
+    }
+    if item.attempt_count >= item.max_attempts {
+        return Err(LevelAttemptError::AttemptCapReached {
+            attempt_count: item.attempt_count,
+            max_attempts: item.max_attempts,
+        });
     }
 
     let payment_type = item
@@ -852,6 +867,31 @@ pub fn is_settled_telemetry_success(telemetry: &crate::enhancement::EnhancementS
         || telemetry.state == "TARGET_REACHED"
 }
 
+/// Determines if a settled enhancement telemetry represents a normal equipment RNG failure
+/// (degraded or protected) where the item was NOT destroyed and remains valid in inventory.
+pub fn is_settled_telemetry_degraded_or_protected(
+    telemetry: &crate::enhancement::EnhancementStatusTelemetry,
+) -> bool {
+    if telemetry.accounting_status != "SETTLED" {
+        return false;
+    }
+    if telemetry.result_code == Some(5)
+        || telemetry.last_result.as_deref() == Some("DESTROYED")
+        || telemetry.state == "ITEM_DESTROYED"
+    {
+        return false;
+    }
+    if telemetry.result_code == Some(4) {
+        return true;
+    }
+    if let Some(lr) = telemetry.last_result.as_deref() {
+        if lr == "FAILURE_DEGRADED" || lr == "FAILURE_PROTECTED" {
+            return true;
+        }
+    }
+    telemetry.state == "FAILURE_DEGRADED" || telemetry.state == "FAILURE_PROTECTED"
+}
+
 /// Builds idempotent CAS update for committing settled actual spend and current level.
 pub fn build_settlement_commit_update(
     item: &EnhancementQueueItemRow,
@@ -903,8 +943,11 @@ pub fn build_settlement_commit_update(
         )
     };
 
-    let is_success = is_settled_telemetry_success(telemetry);
-    let committed_level = if is_success {
+    let is_destroyed = telemetry.last_result.as_deref() == Some("DESTROYED")
+        || telemetry.state == "ITEM_DESTROYED"
+        || telemetry.result_code == Some(5);
+
+    let committed_level = if !is_destroyed && telemetry.current_level >= 0 && telemetry.current_level <= 15 {
         telemetry.current_level
     } else {
         item.current_level
@@ -1540,21 +1583,28 @@ pub fn recover_account_enhancement_queue_on_boot(
         }
         RestartRecoveryAction::AdvanceSettledItem { mark_completed } => {
             if let Some(item) = active_item {
-                let is_failure = item.last_result_code.as_deref() == Some("4")
-                    || (item.last_result_code.is_some() && item.last_result_code.as_deref() != Some("3"));
-                if is_failure {
-                    let err_code = if item.last_result_code.as_deref() == Some("4") {
-                        "FAILURE_PROTECTED"
-                    } else {
-                        "ENHANCE_FAILED"
-                    };
+                if mark_completed {
+                    let _ = rest.update_queue_item(
+                        &item.id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "COMPLETED",
+                            "finished_at": crate::supabase_rest::now_rfc3339(),
+                        }),
+                    );
+                } else if item.attempt_count >= item.max_attempts {
+                    let err_code = "ATTEMPT_CAP_REACHED";
+                    let err_msg = format!(
+                        "Đã đạt giới hạn an toàn tối đa {} lượt cường hóa trước khi đạt cấp mục tiêu (+{} -> +{})",
+                        item.max_attempts, item.current_level, item.target_level
+                    );
                     let _ = rest.update_queue_item(
                         &item.id,
                         account_id,
                         &serde_json::json!({
                             "status": "FAILED",
                             "error_code": err_code,
-                            "error_message": "Settled attempt failed; stopping queue",
+                            "error_message": err_msg,
                             "finished_at": crate::supabase_rest::now_rfc3339(),
                         }),
                     );
@@ -1564,21 +1614,39 @@ pub fn recover_account_enhancement_queue_on_boot(
                         &serde_json::json!({
                             "status": "FAILED",
                             "error_code": err_code,
-                            "error_message": "Settled attempt failed; stopping queue",
-                            "finished_at": crate::supabase_rest::now_rfc3339(),
-                        }),
-                    );
-                } else if mark_completed {
-                    let _ = rest.update_queue_item(
-                        &item.id,
-                        account_id,
-                        &serde_json::json!({
-                            "status": "COMPLETED",
+                            "error_message": err_msg,
                             "finished_at": crate::supabase_rest::now_rfc3339(),
                         }),
                     );
                 } else {
-                    let _ = rest.transition_item_to_preparing_next_level(&item.id, account_id);
+                    let is_destroyed = item.last_result_code.as_deref() == Some("5")
+                        || item.last_result_code.as_deref() == Some("DESTROYED")
+                        || item.last_result_code.as_deref() == Some("ITEM_DESTROYED");
+                    if is_destroyed {
+                        let _ = rest.update_queue_item(
+                            &item.id,
+                            account_id,
+                            &serde_json::json!({
+                                "status": "FAILED",
+                                "error_code": "ITEM_DESTROYED",
+                                "error_message": "Trang bị đã bị phá hủy",
+                                "finished_at": crate::supabase_rest::now_rfc3339(),
+                            }),
+                        );
+                        let _ = rest.update_queue_job(
+                            &job.id,
+                            account_id,
+                            &serde_json::json!({
+                                "status": "FAILED",
+                                "error_code": "ITEM_DESTROYED",
+                                "error_message": "Trang bị đã bị phá hủy",
+                                "finished_at": crate::supabase_rest::now_rfc3339(),
+                            }),
+                        );
+                    } else {
+                        // Intermediate success or normal degradation/protection with remaining attempts: continue!
+                        let _ = rest.transition_item_to_preparing_next_level(&item.id, account_id);
+                    }
                 }
             }
             crate::enhancement::clean_enhancement_files(home_dir);
@@ -1870,8 +1938,39 @@ pub fn tick_account_enhancement_queue(
                                 tracker.active_job_id = None;
                             }
                         } else {
-                            // Intermediate level succeeded! Transition item to PREPARING for the next level
-                            let _ = rest.transition_item_to_preparing_next_level(&attempt.item_id, account_id);
+                            // Intermediate level succeeded! Check if new attempt count reached cap
+                            let new_attempt_count = item.attempt_count + 1;
+                            if new_attempt_count >= item.max_attempts {
+                                let err_code = "ATTEMPT_CAP_REACHED";
+                                let err_msg = format!(
+                                    "Đã đạt giới hạn an toàn tối đa {} lượt cường hóa trước khi đạt cấp mục tiêu (+{} -> +{})",
+                                    item.max_attempts, status.current_level, attempt.item_final_target_level
+                                );
+                                let _ = rest.update_queue_item(
+                                    &attempt.item_id,
+                                    account_id,
+                                    &serde_json::json!({
+                                        "status": "FAILED",
+                                        "error_code": err_code,
+                                        "error_message": err_msg,
+                                        "finished_at": crate::supabase_rest::now_rfc3339(),
+                                    }),
+                                );
+                                let _ = rest.update_queue_job(
+                                    &attempt.job_id,
+                                    account_id,
+                                    &serde_json::json!({
+                                        "status": "FAILED",
+                                        "error_code": err_code,
+                                        "error_message": err_msg,
+                                        "finished_at": crate::supabase_rest::now_rfc3339(),
+                                    }),
+                                );
+                                tracker.active_job_id = None;
+                            } else {
+                                // Transition item to PREPARING for the next level
+                                let _ = rest.transition_item_to_preparing_next_level(&attempt.item_id, account_id);
+                            }
                         }
                     }
                 }
@@ -1879,12 +1978,107 @@ pub fn tick_account_enhancement_queue(
                 return;
             }
             crate::enhancement::EnhancementPollOutcome::TerminalFailure { state, error_message, telemetry } => {
+                let is_degraded_or_protected = telemetry
+                    .as_ref()
+                    .map_or(false, |t| is_settled_telemetry_degraded_or_protected(t));
                 if let Some(t) = &telemetry {
                     let _ = rest.settle_attempt_ledger_row(&attempt.attempt_uuid, t);
                     if t.accounting_status == "SETTLED" {
                         if let Ok(items) = rest.fetch_queue_items(&attempt.job_id, account_id) {
                             if let Some(item) = items.iter().find(|i| i.id == attempt.item_id) {
                                 let _ = rest.commit_item_settlement(item, &attempt.attempt_uuid, t);
+
+                                if is_degraded_or_protected {
+                                    // Check pause/cancel requests after settlement
+                                    if let Ok(Some(job)) = rest.fetch_active_unresolved_queue_job(account_id, device_id) {
+                                        if job.pause_requested_at.is_some() {
+                                            let _ = rest.update_queue_job(&job.id, account_id, &serde_json::json!({
+                                                "status": "PAUSED",
+                                                "pause_requested_at": serde_json::Value::Null,
+                                            }));
+                                            crate::enhancement::clean_enhancement_files(home_dir);
+                                            tracker.active_job_id = None;
+                                            return;
+                                        }
+                                        if job.cancel_requested_at.is_some() {
+                                            let _ = rest.update_queue_job(&job.id, account_id, &serde_json::json!({
+                                                "status": "CANCELLED",
+                                                "finished_at": crate::supabase_rest::now_rfc3339(),
+                                                "cancel_requested_at": serde_json::Value::Null,
+                                            }));
+                                            for it in &items {
+                                                if it.status == "PENDING" {
+                                                    let _ = rest.update_queue_item(&it.id, account_id, &serde_json::json!({
+                                                        "status": "CANCELLED",
+                                                        "finished_at": crate::supabase_rest::now_rfc3339(),
+                                                    }));
+                                                }
+                                            }
+                                            crate::enhancement::clean_enhancement_files(home_dir);
+                                            tracker.active_job_id = None;
+                                            return;
+                                        }
+                                    }
+
+                                    let new_attempt_count = item.attempt_count + 1;
+                                    if t.current_level >= attempt.item_final_target_level {
+                                        let _ = rest.update_queue_item(
+                                            &attempt.item_id,
+                                            account_id,
+                                            &serde_json::json!({
+                                                "status": "COMPLETED",
+                                                "finished_at": crate::supabase_rest::now_rfc3339(),
+                                            }),
+                                        );
+                                        let all_completed = items
+                                            .iter()
+                                            .all(|i| i.id == attempt.item_id || i.status == "COMPLETED");
+                                        if all_completed {
+                                            let _ = rest.update_queue_job(
+                                                &attempt.job_id,
+                                                account_id,
+                                                &serde_json::json!({
+                                                    "status": "COMPLETED",
+                                                    "finished_at": crate::supabase_rest::now_rfc3339(),
+                                                }),
+                                            );
+                                            tracker.active_job_id = None;
+                                        }
+                                    } else if new_attempt_count >= item.max_attempts {
+                                        let err_code = "ATTEMPT_CAP_REACHED";
+                                        let err_msg = format!(
+                                            "Đã đạt giới hạn an toàn tối đa {} lượt cường hóa trước khi đạt cấp mục tiêu (+{} -> +{})",
+                                            item.max_attempts, t.current_level, attempt.item_final_target_level
+                                        );
+                                        let _ = rest.update_queue_item(
+                                            &attempt.item_id,
+                                            account_id,
+                                            &serde_json::json!({
+                                                "status": "FAILED",
+                                                "error_code": err_code,
+                                                "error_message": err_msg,
+                                                "finished_at": crate::supabase_rest::now_rfc3339(),
+                                            }),
+                                        );
+                                        let _ = rest.update_queue_job(
+                                            &attempt.job_id,
+                                            account_id,
+                                            &serde_json::json!({
+                                                "status": "FAILED",
+                                                "error_code": err_code,
+                                                "error_message": err_msg,
+                                                "finished_at": crate::supabase_rest::now_rfc3339(),
+                                            }),
+                                        );
+                                        tracker.active_job_id = None;
+                                    } else {
+                                        // Degradation or protected failure with remaining attempts: continue towards original target!
+                                        let _ = rest.transition_item_to_preparing_next_level(&attempt.item_id, account_id);
+                                    }
+
+                                    crate::enhancement::clean_enhancement_files(home_dir);
+                                    return;
+                                }
                             }
                         }
                     }
@@ -2189,8 +2383,67 @@ pub fn tick_account_enhancement_queue(
                 );
             }
 
+            if item.current_level < item.target_level && item.attempt_count >= item.max_attempts {
+                let err_code = "ATTEMPT_CAP_REACHED";
+                let err_msg = format!(
+                    "Đã đạt giới hạn an toàn tối đa {} lượt cường hóa trước khi đạt cấp mục tiêu (+{} -> +{})",
+                    item.max_attempts, item.current_level, item.target_level
+                );
+                let _ = rest.update_queue_item(
+                    &item.id,
+                    account_id,
+                    &serde_json::json!({
+                        "status": "FAILED",
+                        "error_code": err_code,
+                        "error_message": err_msg,
+                        "finished_at": crate::supabase_rest::now_rfc3339(),
+                    }),
+                );
+                let _ = rest.update_queue_job(
+                    &job.id,
+                    account_id,
+                    &serde_json::json!({
+                        "status": "FAILED",
+                        "error_code": err_code,
+                        "error_message": err_msg,
+                        "finished_at": crate::supabase_rest::now_rfc3339(),
+                    }),
+                );
+                tracker.active_job_id = None;
+                return;
+            }
+
             let spec = match prepare_level_attempt(&item) {
                 Ok(s) => s,
+                Err(LevelAttemptError::AttemptCapReached { attempt_count: _, max_attempts }) => {
+                    let err_code = "ATTEMPT_CAP_REACHED";
+                    let err_msg = format!(
+                        "Đã đạt giới hạn an toàn tối đa {} lượt cường hóa trước khi đạt cấp mục tiêu (+{} -> +{})",
+                        max_attempts, item.current_level, item.target_level
+                    );
+                    let _ = rest.update_queue_item(
+                        &item.id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "FAILED",
+                            "error_code": err_code,
+                            "error_message": err_msg,
+                            "finished_at": crate::supabase_rest::now_rfc3339(),
+                        }),
+                    );
+                    let _ = rest.update_queue_job(
+                        &job.id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "FAILED",
+                            "error_code": err_code,
+                            "error_message": err_msg,
+                            "finished_at": crate::supabase_rest::now_rfc3339(),
+                        }),
+                    );
+                    tracker.active_job_id = None;
+                    return;
+                }
                 Err(e) => {
                     eprintln!("[enhancement_queue] prepare_level_attempt error: {e:?}");
                     return;
@@ -4831,6 +5084,350 @@ mod tests {
         assert_eq!(body["actual_gold_spent"], 4000);
         assert_eq!(body["current_level"], 5); // Did not advance!
         assert_eq!(body["last_result_code"], "4");
+    }
+
+    #[test]
+    fn test_degraded_failure_updates_durable_level_and_retries_safely() {
+        let mut item = EnhancementQueueItemRow::mock(
+            "item-prod-1",
+            "job-prod-1",
+            1,
+            0,
+            5,
+            7,
+            "RUNNING",
+        );
+        item.base_name = "Kiếm báo thù [Khoá]".to_string();
+        item.max_attempts = 10;
+        assert_eq!(item.attempt_count, 0);
+        assert_eq!(item.max_attempts, 10);
+
+        // 1. Prepare attempt 1 (+5 -> +6)
+        let spec1 = prepare_level_attempt(&item).expect("attempt 1 must prepare");
+        assert_eq!(spec1.expected_level, 5);
+        assert_eq!(spec1.target_level, 6);
+        assert_eq!(spec1.max_attempts, 1);
+
+        // Authoritative production failure: result_code 4, observed live inventory +4
+        let telemetry1 = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: spec1.attempt_uuid.clone(),
+            state: "ATTEMPT_LIMIT_REACHED".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm báo thù [Khoá]".to_string(),
+            start_level: 5,
+            current_level: 4, // Live item degraded to +4!
+            target_level: 6,
+            configured_charm_mode: 1,
+            resolved_charm_mode: 1,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("FAILURE_DEGRADED".to_string()),
+            quoted_gold_cost: 5000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![1, 1, 0, 0],
+            actual_gold_spent: 5000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![1, 1, 0, 0],
+            actual_charms_spent: 1,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: Some(false),
+            result_code: Some(4),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("FAILURE_DEGRADED".to_string()),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-30T00:00:01Z".to_string(),
+        };
+
+        assert!(is_settled_telemetry_degraded_or_protected(&telemetry1));
+        assert!(!is_settled_telemetry_success(&telemetry1));
+
+        // Ledger settlement 1
+        let (_s_path1, s_body1) = build_settle_attempt_ledger_update(&spec1.attempt_uuid, &telemetry1);
+        assert_eq!(s_body1["attempt_phase"], "SETTLED");
+        assert_eq!(s_body1["result_code"], "4");
+        assert_eq!(s_body1["actual_gold_spent"], 5000);
+
+        // Item settlement 1: CRITICAL CONTRACT - durable current_level becomes 4 (not stuck at 5!)
+        let (_i_path1, i_body1) = build_settlement_commit_update(&item, &spec1.attempt_uuid, &telemetry1).unwrap();
+        assert_eq!(i_body1["attempt_count"], 1);
+        assert_eq!(i_body1["actual_gold_spent"], 5000);
+        assert_eq!(i_body1["current_level"], 4, "durable current_level MUST update to authoritative observed level +4");
+        assert_eq!(i_body1["last_result_code"], "4");
+
+        // Apply settlement 1 to item state
+        item.attempt_count = 1;
+        item.current_level = 4;
+        item.actual_gold_spent = 5000;
+        item.actual_material_1_spent = 1;
+        item.actual_material_2_spent = 1;
+        item.actual_charm_spent = 1;
+        item.attempt_phase = "SETTLED".to_string();
+
+        // Check continuation condition: current_level (4) < target_level (7) and attempt_count (1) < max_attempts (10)
+        assert!(item.current_level < item.target_level);
+        assert!(item.attempt_count < item.max_attempts);
+
+        // Transition to PREPARING for next level cycle
+        let (_prep_path, prep_body) = build_prepare_next_level_update(&item.id, &item.account_id);
+        assert_eq!(prep_body["attempt_phase"], "PREPARING");
+        item.attempt_phase = "PREPARING".to_string();
+        item.active_attempt_uuid = None;
+
+        // 2. Prepare attempt 2: fresh attempt from +4 -> +5
+        let spec2 = prepare_level_attempt(&item).expect("attempt 2 must prepare from level 4");
+        assert_ne!(spec2.attempt_uuid, spec1.attempt_uuid, "must use brand-new attempt UUID");
+        assert_eq!(spec2.expected_level, 4, "must attempt from new durable level +4");
+        assert_eq!(spec2.target_level, 5, "must target next level +5");
+        assert_eq!(spec2.max_attempts, 1);
+
+        // Second degradation: +4 -> +3
+        let telemetry2 = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: spec2.attempt_uuid.clone(),
+            state: "ATTEMPT_LIMIT_REACHED".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm báo thù [Khoá]".to_string(),
+            start_level: 4,
+            current_level: 3, // Degraded to +3!
+            target_level: 5,
+            configured_charm_mode: 1,
+            resolved_charm_mode: 1,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("FAILURE_DEGRADED".to_string()),
+            quoted_gold_cost: 3000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![1, 0, 0, 0],
+            actual_gold_spent: 3000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![1, 0, 0, 0],
+            actual_charms_spent: 1,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: Some(false),
+            result_code: Some(4),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("FAILURE_DEGRADED".to_string()),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-30T00:00:02Z".to_string(),
+        };
+
+        let (_i_path2, i_body2) = build_settlement_commit_update(&item, &spec2.attempt_uuid, &telemetry2).unwrap();
+        assert_eq!(i_body2["attempt_count"], 2);
+        assert_eq!(i_body2["actual_gold_spent"], 8000); // 5000 + 3000
+        assert_eq!(i_body2["current_level"], 3, "durable level updates to +3");
+
+        item.attempt_count = 2;
+        item.current_level = 3;
+        item.actual_gold_spent = 8000;
+
+        // 3. Prepare attempt 3: fresh attempt from +3 -> +4
+        let spec3 = prepare_level_attempt(&item).expect("attempt 3 must prepare from level 3");
+        assert_ne!(spec3.attempt_uuid, spec2.attempt_uuid);
+        assert_ne!(spec3.attempt_uuid, spec1.attempt_uuid);
+        assert_eq!(spec3.expected_level, 3);
+        assert_eq!(spec3.target_level, 4);
+
+        // Attempt 3 succeeds: +3 -> +4
+        let telemetry3 = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: spec3.attempt_uuid.clone(),
+            state: "SUCCESS".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm báo thù [Khoá]".to_string(),
+            start_level: 3,
+            current_level: 4,
+            target_level: 4,
+            configured_charm_mode: 1,
+            resolved_charm_mode: 1,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("SUCCESS".to_string()),
+            quoted_gold_cost: 3000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![1, 0, 0, 0],
+            actual_gold_spent: 3000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![1, 0, 0, 0],
+            actual_charms_spent: 1,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: Some(false),
+            result_code: Some(3),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("RESULT_CODE_SUCCESS".to_string()),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-30T00:00:03Z".to_string(),
+        };
+
+        assert!(is_settled_telemetry_success(&telemetry3));
+        let (_i_path3, i_body3) = build_settlement_commit_update(&item, &spec3.attempt_uuid, &telemetry3).unwrap();
+        assert_eq!(i_body3["attempt_count"], 3);
+        assert_eq!(i_body3["actual_gold_spent"], 11000); // 8000 + 3000
+        assert_eq!(i_body3["current_level"], 4);
+    }
+
+    #[test]
+    fn test_attempt_cap_enforcement_at_10_blocks_attempt_11() {
+        let mut item = EnhancementQueueItemRow::mock(
+            "item-cap-1",
+            "job-cap-1",
+            1,
+            0,
+            5,
+            7,
+            "RUNNING",
+        );
+        item.max_attempts = 10;
+        item.attempt_count = 9;
+
+        // Attempt 10 is still allowed (< 10)
+        let spec10 = prepare_level_attempt(&item);
+        assert!(spec10.is_ok(), "10th attempt must be allowed when attempt_count is 9");
+
+        // After 10th attempt settles below target: attempt_count becomes 10
+        item.attempt_count = 10;
+        item.current_level = 5; // Still below target 7
+
+        // Attempt 11 MUST be strictly blocked
+        let spec11 = prepare_level_attempt(&item);
+        assert_eq!(
+            spec11.unwrap_err(),
+            LevelAttemptError::AttemptCapReached {
+                attempt_count: 10,
+                max_attempts: 10,
+            }
+        );
+    }
+
+    #[test]
+    fn test_preexecute_errors_do_not_consume_attempt_cap() {
+        let item = EnhancementQueueItemRow::mock(
+            "item-pre-1",
+            "job-pre-1",
+            1,
+            0,
+            5,
+            7,
+            "RUNNING",
+        );
+        assert_eq!(item.attempt_count, 0);
+
+        // Pre-execute failure in telemetry (e.g. INSUFFICIENT_GOLD, not SETTLED)
+        let unexecuted_telemetry = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: "att-pre-uuid".to_string(),
+            state: "INSUFFICIENT_GOLD".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm ngắn".to_string(),
+            start_level: 5,
+            current_level: 5,
+            target_level: 6,
+            configured_charm_mode: 0,
+            resolved_charm_mode: 0,
+            payment_type: 0,
+            attempt_count: 0,
+            max_attempts: 1,
+            last_result: None,
+            quoted_gold_cost: 4000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![],
+            actual_gold_spent: 0,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![],
+            actual_charms_spent: 0,
+            accounting_status: "PENDING".to_string(),
+            validation_only: Some(false),
+            result_code: None,
+            settlement_source: None,
+            settlement_provenance: None,
+            error_code: Some("INSUFFICIENT_GOLD".to_string()),
+            error_message: Some("Not enough gold".to_string()),
+            updated_at: "2026-09-30T00:00:01Z".to_string(),
+        };
+
+        assert!(!is_settled_telemetry_degraded_or_protected(&unexecuted_telemetry));
+        assert!(!is_settled_telemetry_success(&unexecuted_telemetry));
+    }
+
+    #[test]
+    fn test_inventory_slot_resolution_after_degradation() {
+        let mut item = EnhancementQueueItemRow::mock(
+            "item-inv-1",
+            "job-inv-1",
+            1,
+            2,
+            5,
+            7,
+            "RUNNING",
+        );
+        item.base_name = "Kiếm báo thù [Khoá]".to_string();
+
+        // Bag contains the item at degraded level 4
+        let catalog = serde_json::json!({
+            "items": [
+                {
+                    "slot": 2,
+                    "template_id": 101,
+                    "category": 3,
+                    "base_name": "Kiếm báo thù [Khoá]",
+                    "tier": 2,
+                    "level": 4
+                }
+            ]
+        });
+
+        // If item row is still stale at level 5: does NOT match!
+        assert_eq!(
+            resolve_item_slot_in_catalog(&catalog, &item),
+            ItemSlotResolution::NotFound
+        );
+
+        // When item row is updated to authoritative level 4: matches exactly!
+        item.current_level = 4;
+        assert_eq!(
+            resolve_item_slot_in_catalog(&catalog, &item),
+            ItemSlotResolution::ExactSlotMatch(2)
+        );
+
+        // Ambiguity safety: if multiple items match level 4:
+        let ambiguous_catalog = serde_json::json!({
+            "items": [
+                {
+                    "slot": 2,
+                    "template_id": 101,
+                    "category": 3,
+                    "base_name": "Kiếm báo thù [Khoá]",
+                    "tier": 2,
+                    "level": 4
+                },
+                {
+                    "slot": 5,
+                    "template_id": 101,
+                    "category": 3,
+                    "base_name": "Kiếm báo thù [Khoá]",
+                    "tier": 2,
+                    "level": 4
+                }
+            ]
+        });
+        assert_eq!(
+            resolve_item_slot_in_catalog(&ambiguous_catalog, &item),
+            ItemSlotResolution::AmbiguousMatch(vec![2, 5])
+        );
     }
 }
 
