@@ -833,6 +833,25 @@ pub enum SettlementCommitOutcome {
     CommitFailed,
 }
 
+/// Determines if a settled enhancement telemetry represents a successful enhancement attempt.
+pub fn is_settled_telemetry_success(telemetry: &crate::enhancement::EnhancementStatusTelemetry) -> bool {
+    if telemetry.result_code == Some(4) {
+        return false;
+    }
+    if let Some(lr) = telemetry.last_result.as_deref() {
+        if lr == "FAILURE_PROTECTED" || lr == "FAILURE_DEGRADED" || lr == "FAILED" || lr == "DESTROYED" {
+            return false;
+        }
+    }
+    telemetry.settlement_provenance.as_deref() == Some("STATE_RECONCILED_SUCCESS")
+        || telemetry.settlement_provenance.as_deref() == Some("RESULT_CODE_SUCCESS")
+        || telemetry.settlement_source.as_deref() == Some("STATE_RECONCILED")
+        || telemetry.last_result.as_deref() == Some("SUCCESS")
+        || telemetry.last_result.as_deref() == Some("STATE_RECONCILED_SUCCESS")
+        || telemetry.result_code == Some(3)
+        || telemetry.state == "TARGET_REACHED"
+}
+
 /// Builds idempotent CAS update for committing settled actual spend and current level.
 pub fn build_settlement_commit_update(
     item: &EnhancementQueueItemRow,
@@ -884,6 +903,13 @@ pub fn build_settlement_commit_update(
         )
     };
 
+    let is_success = is_settled_telemetry_success(telemetry);
+    let committed_level = if is_success {
+        telemetry.current_level
+    } else {
+        item.current_level
+    };
+
     let body = serde_json::json!({
         "attempt_count": item.attempt_count + 1,
         "actual_gold_spent": new_gold,
@@ -893,7 +919,7 @@ pub fn build_settlement_commit_update(
         "actual_material_3_spent": new_mat3,
         "actual_material_4_spent": new_mat4,
         "actual_charm_spent": new_charm,
-        "current_level": telemetry.current_level,
+        "current_level": committed_level,
         "attempt_phase": EnhancementAttemptPhase::Settled.as_str(),
         "attempt_settled_at": crate::supabase_rest::now_rfc3339(),
         "last_result_code": last_result_code,
@@ -1057,10 +1083,25 @@ pub fn map_runtime_failure_to_queue_outcome(
             }
         }
         _ => {
-            let code = last_result.unwrap_or(state).to_string();
+            let code = match (state, last_result) {
+                ("ATTEMPT_LIMIT_REACHED", Some(lr)) if lr != "ATTEMPT_LIMIT_REACHED" => lr.to_string(),
+                _ => last_result.unwrap_or(state).to_string(),
+            };
+            let default_msg = match code.as_str() {
+                "FAILURE_PROTECTED" => {
+                    Some("Cường hóa thất bại (Được bảo vệ): Bùa bảo vệ đã giữ nguyên cấp độ trang bị".to_string())
+                }
+                "FAILURE_DEGRADED" => {
+                    Some("Cường hóa thất bại (Hạ cấp): Trang bị bị giảm cấp độ do cường hóa không thành công".to_string())
+                }
+                "ITEM_DESTROYED" => {
+                    Some("Cường hóa thất bại: Trang bị đã bị phá hủy".to_string())
+                }
+                _ => None,
+            };
             QueueFailureOutcome::ItemFailedAndStopQueue {
                 error_code: code,
-                error_message: msg,
+                error_message: msg.or(default_msg),
             }
         }
     }
@@ -1403,17 +1444,71 @@ pub fn recover_account_enhancement_queue_on_boot(
             let item = active_item.unwrap();
             let _ = rest.settle_attempt_ledger_row(&telemetry.request_id, &telemetry);
             let _ = rest.commit_item_settlement(item, &telemetry.request_id, &telemetry);
-            if telemetry.current_level >= item.target_level {
-                let _ = rest.update_queue_item(
-                    &item.id,
-                    account_id,
-                    &serde_json::json!({
-                        "status": "COMPLETED",
-                        "finished_at": crate::supabase_rest::now_rfc3339()
-                    }),
-                );
+            if is_settled_telemetry_success(&telemetry) {
+                if telemetry.current_level >= item.target_level {
+                    let _ = rest.update_queue_item(
+                        &item.id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "COMPLETED",
+                            "finished_at": crate::supabase_rest::now_rfc3339()
+                        }),
+                    );
+                } else {
+                    let _ = rest.transition_item_to_preparing_next_level(&item.id, account_id);
+                }
             } else {
-                let _ = rest.transition_item_to_preparing_next_level(&item.id, account_id);
+                let outcome = map_runtime_failure_to_queue_outcome(
+                    &telemetry.state,
+                    telemetry.last_result.as_deref(),
+                    telemetry.error_message.as_deref(),
+                );
+                match outcome {
+                    QueueFailureOutcome::ItemFailedAndStopQueue { error_code, error_message } => {
+                        let _ = rest.update_queue_item(
+                            &item.id,
+                            account_id,
+                            &serde_json::json!({
+                                "status": "FAILED",
+                                "error_code": error_code,
+                                "error_message": error_message,
+                                "attempt_phase": "SETTLED",
+                                "finished_at": crate::supabase_rest::now_rfc3339(),
+                            }),
+                        );
+                        let _ = rest.update_queue_job(
+                            &job.id,
+                            account_id,
+                            &serde_json::json!({
+                                "status": "FAILED",
+                                "error_code": error_code,
+                                "error_message": error_message,
+                                "finished_at": crate::supabase_rest::now_rfc3339(),
+                            }),
+                        );
+                    }
+                    QueueFailureOutcome::ManualReviewRequiredAndFreezeQueue { error_code, error_message } => {
+                        let _ = rest.update_queue_item(
+                            &item.id,
+                            account_id,
+                            &serde_json::json!({
+                                "status": "MANUAL_REVIEW_REQUIRED",
+                                "error_code": error_code,
+                                "error_message": error_message,
+                                "attempt_phase": "SETTLED",
+                            }),
+                        );
+                        let _ = rest.update_queue_job(
+                            &job.id,
+                            account_id,
+                            &serde_json::json!({
+                                "status": "MANUAL_REVIEW_REQUIRED",
+                                "error_code": error_code,
+                                "error_message": error_message,
+                            }),
+                        );
+                    }
+                }
             }
             crate::enhancement::clean_enhancement_files(home_dir);
             Ok(Some(job.id))
@@ -1444,19 +1539,47 @@ pub fn recover_account_enhancement_queue_on_boot(
             Ok(Some(job.id))
         }
         RestartRecoveryAction::AdvanceSettledItem { mark_completed } => {
-            if mark_completed {
-                if let Some(item) = active_item {
+            if let Some(item) = active_item {
+                let is_failure = item.last_result_code.as_deref() == Some("4")
+                    || (item.last_result_code.is_some() && item.last_result_code.as_deref() != Some("3"));
+                if is_failure {
+                    let err_code = if item.last_result_code.as_deref() == Some("4") {
+                        "FAILURE_PROTECTED"
+                    } else {
+                        "ENHANCE_FAILED"
+                    };
+                    let _ = rest.update_queue_item(
+                        &item.id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "FAILED",
+                            "error_code": err_code,
+                            "error_message": "Settled attempt failed; stopping queue",
+                            "finished_at": crate::supabase_rest::now_rfc3339(),
+                        }),
+                    );
+                    let _ = rest.update_queue_job(
+                        &job.id,
+                        account_id,
+                        &serde_json::json!({
+                            "status": "FAILED",
+                            "error_code": err_code,
+                            "error_message": "Settled attempt failed; stopping queue",
+                            "finished_at": crate::supabase_rest::now_rfc3339(),
+                        }),
+                    );
+                } else if mark_completed {
                     let _ = rest.update_queue_item(
                         &item.id,
                         account_id,
                         &serde_json::json!({
                             "status": "COMPLETED",
-                            "finished_at": crate::supabase_rest::now_rfc3339()
+                            "finished_at": crate::supabase_rest::now_rfc3339(),
                         }),
                     );
+                } else {
+                    let _ = rest.transition_item_to_preparing_next_level(&item.id, account_id);
                 }
-            } else if let Some(item) = active_item {
-                let _ = rest.transition_item_to_preparing_next_level(&item.id, account_id);
             }
             crate::enhancement::clean_enhancement_files(home_dir);
             Ok(Some(job.id))
@@ -1758,8 +1881,19 @@ pub fn tick_account_enhancement_queue(
             crate::enhancement::EnhancementPollOutcome::TerminalFailure { state, error_message, telemetry } => {
                 if let Some(t) = &telemetry {
                     let _ = rest.settle_attempt_ledger_row(&attempt.attempt_uuid, t);
+                    if t.accounting_status == "SETTLED" {
+                        if let Ok(items) = rest.fetch_queue_items(&attempt.job_id, account_id) {
+                            if let Some(item) = items.iter().find(|i| i.id == attempt.item_id) {
+                                let _ = rest.commit_item_settlement(item, &attempt.attempt_uuid, t);
+                            }
+                        }
+                    }
                 }
-                let outcome = map_runtime_failure_to_queue_outcome(&state, None, error_message.as_deref());
+                let effective_last_result = telemetry.as_ref().and_then(|t| t.last_result.as_deref());
+                let effective_err_msg = error_message.as_deref().or_else(|| {
+                    telemetry.as_ref().and_then(|t| t.error_message.as_deref())
+                });
+                let outcome = map_runtime_failure_to_queue_outcome(&state, effective_last_result, effective_err_msg);
                 match outcome {
                     QueueFailureOutcome::ItemFailedAndStopQueue { error_code, error_message } => {
                         let _ = rest.update_queue_item(
@@ -4367,6 +4501,336 @@ mod tests {
 
         let item_failed = EnhancementQueueItemRow::mock("it-fail", "job-post", 1, 1, 4, 7, "FAILED");
         assert_eq!(evaluate_item_cancel_action(&item_failed), ItemCancelAction::DoNothing);
+    }
+
+    #[test]
+    fn test_failed_attempt_accounting_and_spend_settlement() {
+        // Simulates proven incident shape: +4 -> +7 request
+        // Attempt 1: +4 -> +5 SUCCESS
+        // Attempt 2: +5 -> +6 AUTHORITATIVE FAILURE (c.C == 4, FAILURE_PROTECTED)
+        let mut item = EnhancementQueueItemRow::mock("83bb5f7c-7356-462c-b4f3-f8d7555f85ae", "41153a19-0d53-41f3-8d5d-62f847b2105c", 1, 0, 4, 7, "RUNNING");
+        item.base_name = "Kiếm báo thù [Khoá]".to_string();
+        item.current_level = 4;
+        item.attempt_count = 0;
+        item.actual_gold_spent = 0;
+        item.actual_material_1_spent = 0;
+        item.actual_material_2_spent = 0;
+        item.actual_charm_spent = 0;
+
+        // Step 1: Prepare attempt 1 (+4 -> +5)
+        let spec1 = prepare_level_attempt(&item).expect("must prepare +4 -> +5 attempt");
+        assert_eq!(spec1.expected_level, 4);
+        assert_eq!(spec1.target_level, 5);
+        item.active_attempt_uuid = Some(spec1.attempt_uuid.clone());
+        item.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+
+        let telemetry1 = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: spec1.attempt_uuid.clone(),
+            state: "TARGET_REACHED".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm báo thù [Khoá]".to_string(),
+            start_level: 4,
+            current_level: 5,
+            target_level: 5,
+            configured_charm_mode: 1,
+            resolved_charm_mode: 1,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("SUCCESS".to_string()),
+            quoted_gold_cost: 4000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![1, 1, 0, 0],
+            actual_gold_spent: 4000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![1, 1, 0, 0],
+            actual_charms_spent: 1,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: Some(false),
+            result_code: Some(3),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("RESULT_CODE_SUCCESS".to_string()),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-30T00:00:01Z".to_string(),
+        };
+
+        // Settle ledger row 1
+        let (_s_path1, s_body1) = build_settle_attempt_ledger_update(&spec1.attempt_uuid, &telemetry1);
+        assert_eq!(s_body1["attempt_phase"], "SETTLED");
+        assert_eq!(s_body1["result_code"], "3");
+        assert_eq!(s_body1["actual_gold_spent"], 4000);
+        assert_eq!(s_body1["actual_material_1_spent"], 1);
+        assert_eq!(s_body1["actual_material_2_spent"], 1);
+        assert_eq!(s_body1["actual_charm_spent"], 1);
+
+        // Commit aggregate settlement 1
+        assert!(is_settled_telemetry_success(&telemetry1));
+        let (_i_path1, i_body1) = build_settlement_commit_update(&item, &spec1.attempt_uuid, &telemetry1).unwrap();
+        assert_eq!(i_body1["attempt_count"], 1);
+        assert_eq!(i_body1["actual_gold_spent"], 4000);
+        assert_eq!(i_body1["actual_material_1_spent"], 1);
+        assert_eq!(i_body1["actual_material_2_spent"], 1);
+        assert_eq!(i_body1["actual_charm_spent"], 1);
+        assert_eq!(i_body1["current_level"], 5); // +4 -> +5 advanced!
+        assert_eq!(i_body1["attempt_phase"], "SETTLED");
+
+        // Apply settlement 1 to item and transition to preparing for +5 -> +6
+        item.attempt_count = 1;
+        item.current_level = 5;
+        item.actual_gold_spent = 4000;
+        item.actual_material_1_spent = 1;
+        item.actual_material_2_spent = 1;
+        item.actual_charm_spent = 1;
+        item.attempt_phase = "SETTLED".to_string();
+
+        let (_prep_path, prep_body) = build_prepare_next_level_update(&item.id, &item.account_id);
+        assert_eq!(prep_body["attempt_phase"], "PREPARING");
+        item.attempt_phase = "PREPARING".to_string();
+        item.active_attempt_uuid = None;
+
+        // Step 2: Prepare attempt 2 (+5 -> +6)
+        let spec2 = prepare_level_attempt(&item).expect("must prepare +5 -> +6 attempt");
+        assert_ne!(spec2.attempt_uuid, spec1.attempt_uuid, "fresh UUID per level");
+        assert_eq!(spec2.expected_level, 5);
+        assert_eq!(spec2.target_level, 6);
+        item.active_attempt_uuid = Some(spec2.attempt_uuid.clone());
+        item.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+
+        // Attempt 2 fails authoritatively: result_code 4, FAILURE_PROTECTED, ATTEMPT_LIMIT_REACHED loop state
+        let telemetry2 = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: spec2.attempt_uuid.clone(),
+            state: "ATTEMPT_LIMIT_REACHED".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm báo thù [Khoá]".to_string(),
+            start_level: 5,
+            current_level: 5, // Protected: level remains 5
+            target_level: 6,
+            configured_charm_mode: 1,
+            resolved_charm_mode: 1,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("FAILURE_PROTECTED".to_string()),
+            quoted_gold_cost: 4000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![1, 1, 0, 0],
+            actual_gold_spent: 4000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![1, 1, 0, 0],
+            actual_charms_spent: 1,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: Some(false),
+            result_code: Some(4),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("FAILURE_PROTECTED".to_string()),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-30T00:00:10Z".to_string(),
+        };
+
+        // Settle ledger row 2
+        let (_s_path2, s_body2) = build_settle_attempt_ledger_update(&spec2.attempt_uuid, &telemetry2);
+        assert_eq!(s_body2["attempt_phase"], "SETTLED");
+        assert_eq!(s_body2["result_code"], "4");
+        assert_eq!(s_body2["actual_gold_spent"], 4000);
+        assert_eq!(s_body2["actual_material_1_spent"], 1);
+        assert_eq!(s_body2["actual_material_2_spent"], 1);
+        assert_eq!(s_body2["actual_charm_spent"], 1);
+
+        // Commit aggregate settlement 2 for authoritative failure
+        assert!(!is_settled_telemetry_success(&telemetry2));
+        let (_i_path2, i_body2) = build_settlement_commit_update(&item, &spec2.attempt_uuid, &telemetry2).unwrap();
+
+        // INVARIANTS:
+        // 1. attempt_count counts EVERY real settled attempt: 1 + 1 = 2
+        assert_eq!(i_body2["attempt_count"], 2);
+        // 2. actual spend adds every real settled attempt that consumed resources: 4000 + 4000 = 8000
+        assert_eq!(i_body2["actual_gold_spent"], 8000);
+        assert_eq!(i_body2["actual_material_1_spent"], 2);
+        assert_eq!(i_body2["actual_material_2_spent"], 2);
+        assert_eq!(i_body2["actual_charm_spent"], 2);
+        // 3. current_level is SUCCESS-ONLY: stays 5, does NOT advance to 6
+        assert_eq!(i_body2["current_level"], 5);
+        assert_eq!(i_body2["last_result_code"], "4");
+        assert_eq!(i_body2["settlement_source"], "RESULT_CODE");
+        assert_eq!(i_body2["attempt_phase"], "SETTLED");
+
+        // Sum of both settled ledger rows EQUALS aggregate totals
+        let total_ledger_gold = s_body1["actual_gold_spent"].as_i64().unwrap() + s_body2["actual_gold_spent"].as_i64().unwrap();
+        assert_eq!(total_ledger_gold, 8000);
+        assert_eq!(total_ledger_gold, i_body2["actual_gold_spent"].as_i64().unwrap());
+
+        let total_ledger_mat1 = s_body1["actual_material_1_spent"].as_i64().unwrap() + s_body2["actual_material_1_spent"].as_i64().unwrap();
+        assert_eq!(total_ledger_mat1, 2);
+        assert_eq!(total_ledger_mat1, i_body2["actual_material_1_spent"].as_i64().unwrap());
+
+        let total_ledger_charm = s_body1["actual_charm_spent"].as_i64().unwrap() + s_body2["actual_charm_spent"].as_i64().unwrap();
+        assert_eq!(total_ledger_charm, 2);
+        assert_eq!(total_ledger_charm, i_body2["actual_charm_spent"].as_i64().unwrap());
+
+        // Error code mapping replaces ATTEMPT_LIMIT_REACHED with canonical FAILURE_PROTECTED
+        let failure_outcome = map_runtime_failure_to_queue_outcome(
+            &telemetry2.state,
+            telemetry2.last_result.as_deref(),
+            telemetry2.error_message.as_deref(),
+        );
+        match failure_outcome {
+            QueueFailureOutcome::ItemFailedAndStopQueue { error_code, error_message } => {
+                assert_eq!(error_code, "FAILURE_PROTECTED");
+                assert!(error_message.is_some());
+                assert!(error_message.unwrap().contains("bảo vệ"));
+            }
+            other => panic!("expected ItemFailedAndStopQueue, got {:?}", other),
+        }
+
+        // Apply failure to item: status FAILED stops queue
+        item.status = "FAILED".to_string();
+        item.attempt_count = 2;
+        item.actual_gold_spent = 8000;
+        item.attempt_phase = "SETTLED".to_string();
+
+        let selection = select_next_executable_item(&[item]);
+        assert!(matches!(selection, ItemSelectionOutcome::HaltedOnFailure(_)));
+    }
+
+    #[test]
+    fn test_duplicate_terminal_observation_idempotency() {
+        let mut item = EnhancementQueueItemRow::mock("it-dup", "job-dup", 1, 0, 5, 6, "RUNNING");
+        item.attempt_phase = "SETTLED".to_string();
+        item.attempt_count = 2;
+        item.actual_gold_spent = 8000;
+
+        // When CAS update runs against an already-settled item row, evaluate_settlement_commit_result returns AlreadySettledDoNotIncrementAgain
+        let outcome = evaluate_settlement_commit_result(&[], "att-dup-uuid", "SETTLED");
+        assert_eq!(outcome, SettlementCommitOutcome::AlreadySettledDoNotIncrementAgain);
+    }
+
+    #[test]
+    fn test_preexecute_failure_does_not_increment_attempt_count_or_spend() {
+        let mut item = EnhancementQueueItemRow::mock("it-pref", "job-pref", 1, 0, 4, 7, "RUNNING");
+        item.attempt_count = 0;
+        item.actual_gold_spent = 0;
+
+        // Pre-execute CHARM_MISSING failure
+        let telemetry = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: "att-charm-missing".to_string(),
+            state: "CHARM_MISSING".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm".to_string(),
+            start_level: 4,
+            current_level: 4,
+            target_level: 5,
+            configured_charm_mode: 1,
+            resolved_charm_mode: 0,
+            payment_type: 0,
+            attempt_count: 0,
+            max_attempts: 1,
+            last_result: None,
+            quoted_gold_cost: 4000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![1, 1, 0, 0],
+            actual_gold_spent: 0,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![],
+            actual_charms_spent: 0,
+            accounting_status: "PENDING".to_string(), // Pre-execute: NOT settled!
+            validation_only: Some(false),
+            result_code: None,
+            settlement_source: None,
+            settlement_provenance: None,
+            error_code: Some("CHARM_MISSING".to_string()),
+            error_message: Some("Bùa không có trong túi đồ".to_string()),
+            updated_at: "2026-09-30T00:00:00Z".to_string(),
+        };
+
+        assert_eq!(telemetry.accounting_status, "PENDING");
+        assert!(!is_settled_telemetry_success(&telemetry));
+
+        // Because accounting_status != "SETTLED", commit_item_settlement is NOT invoked!
+        // Item attempt_count and spend remain 0
+        assert_eq!(item.attempt_count, 0);
+        assert_eq!(item.actual_gold_spent, 0);
+
+        // Queue failure outcome maps CHARM_MISSING
+        let outcome = map_runtime_failure_to_queue_outcome(
+            &telemetry.state,
+            telemetry.last_result.as_deref(),
+            telemetry.error_message.as_deref(),
+        );
+        match outcome {
+            QueueFailureOutcome::ItemFailedAndStopQueue { error_code, error_message } => {
+                assert_eq!(error_code, "CHARM_MISSING");
+                assert_eq!(error_message.as_deref(), Some("Bùa không có trong túi đồ"));
+            }
+            other => panic!("expected ItemFailedAndStopQueue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_restart_recovery_with_settled_failure_halts_queue() {
+        let job = EnhancementQueueJobRow::mock("job-rec-fail", "acc-1", "dev-1", "RUNNING", "worker-1");
+        let mut item = EnhancementQueueItemRow::mock("it-rec-fail", "job-rec-fail", 1, 0, 5, 7, "RUNNING");
+        item.attempt_phase = "EXECUTE_MAY_HAVE_BEEN_SENT".to_string();
+        item.active_attempt_uuid = Some("att-fail-uuid".to_string());
+        item.attempt_count = 1;
+
+        let failed_telemetry = crate::enhancement::EnhancementStatusTelemetry {
+            version: 1,
+            request_id: "att-fail-uuid".to_string(),
+            state: "ATTEMPT_LIMIT_REACHED".to_string(),
+            captured_slot: 0,
+            template_id: 101,
+            category: 3,
+            base_name: "Kiếm".to_string(),
+            start_level: 5,
+            current_level: 5,
+            target_level: 6,
+            configured_charm_mode: 1,
+            resolved_charm_mode: 1,
+            payment_type: 0,
+            attempt_count: 1,
+            max_attempts: 1,
+            last_result: Some("FAILURE_PROTECTED".to_string()),
+            quoted_gold_cost: 4000,
+            quoted_gem_cost: 0,
+            quoted_material_requirements: vec![1, 1, 0, 0],
+            actual_gold_spent: 4000,
+            actual_gem_spent: 0,
+            actual_materials_spent: vec![1, 1, 0, 0],
+            actual_charms_spent: 1,
+            accounting_status: "SETTLED".to_string(),
+            validation_only: Some(false),
+            result_code: Some(4),
+            settlement_source: Some("RESULT_CODE".to_string()),
+            settlement_provenance: Some("FAILURE_PROTECTED".to_string()),
+            error_code: None,
+            error_message: None,
+            updated_at: "2026-09-30T00:00:05Z".to_string(),
+        };
+
+        // Recovery recognizes settled attempt
+        let step = evaluate_restart_recovery_step(&job, Some(&item), Some(&failed_telemetry));
+        assert_eq!(step, RestartRecoveryAction::ReconcileSettledAttempt(failed_telemetry.clone()));
+
+        // is_settled_telemetry_success correctly identifies it as failure
+        assert!(!is_settled_telemetry_success(&failed_telemetry));
+
+        // Settlement commit increments attempt_count and spend but preserves current_level = 5
+        let (_path, body) = build_settlement_commit_update(&item, "att-fail-uuid", &failed_telemetry).unwrap();
+        assert_eq!(body["attempt_count"], 2);
+        assert_eq!(body["actual_gold_spent"], 4000);
+        assert_eq!(body["current_level"], 5); // Did not advance!
+        assert_eq!(body["last_result_code"], "4");
     }
 }
 
