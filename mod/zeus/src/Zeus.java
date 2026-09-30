@@ -6662,8 +6662,12 @@ public final class Zeus {
             }
 
             if (dungeonWait > 0) {
-                --dungeonWait;
-                return;
+                if (dungeonState == DN_PREPARATION && (dungeonMenu != null || (dungeonStep == 2 && fu.s != null))) {
+                    dungeonWait = 0;
+                } else {
+                    --dungeonWait;
+                    return;
+                }
             }
 
             switch (dungeonState) {
@@ -6803,55 +6807,251 @@ public final class Zeus {
     }
 
     /**
-     * Drives the NPC's two menus: the dialogue row, then the dungeon row.
+     * Drives the NPC's two menus and the confirmation dialog:
+     * Step 0: Pick "Giao tiếp" from Pho Chi Huy's first menu.
+     * Step 1: Pick "Vào Ngã Tư Tử Thần" from the second submenu.
+     * Step 2: Confirm the entry dialog ("Có" / "Đồng ý" / "OK" / "Vào").
+     * Step 3: Wait for server teleport into Map 48.
      */
     private static void dungeonInteract() {
-        if (dungeonMenu == null) {
-            if (dungeonWait > 0) {
-                --dungeonWait;
+        if (dungeonInDungeon()) {
+            dungeonState = DN_COMBAT;
+            return;
+        }
+
+        switch (dungeonStep) {
+            case 0: { // Step 0: First menu -> pick "Giao tiếp"
+                if (dungeonMenu == null) {
+                    if (dungeonWait > 0) {
+                        --dungeonWait;
+                        return;
+                    }
+                    if (++dungeonTried >= DN_MAX_TRIES) {
+                        dungeonStop(2, "the dungeon NPC gave no menu");
+                        return;
+                    }
+                    dungeonAskNpc();
+                    return;
+                }
+                int pick = dungeonMenuPick("giao tiep", "giao dich");
+                if (pick < 0) {
+                    dungeonCloseMenu();
+                    dungeonMenu = null;
+                    dungeonMenuNpc = Integer.MIN_VALUE;
+                    if (++dungeonTried >= DN_MAX_TRIES) {
+                        dungeonStop(2, "no \"giao tiep\" row in the dungeon NPC's menu");
+                        return;
+                    }
+                    dungeonWait = 10;
+                    return;
+                }
+                if (!dungeonSelect(pick)) {
+                    dungeonStop(2, "selecting \"giao tiep\" failed");
+                    return;
+                }
+                dungeonStep = 1;
+                dungeonTried = 0;
+                dungeonWait = 60;
+                trace("DUNGEON picked the dialogue, waiting on the submenu");
                 return;
             }
-            if (++dungeonTried >= DN_MAX_TRIES) {
-                dungeonStop(2, dungeonStep == 0 ? "the dungeon NPC gave no menu"
-                        : "no submenu after the dialogue pick");
+
+            case 1: { // Step 1: Second menu -> pick "Vào Ngã Tư Tử Thần"
+                if (dungeonMenu == null) {
+                    if (dungeonWait > 0) {
+                        --dungeonWait;
+                        return;
+                    }
+                    if (++dungeonTried >= DN_MAX_TRIES) {
+                        dungeonStop(2, "no submenu after the dialogue pick");
+                        return;
+                    }
+                    dungeonStep = 0;
+                    dungeonAskNpc();
+                    return;
+                }
+                // Semantic match: look for "nga tu", then "tu than", then "vao nga tu"
+                int pick = dungeonMenuPick("nga tu", null);
+                if (pick < 0) {
+                    pick = dungeonMenuPick("tu than", null);
+                }
+                if (pick < 0) {
+                    pick = dungeonMenuPick("vao nga tu", null);
+                }
+                if (pick < 0) {
+                    dungeonCloseMenu();
+                    dungeonMenu = null;
+                    dungeonMenuNpc = Integer.MIN_VALUE;
+                    if (++dungeonTried >= DN_MAX_TRIES) {
+                        dungeonStop(2, "no \"nga tu\" row in the dungeon submenu");
+                        return;
+                    }
+                    dungeonWait = 10;
+                    return;
+                }
+                if (!dungeonSelect(pick)) {
+                    dungeonStop(2, "selecting dungeon row " + pick + " failed");
+                    return;
+                }
+                dungeonStep = 2;
+                dungeonTried = 0;
+                dungeonWait = 60;
+                trace("DUNGEON picked dungeon submenu row " + pick + ", waiting on confirmation dialog");
                 return;
             }
-            if (dungeonStep != 0) {
+
+            case 2: { // Step 2: Confirmation dialog -> confirm entry
+                if (fu.s == null) {
+                    if (dungeonWait > 0) {
+                        --dungeonWait;
+                        return;
+                    }
+                    if (++dungeonTried >= DN_MAX_TRIES) {
+                        dungeonStop(2, "no confirmation dialog after dungeon pick");
+                        return;
+                    }
+                    dungeonStep = 0;
+                    dungeonAskNpc();
+                    return;
+                }
+                if (!dungeonConfirmDialog(fu.s)) {
+                    if (++dungeonTried >= DN_MAX_TRIES) {
+                        dungeonStop(2, "could not confirm dungeon entry dialog");
+                        return;
+                    }
+                    dungeonWait = 10;
+                    return;
+                }
+                dungeonStep = 3;
+                dungeonTried = 0;
+                dungeonWait = 80;
+                trace("DUNGEON confirmed entry dialog, waiting on teleport to Map 48");
+                return;
+            }
+
+            case 3: { // Step 3: Waiting for server teleport to Map 48
+                if (dungeonWait > 0) {
+                    --dungeonWait;
+                    return;
+                }
+                if (++dungeonTried >= DN_MAX_TRIES) {
+                    dungeonStop(2, "teleport to Map 48 timed out");
+                    return;
+                }
                 dungeonStep = 0;
-            }
-            dungeonAskNpc();
-            return;
-        }
-
-        String needle = dungeonStep == 0 ? "giao tiep" : DUNGEON_NAME;
-        String reject = dungeonStep == 0 ? "giao dich" : null;
-        int pick = dungeonMenuPick(needle, reject);
-        if (pick < 0) {
-            dungeonCloseMenu();
-            dungeonMenu = null;
-            dungeonMenuNpc = Integer.MIN_VALUE;
-            if (++dungeonTried >= DN_MAX_TRIES) {
-                dungeonStop(2, "no \"" + needle + "\" row in the dungeon NPC's menu");
+                dungeonAskNpc();
                 return;
             }
-            dungeonWait = 10;
-            return;
-        }
-        if (!dungeonSelect(pick)) {
-            dungeonStop(2, "selecting \"" + needle + "\" failed");
-            return;
-        }
-        if (dungeonStep == 0) {
-            dungeonStep = 1;
-            dungeonTried = 0;
-            dungeonWait = 20;
-            trace("DUNGEON picked the dialogue, waiting on the submenu");
-            return;
-        }
 
-        dungeonTried = 0;
-        dungeonWait = 40;
-        trace("DUNGEON asked for the dungeon, waiting on the teleport");
+            default: {
+                dungeonStep = 0;
+                dungeonAskNpc();
+                return;
+            }
+        }
+    }
+
+    /**
+     * Confirms the dungeon entry confirmation dialog ("Bạn có muốn vào Ngã tư tử thần không?").
+     * Finds and activates the affirmative button ("Có", "Đồng ý", "OK", "Vào", "Chấp nhận", "Chọn").
+     * Never activates negative buttons ("Không", "Hủy", "Bỏ qua").
+     */
+    private static boolean dungeonConfirmDialog(da dialog) {
+        if (dialog == null) {
+            return false;
+        }
+        try {
+            // 1. Search buttons in ah.C (command list)
+            if (dialog instanceof ah) {
+                et buttons = ((ah) dialog).C;
+                if (buttons != null && buttons.c() > 0) {
+                    // Pass 1: explicit affirmative caption
+                    for (int i = 0; i < buttons.c(); i++) {
+                        Object entry = buttons.a(i);
+                        if (!(entry instanceof bt)) {
+                            continue;
+                        }
+                        bt btn = (bt) entry;
+                        String cap = norm(btn.a).trim();
+                        if (isAffirmativeCaption(cap)) {
+                            trace("DUNGEON dialog confirming via ah.C button[" + i + "]=\"" + clean(btn.a) + "\"");
+                            btn.a();
+                            return true;
+                        }
+                    }
+                    // Pass 2: if 1 or 2 buttons, first button if not negative
+                    if (buttons.c() <= 2) {
+                        Object first = buttons.a(0);
+                        if (first instanceof bt) {
+                            bt btn = (bt) first;
+                            String cap = norm(btn.a).trim();
+                            if (!isNegativeCaption(cap)) {
+                                trace("DUNGEON dialog confirming via ah.C button[0]=\"" + clean(btn.a) + "\"");
+                                btn.a();
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Check softkeys Z (left) and ab (right)
+            if (dialog.Z != null) {
+                String cap = norm(dialog.Z.a).trim();
+                if (isAffirmativeCaption(cap) || (!isNegativeCaption(cap) && dialog.Z.a != null)) {
+                    trace("DUNGEON dialog confirming via dialog.Z=\"" + clean(dialog.Z.a) + "\"");
+                    dialog.Z.a();
+                    return true;
+                }
+            }
+            if (dialog.ab != null) {
+                String cap = norm(dialog.ab.a).trim();
+                if (isAffirmativeCaption(cap)) {
+                    trace("DUNGEON dialog confirming via dialog.ab=\"" + clean(dialog.ab.a) + "\"");
+                    dialog.ab.a();
+                    return true;
+                }
+            }
+
+            // 3. Fallback: if dialog.Z exists and no other option, press Z
+            if (dialog.Z != null) {
+                trace("DUNGEON dialog confirming via fallback dialog.Z");
+                dialog.Z.a();
+                return true;
+            }
+        } catch (Throwable t) {
+            return false;
+        }
+        return false;
+    }
+
+    private static boolean isAffirmativeCaption(String cap) {
+        if (cap == null || cap.length() == 0) {
+            return false;
+        }
+        return cap.equals("co")
+                || cap.equals("dong y")
+                || cap.equals("ok")
+                || cap.equals("vao")
+                || cap.equals("chap nhan")
+                || cap.equals("chon")
+                || cap.indexOf("co") >= 0
+                || cap.indexOf("dong y") >= 0
+                || cap.indexOf("ok") >= 0
+                || cap.indexOf("vao") >= 0;
+    }
+
+    private static boolean isNegativeCaption(String cap) {
+        if (cap == null || cap.length() == 0) {
+            return false;
+        }
+        return cap.equals("khong")
+                || cap.equals("huy")
+                || cap.equals("bo qua")
+                || cap.equals("dong")
+                || cap.indexOf("khong") >= 0
+                || cap.indexOf("huy") >= 0
+                || cap.indexOf("bo qua") >= 0;
     }
 
     /** Counts the run, resets failure streak, then either stops at the limit or goes round again. */
@@ -7774,15 +7974,23 @@ public final class Zeus {
             return "";
         }
         String source = "àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡ"
-                + "ùúụủũưừứựửữỳýỵỷỹđ";
+                + "ùúụủũưừứựửữỳýỵỷỹđ"
+                + "ÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠ"
+                + "ÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ";
         String target = "aaaaaaaaaaaaaaaaaeeeeeeeeeeeiiiiiooooooooooooooooo"
+                + "uuuuuuuuuuuyyyyyd"
+                + "aaaaaaaaaaaaaaaaaeeeeeeeeeeeiiiiiooooooooooooooooo"
                 + "uuuuuuuuuuuyyyyyd";
         String lower = value.toLowerCase();
         StringBuffer out = new StringBuffer(lower.length());
         for (int i = 0; i < lower.length(); i++) {
             char c = lower.charAt(i);
             int at = source.indexOf(c);
-            out.append(at < 0 ? c : target.charAt(at));
+            if (at >= 0 && at < target.length()) {
+                out.append(target.charAt(at));
+            } else {
+                out.append(c);
+            }
         }
         return out.toString();
     }

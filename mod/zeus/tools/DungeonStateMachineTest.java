@@ -126,12 +126,24 @@ public class DungeonStateMachineTest {
         set("dungeonMenu", new String[] { "Giao dịch", "Giao tiếp", "Đóng" });
         call("dungeonInteract");
         check("Picks 'Giao tiếp' and advances to step 1", ((Integer) get("dungeonStep")).intValue() == 1);
-        check("Wait budget armed after step 0 pick", ((Integer) get("dungeonWait")).intValue() == 20);
+        check("Wait budget armed after step 0 pick", ((Integer) get("dungeonWait")).intValue() == 60);
 
-        // Step 1: Dungeon selection menu with "Ngã tư tử thần"
-        set("dungeonMenu", new String[] { "Nhiệm vụ", "Ngã tư tử thần", "Rời đi" });
+        // Step 1: Dungeon selection menu with "Vào Ngã Tư Tử Thần"
+        set("dungeonMenu", new String[] { "Nhiệm vụ", "Vào Ngã Tư Tử Thần", "Rời đi" });
         call("dungeonInteract");
-        check("Picks 'Ngã tư' and arms teleport wait", ((Integer) get("dungeonWait")).intValue() == 40);
+        check("Picks 'Vào Ngã Tư Tử Thần' and advances to step 2", ((Integer) get("dungeonStep")).intValue() == 2);
+        check("Wait budget armed after step 1 pick", ((Integer) get("dungeonWait")).intValue() == 60);
+
+        // Step 2: Confirmation dialog
+        ah confirmDialog = new ah();
+        bt yesBtn = new bt("Có", 1);
+        bt noBtn = new bt("Không", 2);
+        confirmDialog.C.a(yesBtn);
+        confirmDialog.C.a(noBtn);
+        fu.s = confirmDialog;
+        call("dungeonInteract");
+        check("Confirms dialog and advances to step 3", ((Integer) get("dungeonStep")).intValue() == 3);
+        check("Wait budget armed after confirmation", ((Integer) get("dungeonWait")).intValue() == 80);
 
         // ---------------------------------------------------------------------
         // Test 3: Map 48 Entry
