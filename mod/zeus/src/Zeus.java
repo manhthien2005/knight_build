@@ -6007,6 +6007,20 @@ public final class Zeus {
     }
 
     /**
+    /**
+     * Source-proven native interaction eligibility from cf.g:2028-2037:
+     * fa.c(npc.aZ, npc.ba, cn.g.aZ, cn.g.ba) <= cn.g.bi
+     * Uses Euclidean distance and player's reach/scan radius bi (default 140px).
+     */
+    public static boolean dungeonNpcEligible(fa npc) {
+        if (npc == null || cn.g == null) {
+            return false;
+        }
+        int reach = cn.g.bi > 0 ? cn.g.bi : 140;
+        return fa.c(npc.aZ, npc.ba, cn.g.aZ, cn.g.ba) <= reach;
+    }
+
+    /**
      * Asks an NPC and arms the wait, exactly as {@link #travelStone} asks a teleport stone.
      *
      * Returns false only when the send itself failed. The reply is a packet and lands on a later
@@ -6018,6 +6032,8 @@ public final class Zeus {
         dungeonState = DN_PREPARATION;
         dungeonStep = 0;
         dungeonMenuId = Integer.MIN_VALUE;
+        dungeonMenu = null;
+        dungeonMenuNpc = Integer.MIN_VALUE;
         cn.i = npc;
         try {
             fa.a(cn.g, npc);
@@ -6027,14 +6043,27 @@ public final class Zeus {
             cn.g.N();
         } catch (Throwable t) {
         }
-        if (dungeonAskNpc()) {
-            dungeonTried = 0;
-            dungeonStallTicks = 0;
-            trace("DUNGEON asked NPC cu=" + npc.cu + " at " + npc.aZ + "," + npc.ba);
-            return true;
+        boolean nativeDispatched = false;
+        if (npc instanceof ez) {
+            try {
+                npc.k();
+                nativeDispatched = true;
+            } catch (Throwable t) {
+            }
         }
-        dungeonState = DN_ROUTING;
-        return false;
+        if (!nativeDispatched) {
+            try {
+                q.a().a((byte) dungeonNpcCu);
+            } catch (Throwable t) {
+                dungeonState = DN_ROUTING;
+                return false;
+            }
+        }
+        dungeonTried = 0;
+        dungeonStallTicks = 0;
+        dungeonWait = 40;
+        trace("DUNGEON asked NPC cu=" + npc.cu + " at " + npc.aZ + "," + npc.ba);
+        return true;
     }
 
     /** Re-asks the NPC last clicked, by id. The bounded retry is a second question, not a tighter loop. */
@@ -6050,6 +6079,14 @@ public final class Zeus {
                 cn.g.N();
             } catch (Throwable t) {
             }
+            if (npc instanceof ez) {
+                try {
+                    npc.k();
+                    dungeonWait = 40;
+                    return true;
+                } catch (Throwable t) {
+                }
+            }
         }
         dungeonMenu = null;
         dungeonMenuNpc = Integer.MIN_VALUE;
@@ -6058,7 +6095,7 @@ public final class Zeus {
         } catch (Throwable t) {
             return false;
         }
-        dungeonWait = 20;           // travel's measured budget; the menu usually lands well inside
+        dungeonWait = 40;
         return true;
     }
 
@@ -6812,7 +6849,7 @@ public final class Zeus {
             x = npc.aZ;
             y = npc.ba;
         }
-        if (!travelArrive(x, y, 36)) {
+        if (npc == null || !dungeonNpcEligible(npc)) {
             if (cn.g.aZ == dungeonLastX && cn.g.ba == dungeonLastY) {
                 if (++dungeonStallTicks > DN_STALL_TICKS) {
                     dungeonStop(3, "stalled walking to the dungeon NPC on map " + here);
@@ -6826,14 +6863,19 @@ public final class Zeus {
             travelMove(here, x, y);
             return;
         }
-        if (npc == null) {
-            if (++dungeonTried >= DN_MAX_TRIES) {
-                dungeonStop(1, "no dungeon NPC on map " + here);
-                return;
-            }
-            dungeonWait = 20;
-            return;
+
+        // Native interaction condition met: halt movement velocity before interaction
+        bq.m = false;
+        cn.g.cO = null;
+        cn.g.bg = cn.g.aZ;
+        cn.g.bh = cn.g.ba;
+        cn.g.bc = 0;
+        cn.g.bd = 0;
+        try {
+            cn.g.N();
+        } catch (Throwable t) {
         }
+
         if (fu.s != null) {
             if (isDungeonConfirmDialog(fu.s)) {
                 dismissDungeonDialog(fu.s);
@@ -6887,7 +6929,7 @@ public final class Zeus {
                         --dungeonWait;
                         return;
                     }
-                    if (++dungeonTried >= DN_MAX_TRIES) {
+                    if (++dungeonTried >= 2) {
                         dungeonStop(2, "the dungeon NPC gave no menu");
                         return;
                     }

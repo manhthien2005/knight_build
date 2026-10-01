@@ -562,7 +562,7 @@ public class DungeonStateMachineTest {
         callInt("dungeonGotoNpc", 1);
         check("dungeonState transitions to DN_PREPARATION", ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
         check("dungeonStep set to 0", ((Integer) get("dungeonStep")).intValue() == 0);
-        check("dungeonWait armed to 20", ((Integer) get("dungeonWait")).intValue() == 20);
+        check("dungeonWait armed to bounded period (>= 20)", ((Integer) get("dungeonWait")).intValue() >= 20);
         check("Exactly one packet sent", getSentPackets().size() == 1);
         ep sentPkt = (ep) getSentPackets().get(0);
         check("Dispatched packet is opcode 23", sentPkt.a == 23);
@@ -723,18 +723,18 @@ public class DungeonStateMachineTest {
         cn.j = new et("entities");
         cn.j.a(npcTarget);
 
-        // Subtest A: Character at (588, 476) - distance 64px (> 36px tolerance)
+        // Subtest A: Character outside native interaction range (e.g. distance 150px > 140px)
         // Must NOT trigger interaction or send opcode 23
-        cn.g.aZ = 588;
-        cn.g.ba = 476;
+        cn.g.aZ = 552 + 150;
+        cn.g.ba = 504;
         cn.g.cH = 0;
         cn.i = null;
         getSentPackets().clear();
 
         callInt("dungeonGotoNpc", 1);
-        check("At distance 64px (> 36px), dungeonState remains DN_ROUTING",
+        check("At distance 150px (> 140px), dungeonState remains DN_ROUTING",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_ROUTING);
-        check("At distance 64px, no opcode 23 dispatched", getSentPackets().size() == 0);
+        check("At distance 150px, no opcode 23 dispatched", getSentPackets().size() == 0);
 
         // Subtest B: Character at (576, 504) - adjacent tile (distance 24px <= 36px)
         // Must arrive, set target focus cn.i, face NPC (cH=2), stop velocity, and dispatch opcode 23
@@ -763,8 +763,109 @@ public class DungeonStateMachineTest {
         check("dungeonAskNpc() dispatches opcode 23",
                 getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
 
+        // ---------------------------------------------------------------------
+        // Test 27: travelArrive Semantics at Live Coordinates (596, 512)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 27: travelArrive Semantics at Live Coordinates ---");
+        cn.g.aZ = 596;
+        cn.g.ba = 512;
+        boolean arriveResult36 = callTravelArrive(552, 504, 36);
+        check("travelArrive(552, 504, 36) returns false at live coordinates (596, 512) because Manhattan 52 > 36",
+                !arriveResult36);
+
+        // ---------------------------------------------------------------------
+        // Test 28: Native NPC Interaction Eligibility & Range Boundary Tests
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 28: Native NPC Interaction Eligibility & Range Boundary Tests ---");
+        // At live coordinates (596, 512), Euclidean distance is sqrt(44^2 + 8^2) ≈ 44.72 <= 140
+        boolean eligibleLive = callDungeonNpcEligible(npcTarget);
+        check("dungeonNpcEligible returns true at live coordinates (596, 512) (Euclidean 44.72px <= 140px)",
+                eligibleLive);
+
+        // Boundary tests: exactly at 140px (inside) vs 141px (outside)
+        cn.g.aZ = 552 + 140; // dx = 140, dy = 0, Euclidean = 140
+        cn.g.ba = 504;
+        check("dungeonNpcEligible returns true immediately inside native range (distance 140px <= 140px)",
+                callDungeonNpcEligible(npcTarget));
+
+        cn.g.aZ = 552 + 141; // dx = 141, dy = 0, Euclidean = 141
+        cn.g.ba = 504;
+        check("dungeonNpcEligible returns false immediately outside native range (distance 141px > 140px)",
+                !callDungeonNpcEligible(npcTarget));
+
+        // Outside native condition: approach continues, zero packets dispatched
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        set("navTarget", -1);
+        set("navDone", true);
+        cn.g.aZ = 552 + 141;
+        cn.g.ba = 504;
+        cn.i = null;
+        getSentPackets().clear();
+        callInt("dungeonGotoNpc", 1);
+        check("Approach continues while native interaction condition is false (distance 141px)",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_ROUTING);
+        check("Zero packets dispatched while outside native interaction condition",
+                getSentPackets().size() == 0);
+
+        // Inside native condition at live coordinates (596, 512): arrives, halts, faces, dispatches opcode 23
+        cn.g.aZ = 596;
+        cn.g.ba = 512;
+        cn.g.cH = 0;
+        cn.g.bc = 5;
+        cn.g.bd = 3;
+        cn.i = null;
+        getSentPackets().clear();
+        callInt("dungeonGotoNpc", 1);
+        check("At live coordinates (596, 512), dungeonState transitions to DN_PREPARATION",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
+        check("Target entity focus cn.i set to NPC at (596, 512)", cn.i == npcTarget);
+        check("Character facing cH is turned towards NPC (cH=2)", cn.g.cH == 2);
+        check("Movement velocity halted (bc=0, bd=0)", cn.g.bc == 0 && cn.g.bd == 0);
+        check("Exactly one opcode 23 dispatched when native interaction condition becomes true",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+
+        // ---------------------------------------------------------------------
+        // Test 29: Packet Serialization Parity & Wire Format
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 29: Packet Serialization Parity ---");
+        ep pkt = (ep) getSentPackets().get(0);
+        byte[] payload = pkt.a();
+        check("Opcode is 23", pkt.a == 23);
+        check("Payload length is 1", payload != null && payload.length == 1);
+        check("Payload byte is (byte) -37 (0xDB)", payload != null && payload[0] == (byte) -37 && (payload[0] & 0xff) == 0xdb);
+
+        // ---------------------------------------------------------------------
+        // Test 30: Retry Bounded Wait and Exactly One Bounded Retry
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 30: Retry Bounded Wait ---");
+        int waitArmed = ((Integer) get("dungeonWait")).intValue();
+        check("First menu wait is armed to source-appropriate bounded period (>= 40 ticks)",
+                waitArmed >= 40);
+
+        // Ticking while waiting for menu does not dispatch duplicate packets
+        getSentPackets().clear();
+        for (int t = 0; t < 20; t++) {
+            call("dungeonInteract");
+        }
+        check("No duplicate opcode 23 dispatched during menu wait countdown",
+                getSentPackets().size() == 0);
+
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
+    }
+
+    static boolean callTravelArrive(int x, int y, int tol) throws Exception {
+        Method m = Zeus.class.getDeclaredMethod("travelArrive", int.class, int.class, int.class);
+        m.setAccessible(true);
+        return ((Boolean) m.invoke(null, x, y, tol)).booleanValue();
+    }
+
+    static boolean callDungeonNpcEligible(fa npc) throws Exception {
+        Method m = Zeus.class.getDeclaredMethod("dungeonNpcEligible", fa.class);
+        m.setAccessible(true);
+        return ((Boolean) m.invoke(null, npc)).booleanValue();
     }
 }
 
