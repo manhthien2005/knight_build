@@ -6189,7 +6189,9 @@ public final class Zeus {
                         Object entry = buttons.a(i);
                         if (entry instanceof bt) {
                             bt btn = (bt) entry;
-                            if (btn.a != null) {
+                            // Critical: Reject buttons where btn.d == null because native bt.a()
+                            // diverts to fu.s.b() when fu.s != null! Only genuine buttons with a callback target are actionable.
+                            if (btn.a != null && btn.d != null) {
                                 String s = norm(btn.a);
                                 if (s.indexOf("giao tiep") >= 0 && s.indexOf("giao dich") < 0) {
                                     return btn;
@@ -6202,6 +6204,30 @@ public final class Zeus {
         } catch (Throwable t) {
         }
         return null;
+    }
+
+    /**
+     * Identifies whether a dialog in fu.s is an active NPC conversation/story dialog for Pho Chi Huy,
+     * matching the KnightMod V2 bytecode contract (v2_dungeon.java:369).
+     */
+    static boolean isNpcSpeechDialog(da dialog) {
+        if (dialog == null) {
+            return false;
+        }
+        try {
+            if (findGiaoTiepInDialog(dialog) != null) {
+                return true;
+            }
+            String text = dialogText(dialog);
+            if (text != null && text.length() > 0) {
+                String n = norm(text);
+                if (n.indexOf("pho chi huy") >= 0 || (n.indexOf("nhiem vu") >= 0 && n.indexOf("nga tu") >= 0)) {
+                    return true;
+                }
+            }
+        } catch (Throwable t) {
+        }
+        return false;
     }
 
     /**
@@ -7054,12 +7080,32 @@ public final class Zeus {
                     legacyPick = dungeonMenuPick("giao tiep", "giao dich");
                 }
 
+                // V2 Parity: If fu.s is an active NPC conversation/story dialog for Pho Chi Huy, advance it
+                if (giaoTiepCmd == null && legacyPick < 0 && fu.s != null && isNpcSpeechDialog(fu.s)) {
+                    dungeonStep = 1;
+                    dungeonTried = 0;
+                    dungeonWait = 60;
+                    dungeonMenu = null;
+                    dungeonMenuItems = null;
+                    dungeonMenuNpc = Integer.MIN_VALUE;
+                    trace("DUNGEON advancing Pho Chi Huy speech dialog in fu.s");
+                    if (fu.s.ab != null) {
+                        fu.s.ab.a();
+                    } else if (fu.s.Z != null) {
+                        fu.s.Z.a();
+                    } else {
+                        fu.al[5] = true;
+                        fu.am[5] = true;
+                    }
+                    return;
+                }
+
                 if (giaoTiepCmd == null && legacyPick < 0) {
                     if (dungeonWait > 0) {
                         --dungeonWait;
                         return;
                     }
-                    if (dungeonMenu == null && activeItems == null && fu.t == null) {
+                    if (dungeonMenu == null && activeItems == null && (fu.t == null || findGiaoTiepInDialog(fu.t) == null)) {
                         if (++dungeonTried >= 2) {
                             dungeonStop(2, "the dungeon NPC gave no menu");
                             return;
@@ -7374,6 +7420,14 @@ public final class Zeus {
             return false;
         }
         try {
+            // A dialog with "Giao tiếp" is Pho Chi Huy's first dialog, never a confirmation dialog
+            if (findGiaoTiepInDialog(dialog) != null) {
+                return false;
+            }
+            // An active speech dialog for Pho Chi Huy is dialogue/story, not an entry confirmation
+            if (isNpcSpeechDialog(dialog)) {
+                return false;
+            }
             String text = norm(dialogText(dialog));
             return text.indexOf("nga tu") >= 0 || text.indexOf("tu than") >= 0;
         } catch (Throwable t) {
@@ -7412,6 +7466,9 @@ public final class Zeus {
             return false;
         }
         if (isDungeonConfirmDialog(dialog)) {
+            return false;
+        }
+        if (isNpcSpeechDialog(dialog)) {
             return false;
         }
         if (!(dialog instanceof ah)) {

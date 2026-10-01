@@ -1464,6 +1464,115 @@ public class DungeonStateMachineTest {
         check("Chain fu.t: Arrival in Map 48 enters DN_COMBAT",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_COMBAT);
 
+        // ---------------------------------------------------------------------
+        // Test 47: Exact Native First Dialog Dispatch Parity & V2 Contract (DUNGEON-04H)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 47: Exact Native First Dialog Dispatch Parity & V2 Contract ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 60);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        fu.p.a = false;
+        setFrG(fu.p, null);
+
+        // 47.1: Baseline Failure Proof - Real native ah button in fu.t has bt.d == null.
+        // Calling bt.a() with coexisting broadcast in fu.s diverts to fu.s.b() without sending Opcode 23.
+        // Contract requirement: findGiaoTiepInDialog must reject bt.d == null as invalid command.
+        Method mFindGiaoTiep = Zeus.class.getDeclaredMethod("findGiaoTiepInDialog", da.class);
+        mFindGiaoTiep.setAccessible(true);
+
+        ah nativeAhPlayerDialog = new ah();
+        nativeAhPlayerDialog.C = new et("playerContext");
+        bt nativeAhBtnNoTarget = new bt("Giao tiếp", 4); // bt.d is NULL in native ah.java:555
+        nativeAhPlayerDialog.C.a(nativeAhBtnNoTarget);
+        nativeAhPlayerDialog.C.a(new bt("Đóng", 8));
+        fu.t = nativeAhPlayerDialog;
+        fu.s = makeBroadcastPopup("Server Announcement");
+
+        Object rejectedBtn = mFindGiaoTiep.invoke(null, nativeAhPlayerDialog);
+        check("Exact Parity: Native ah button with bt.d == null is rejected", rejectedBtn == null);
+
+        // 47.2: Exact Native fu.p First Dialog Contract with active broadcast
+        // When Pho Chi Huy conversation opens natively in fu.p, bt.d is the NPC (ez/bm).
+        // Step 0 must select fu.p, set cursor index fu.p.h = 0, pre-arm Step 1, invoke bt.a(),
+        // dispatch Opcode 23 (payload 0xDB), and keep fu.s broadcast preserved.
+        fu.p.a = true;
+        fa liveNpc = new fa();
+        liveNpc.cv = 2;
+        liveNpc.cu = -37;
+        liveNpc.cC = "Pho Chi Huy";
+        cn.j = new et("entities");
+        cn.j.a(liveNpc);
+
+        et nativeFrItems = new et("nativeNpcMenu");
+        final boolean[] liveNpcActionCalled = new boolean[1];
+        bt liveNpcGiaoTiep = new bt("Giao tiếp", 4, new cg() {
+            public void a(int e, int f) {
+                liveNpcActionCalled[0] = true;
+                try {
+                    q.a().a((byte) liveNpc.cu);
+                } catch (Throwable t) {}
+            }
+        });
+        nativeFrItems.a(liveNpcGiaoTiep);
+        setFrG(fu.p, nativeFrItems);
+        setFrH(fu.p, -1);
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Exact Parity: fu.p native command callback invoked", liveNpcActionCalled[0]);
+        check("Exact Parity: Step 0 sets fu.p.h cursor to 0", getFrH(fu.p) == 0);
+        check("Exact Parity: Step advanced to 1", ((Integer) get("dungeonStep")).intValue() == 1);
+        check("Exact Parity: Exactly one packet sent", getSentPackets().size() == 1);
+        check("Exact Parity: Packet is Opcode 23 for NPC -37",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+        check("Exact Parity: Broadcast in fu.s preserved", fu.s != null);
+
+        // 47.3: Fast Second-Menu Arrival Race Test (Step 0 -> Step 1 immediate arrival)
+        // If Opcode -30 arrives immediately after Step 0 dispatch, Step 1 must process it without loss.
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 3);
+        setFrH(fu.p, -1);
+        et secondMenuItems47 = new et("secondMenu");
+        secondMenuItems47.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        secondMenuItems47.a(new bt("Đóng", 1));
+        setFrG(fu.p, secondMenuItems47);
+        callServerMenu(-37, 3, "Nga Tu", secondMenuItems47);
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Fast Response: Step 1 native action sent q.b (opcode -30)",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+        check("Fast Response: State advanced to Step 2", ((Integer) get("dungeonStep")).intValue() == 2);
+
+        // 47.4: V2 Native Speech Dialog Parity in fu.s
+        // When speech dialog containing "Phó chỉ huy" appears in fu.s, it advances via softkey/Key 5.
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 60);
+        fu.p.a = false;
+        setFrG(fu.p, null);
+
+        final boolean[] speechSoftkeyInvoked = new boolean[1];
+        ah speechDialog = new ah();
+        speechDialog.q = new String[] { "Phó chỉ huy: Ta có nhiệm vụ vào Ngã tư tử thần cho ngươi!" };
+        speechDialog.ab = new bt("Giao tiếp", 4, new cg() {
+            public void a(int e, int f) {
+                speechSoftkeyInvoked[0] = true;
+            }
+        });
+        fu.s = speechDialog;
+
+        call("dungeonInteract");
+        check("V2 Parity: Speech dialog advances via softkey/action", speechSoftkeyInvoked[0]);
+        check("V2 Parity: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
+
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
     }
