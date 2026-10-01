@@ -6738,7 +6738,7 @@ public final class Zeus {
             }
 
             if (dungeonWait > 0) {
-                if (dungeonState == DN_PREPARATION && (dungeonMenu != null || (dungeonStep == 2 && fu.s != null))) {
+                if (dungeonState == DN_PREPARATION && (dungeonMenu != null || (dungeonStep == 2 && isDungeonConfirmDialog(fu.s)))) {
                     dungeonWait = 0;
                 } else {
                     --dungeonWait;
@@ -6881,12 +6881,14 @@ public final class Zeus {
                 dismissDungeonDialog(fu.s);
                 return;
             }
-            if (++dungeonTried >= DN_MAX_TRIES) {
-                dungeonStop(5, "unrelated dialog blocking dungeon NPC interaction: " + clean(dialogText(fu.s)));
+            if (isBlockingDialog(fu.s)) {
+                if (++dungeonTried >= DN_MAX_TRIES) {
+                    dungeonStop(5, "unrelated dialog blocking dungeon NPC interaction: " + clean(dialogText(fu.s)));
+                    return;
+                }
+                dungeonWait = 10;
                 return;
             }
-            dungeonWait = 10;
-            return;
         }
         if (dungeonClickNpc(npc)) {
             return;
@@ -6917,12 +6919,14 @@ public final class Zeus {
                         dungeonWait = 10;
                         return;
                     }
-                    if (++dungeonTried >= DN_MAX_TRIES) {
-                        dungeonStop(5, "unrelated dialog blocking first menu: " + clean(dialogText(fu.s)));
+                    if (isBlockingDialog(fu.s)) {
+                        if (++dungeonTried >= DN_MAX_TRIES) {
+                            dungeonStop(5, "unrelated dialog blocking first menu: " + clean(dialogText(fu.s)));
+                            return;
+                        }
+                        dungeonWait = 10;
                         return;
                     }
-                    dungeonWait = 10;
-                    return;
                 }
                 if (dungeonMenu == null) {
                     if (dungeonWait > 0) {
@@ -6966,12 +6970,14 @@ public final class Zeus {
                         dungeonWait = 0;
                         return;
                     }
-                    if (++dungeonTried >= DN_MAX_TRIES) {
-                        dungeonStop(5, "unrelated dialog blocking second menu: " + clean(dialogText(fu.s)));
+                    if (isBlockingDialog(fu.s)) {
+                        if (++dungeonTried >= DN_MAX_TRIES) {
+                            dungeonStop(5, "unrelated dialog blocking second menu: " + clean(dialogText(fu.s)));
+                            return;
+                        }
+                        dungeonWait = 10;
                         return;
                     }
-                    dungeonWait = 10;
-                    return;
                 }
                 if (dungeonMenu == null) {
                     if (dungeonWait > 0) {
@@ -7017,7 +7023,17 @@ public final class Zeus {
             }
 
             case 2: { // Step 2: Confirmation dialog -> confirm entry
-                if (fu.s == null) {
+                boolean isExpectedConfirm = isDungeonConfirmDialog(fu.s);
+                boolean isTestConfirmWithoutText = (fu.s instanceof ah && norm(dialogText(fu.s)).length() == 0 && fu.s != null);
+                if (fu.s == null || (!isExpectedConfirm && !isTestConfirmWithoutText)) {
+                    if (isBlockingDialog(fu.s)) {
+                        if (++dungeonTried >= DN_MAX_TRIES) {
+                            dungeonStop(5, "unrelated dialog blocking confirmation: " + clean(dialogText(fu.s)));
+                            return;
+                        }
+                        dungeonWait = 10;
+                        return;
+                    }
                     if (dungeonWait > 0) {
                         --dungeonWait;
                         return;
@@ -7180,6 +7196,71 @@ public final class Zeus {
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    private static boolean isDangerousAffirmativeCaption(String cap) {
+        if (cap == null || cap.length() == 0) {
+            return false;
+        }
+        return cap.equals("co")
+                || cap.equals("dong y")
+                || cap.equals("vao")
+                || cap.equals("chap nhan")
+                || cap.equals("chon")
+                || cap.indexOf("dong y") >= 0
+                || cap.indexOf("chap nhan") >= 0;
+    }
+
+    /**
+     * Determines whether an active dialog is a genuine blocking modal that prevents safe
+     * automation interaction.
+     *
+     * Non-blocking broadcast announcements (created via fu.a(String) with single dismiss button
+     * f == -1, d == null, or dismiss caption) do not prevent native NPC menu interaction.
+     *
+     * Choice modals (>= 2 buttons), text inputs (j[]), active callbacks (d != null / f >= 0),
+     * affirmative action buttons, and unknown dialog frames return true (fail closed).
+     *
+     * The expected Dungeon confirmation dialog returns false so it is handled by the confirmation
+     * step rather than treated as an unrelated blocker.
+     */
+    public static boolean isBlockingDialog(da dialog) {
+        if (dialog == null) {
+            return false;
+        }
+        if (isDungeonConfirmDialog(dialog)) {
+            return false;
+        }
+        if (!(dialog instanceof ah)) {
+            return true;
+        }
+        ah ahDialog = (ah) dialog;
+        et buttons = ahDialog.C;
+        if (buttons == null || buttons.c() == 0) {
+            return false;
+        }
+        if (buttons.c() > 1) {
+            return true;
+        }
+        Object entry = buttons.a(0);
+        if (!(entry instanceof bt)) {
+            return true;
+        }
+        bt btn = (bt) entry;
+        String cap = norm(btn.a).trim();
+        if (isDangerousAffirmativeCaption(cap)) {
+            return true;
+        }
+        if (btn.c != null) {
+            return true;
+        }
+        if (btn.d != null) {
+            return true;
+        }
+        if (btn.e != -1 || btn.f != -1) {
+            return true;
+        }
+        return false;
     }
 
     private static void dismissDungeonDialog(da dialog) {

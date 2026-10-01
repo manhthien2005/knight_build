@@ -837,6 +837,7 @@ public class DungeonStateMachineTest {
         check("Payload byte is (byte) -37 (0xDB)", payload != null && payload[0] == (byte) -37 && (payload[0] & 0xff) == 0xdb);
 
         // ---------------------------------------------------------------------
+        // ---------------------------------------------------------------------
         // Test 30: Retry Bounded Wait and Exactly One Bounded Retry
         // ---------------------------------------------------------------------
         System.out.println("--- Test 30: Retry Bounded Wait ---");
@@ -852,8 +853,181 @@ public class DungeonStateMachineTest {
         check("No duplicate opcode 23 dispatched during menu wait countdown",
                 getSentPackets().size() == 0);
 
+        // ---------------------------------------------------------------------
+        // Test 31: Broadcast Popup Coexistence with NPC Approach and Interaction
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 31: Broadcast Popup Coexistence with NPC Approach ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        set("navTarget", -1);
+        set("navDone", true);
+        fu.q.d = 1;
+
+        fa phoChiHuy31 = new fa();
+        phoChiHuy31.cv = 2; // NPC
+        phoChiHuy31.cu = -37;
+        phoChiHuy31.cC = "Pho Chi Huy";
+        phoChiHuy31.aZ = 552;
+        phoChiHuy31.ba = 504;
+        cn.j = new et("entities");
+        cn.j.a(phoChiHuy31);
+
+        // Position player at live coordinates (612, 392)
+        cn.g.aZ = 612;
+        cn.g.ba = 392;
+        cn.g.cH = 0;
+        cn.i = null;
+
+        // Present broadcast popup
+        ah broadcastPopup = makeBroadcastPopup("Chúc mừng người chơi test đã vượt qua đợt thứ 10");
+        fu.s = broadcastPopup;
+        getSentPackets().clear();
+
+        callInt("dungeonGotoNpc", 1);
+        check("Dungeon does not treat broadcast popup as blocking modal",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
+        check("Native interaction opcode 23 dispatched while broadcast popup present",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+        check("Broadcast popup remains present and unmodified after interaction dispatch",
+                fu.s == broadcastPopup);
+
+        // ---------------------------------------------------------------------
+        // Test 32: Menu Processing with Broadcast Popup Present
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 32: Menu Processing with Broadcast Popup Present ---");
+        // Step 0: First menu arrives while broadcast popup is still on screen
+        et firstMenuItems = new et("firstMenu");
+        firstMenuItems.a(new bt("Giao tiếp", 0));
+        firstMenuItems.a(new bt("Đóng", 1));
+        callServerMenu(-37, 1, "Pho Chi Huy", firstMenuItems);
+
+        check("dungeonMenu captured first menu while broadcast popup present",
+                get("dungeonMenu") != null);
+        getSentPackets().clear();
+
+        call("dungeonInteract");
+        check("Step 0 selects 'Giao tiếp' and advances to step 1 under broadcast popup",
+                ((Integer) get("dungeonStep")).intValue() == 1);
+        check("Broadcast popup still preserved and untouched after first menu selection",
+                fu.s == broadcastPopup);
+
+        // Step 1: Second menu arrives while broadcast popup is still on screen
+        et secondMenuItems = new et("secondMenu");
+        secondMenuItems.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        secondMenuItems.a(new bt("Đóng", 1));
+        callServerMenu(-37, 2, "Menu", secondMenuItems);
+
+        check("dungeonMenu captured second menu while broadcast popup present",
+                get("dungeonMenu") != null);
+
+        call("dungeonInteract");
+        check("Step 1 selects 'Vào Ngã Tư Tử Thần' and advances to step 2 under broadcast popup",
+                ((Integer) get("dungeonStep")).intValue() == 2);
+        check("Broadcast popup still preserved and untouched after second menu selection",
+                fu.s == broadcastPopup);
+
+        // ---------------------------------------------------------------------
+        // Test 33: Expected Dungeon Confirmation Dialog Handling with Broadcast Popup
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 33: Expected Dungeon Confirmation Handling ---");
+        // At step 2, while broadcast popup is still in fu.s, dungeonInteract must NOT auto-confirm it
+        set("dungeonWait", 10);
+        call("dungeonInteract");
+        check("Dungeon does not confirm broadcast popup as dungeon confirmation",
+                ((Integer) get("dungeonStep")).intValue() == 2);
+        check("Broadcast popup remains unconfirmed in fu.s", fu.s == broadcastPopup);
+
+        // Genuine confirmation dialog arrives (replaces fu.s on client UI)
+        ah confirmDialog33 = new ah();
+        confirmDialog33.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
+        confirmDialog33.C = new et("buttons");
+        confirmDialog33.C.a(new bt("Có", 1));
+        confirmDialog33.C.a(new bt("Không", 2));
+        fu.s = confirmDialog33;
+
+        call("dungeonInteract");
+        check("Genuine confirmation dialog confirmed and advances to step 3",
+                ((Integer) get("dungeonStep")).intValue() == 3);
+        check("Wait budget armed for teleport after confirmation (>= 80)",
+                ((Integer) get("dungeonWait")).intValue() >= 80);
+
+        // ---------------------------------------------------------------------
+        // Test 34: Known Blocking Modal Prevents Unsafe Interaction (Fails Closed)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 34: Known Blocking Modal Prevents Unsafe Interaction ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        fu.q.d = 1;
+        cn.g.aZ = 552;
+        cn.g.ba = 504;
+
+        ah blockingModal = makeBlockingModal("Bạn có chắc chắn muốn rời khỏi bang hội không?");
+        fu.s = blockingModal;
+        getSentPackets().clear();
+
+        for (int i = 0; i < 3; i++) {
+            callInt("dungeonGotoNpc", 1);
+        }
+        check("Blocking modal NOT auto-confirmed", fu.s == blockingModal);
+        check("No opcode 23 dispatched while blocking modal present", getSentPackets().size() == 0);
+        check("State transitioned to DN_MANUAL_REVIEW on persistent blocking modal",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_MANUAL_REVIEW);
+        check("Why code set to 5", ((Integer) get("dungeonWhy")).intValue() == 5);
+
+        // ---------------------------------------------------------------------
+        // Test 35: Live Regression Case Parity
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 35: Live Regression Case Parity ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        set("navTarget", -1);
+        set("navDone", true);
+        fu.q.d = 1;
+
+        cn.g.aZ = 612;
+        cn.g.ba = 392;
+        cn.g.cH = 0;
+        cn.i = null;
+
+        ah liveBroadcast = makeBroadcastPopup("Chúc mừng ... đã vượt qua đợt thứ 10");
+        fu.s = liveBroadcast;
+        getSentPackets().clear();
+
+        callInt("dungeonGotoNpc", 1);
+        check("Player at (612, 392) interacts with NPC (552, 504) while broadcast visible",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
+        check("Opcode 23 sent for CU -37",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+        check("Live broadcast popup preserved and untouched", fu.s == liveBroadcast);
+
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
+    }
+
+    static ah makeBroadcastPopup(String text) {
+        ah dialog = new ah();
+        dialog.q = new String[] { text };
+        dialog.C = new et("buttons");
+        dialog.C.a(new bt("Ok", -1));
+        return dialog;
+    }
+
+    static ah makeBlockingModal(String text) {
+        ah dialog = new ah();
+        dialog.q = new String[] { text };
+        dialog.C = new et("buttons");
+        dialog.C.a(new bt("Đồng ý", 1));
+        dialog.C.a(new bt("Không", 2));
+        return dialog;
+    }
+
+    static void callServerMenu(int idNpc, int idMenu, String title, et items) throws Exception {
+        Method m = Zeus.class.getDeclaredMethod("serverMenu", et.class, int.class, int.class, String.class);
+        m.setAccessible(true);
+        m.invoke(null, items, idMenu, idNpc, title);
     }
 
     static boolean callTravelArrive(int x, int y, int tol) throws Exception {
