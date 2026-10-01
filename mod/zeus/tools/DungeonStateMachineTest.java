@@ -1003,6 +1003,277 @@ public class DungeonStateMachineTest {
                 getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
         check("Live broadcast popup preserved and untouched", fu.s == liveBroadcast);
 
+        // ---------------------------------------------------------------------
+        // Test 36: V2 Native Parity - First Menu Native Command Contract
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 36: V2 Native Parity - First Menu Native Command Contract ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+
+        if (fu.p == null) {
+            fu.p = new fr();
+        }
+        fu.p.a = true;
+        setFrH(fu.p, -1);
+        et menuItems36 = new et("menu36");
+        final int[] callbacks36 = new int[2];
+        cg target36 = new cg() {
+            public void a(int e, int f) {
+                if (e == 4) {
+                    callbacks36[0]++;
+                } else if (e == 5) {
+                    callbacks36[1]++;
+                }
+            }
+        };
+        bt btnGiaoTiep36 = new bt("Giao tiếp", 4, target36);
+        bt btnDong36 = new bt("Đóng", 5, target36);
+        menuItems36.a(btnGiaoTiep36);
+        menuItems36.a(btnDong36);
+        setFrG(fu.p, menuItems36);
+
+        callServerMenu(-37, 2, "Pho Chi Huy", menuItems36);
+        getSentPackets().clear();
+
+        call("dungeonInteract");
+
+        check("Step 0 sets fu.p.h to matching 'Giao tiếp' item index (0)", getFrH(fu.p) == 0);
+        check("Step 0 invokes native bt.a() command callback exactly once", callbacks36[0] == 1);
+        check("Step 0 does NOT synthesize raw server-menu q.b packet", getSentPackets().size() == 0);
+        check("Step 0 advances dungeonStep to 1", ((Integer) get("dungeonStep")).intValue() == 1);
+        check("Step 0 arms wait budget (>= 40)", ((Integer) get("dungeonWait")).intValue() >= 40);
+
+        // ---------------------------------------------------------------------
+        // Test 37: Stale UI Reference Rejection
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 37: Stale UI Reference Rejection ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+
+        // Menu was closed (fu.p.a = false)
+        fu.p.a = false;
+        callbacks36[0] = 0;
+        getSentPackets().clear();
+
+        call("dungeonInteract");
+        check("Stale/closed menu does not trigger command callback", callbacks36[0] == 0);
+        check("Stale menu does not dispatch packets", getSentPackets().size() == 0);
+
+        // ---------------------------------------------------------------------
+        // Test 38: Second Menu Native Action Contract
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 38: Second Menu Native Action Contract ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 1);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 3);
+        setFrH(fu.p, -1);
+        et menuItems38 = new et("menu38");
+        menuItems38.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        menuItems38.a(new bt("Đóng", 1));
+        setFrG(fu.p, menuItems38);
+
+        callServerMenu(-37, 3, "Nga Tu", menuItems38);
+        getSentPackets().clear();
+
+        call("dungeonInteract");
+        check("Step 1 sets fu.p.h to matching 'Ngã Tư' index (0)", getFrH(fu.p) == 0);
+        check("Step 1 invokes native action which closes fu.p", !fu.p.a);
+        check("Step 1 dispatches server-menu q.b packet via native handler",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+        check("Step 1 advances dungeonStep to 2", ((Integer) get("dungeonStep")).intValue() == 2);
+
+        // ---------------------------------------------------------------------
+        // Test 39: Fast Immediate Server Response Race (First Menu -> Second Menu)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 39: Fast Immediate Response Race (Step 0 -> Step 1) ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+
+        fu.p.a = true;
+        setFrH(fu.p, -1);
+        et menuItems39 = new et("menu39");
+        cg fastReplyNpc = new cg() {
+            public void a(int e, int f) {
+                // Immediate synchronous reply from server: second menu arrives DURING callback!
+                try {
+                    et fastSecond = new et("fastSecond");
+                    fastSecond.a(new bt("Vào Ngã Tư Tử Thần", 0));
+                    fastSecond.a(new bt("Đóng", 1));
+                    setFrG(fu.p, fastSecond);
+                    setFrB(fu.p, 4);
+                    setFrC(fu.p, -37);
+                    fu.p.a = true;
+                    callServerMenu(-37, 4, "Nga Tu Fast", fastSecond);
+                } catch (Exception ex) {
+                }
+            }
+        };
+        menuItems39.a(new bt("Giao tiếp", 4, fastReplyNpc));
+        setFrG(fu.p, menuItems39);
+        callServerMenu(-37, 2, "Pho Chi Huy", menuItems39);
+
+        call("dungeonInteract");
+        check("State armed to accept fast second menu without dropping",
+                ((Integer) get("dungeonStep")).intValue() == 1);
+        check("Fast second menu captured in dungeonMenu", get("dungeonMenu") != null);
+
+        // ---------------------------------------------------------------------
+        // Test 40: Fast Immediate Response Race (Step 1 -> Confirmation)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 40: Fast Immediate Response Race (Step 1 -> Confirmation) ---");
+        // Next tick processes the fast second menu
+        call("dungeonInteract");
+        check("Step 1 processed fast second menu and advanced to Step 2",
+                ((Integer) get("dungeonStep")).intValue() == 2);
+
+        // Immediate confirmation arrives
+        ah fastConfirm = new ah();
+        fastConfirm.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
+        fastConfirm.C = new et("buttons");
+        final boolean[] confirmClicked = new boolean[1];
+        cg confirmTarget = new cg() {
+            public void a(int e, int f) {
+                confirmClicked[0] = true;
+            }
+        };
+        fastConfirm.C.a(new bt("Có", 1, confirmTarget));
+        fastConfirm.C.a(new bt("Không", 2));
+        fu.s = fastConfirm;
+
+        call("dungeonInteract");
+        check("Step 2 confirms fast confirmation dialog", confirmClicked[0]);
+        check("Step 2 advances to Step 3", ((Integer) get("dungeonStep")).intValue() == 3);
+
+        // ---------------------------------------------------------------------
+        // Test 41: Broadcast Coexistence Throughout Entry
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 41: Broadcast Coexistence Throughout Entry ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+
+        ah entryBroadcast = makeBroadcastPopup("Thông báo: Sự kiện đang diễn ra!");
+        fu.s = entryBroadcast;
+
+        fu.p.a = true;
+        et bCastFirstMenu = new et("bCastFirstMenu");
+        bCastFirstMenu.a(new bt("Giao tiếp", 4, target36));
+        setFrG(fu.p, bCastFirstMenu);
+        callServerMenu(-37, 2, "Pho Chi Huy", bCastFirstMenu);
+
+        call("dungeonInteract");
+        check("Broadcast popup preserved during Step 0 Giao tiếp", fu.s == entryBroadcast);
+        check("Step 0 advanced under broadcast popup", ((Integer) get("dungeonStep")).intValue() == 1);
+
+        // ---------------------------------------------------------------------
+        // Test 42: Full Entry Chain Deterministic Parity
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 42: Full Entry Chain Deterministic Parity ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        fu.q.d = 1;
+        cn.g.aZ = 552;
+        cn.g.ba = 504;
+        cn.g.cH = 0;
+        cn.i = null;
+
+        fa pcf42 = new fa();
+        pcf42.cv = 2;
+        pcf42.cu = -37;
+        pcf42.cC = "Pho Chi Huy";
+        pcf42.aZ = 552;
+        pcf42.ba = 504;
+        cn.j = new et("entities");
+        cn.j.a(pcf42);
+
+        // Step A: approach and arrival
+        getSentPackets().clear();
+        callInt("dungeonGotoNpc", 1);
+        check("Full Chain: Arrival transitions to DN_PREPARATION",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
+        check("Full Chain: Opcode 23 sent to NPC",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+
+        // Step B: First menu arrives
+        fu.p.a = true;
+        setFrH(fu.p, -1);
+        et chainFirst = new et("chainFirst");
+        final boolean[] chainFirstClicked = new boolean[1];
+        cg chainTarget = new cg() {
+            public void a(int e, int f) {
+                chainFirstClicked[0] = true;
+            }
+        };
+        chainFirst.a(new bt("Giao tiếp", 4, chainTarget));
+        chainFirst.a(new bt("Đóng", 5));
+        setFrG(fu.p, chainFirst);
+        callServerMenu(-37, 2, "Pho Chi Huy", chainFirst);
+
+        call("dungeonInteract");
+        check("Full Chain: Step 0 native callback invoked", chainFirstClicked[0]);
+        check("Full Chain: State advanced to Step 1", ((Integer) get("dungeonStep")).intValue() == 1);
+
+        // Step C: Second menu arrives
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 3);
+        setFrH(fu.p, -1);
+        et chainSecond = new et("chainSecond");
+        chainSecond.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        chainSecond.a(new bt("Đóng", 1));
+        setFrG(fu.p, chainSecond);
+        callServerMenu(-37, 3, "Nga Tu", chainSecond);
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Full Chain: Step 1 native action sent q.b",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+        check("Full Chain: State advanced to Step 2", ((Integer) get("dungeonStep")).intValue() == 2);
+
+        // Step D: Confirmation dialog arrives
+        ah chainConfirm = new ah();
+        chainConfirm.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
+        chainConfirm.C = new et("buttons");
+        final boolean[] chainConfirmClicked = new boolean[1];
+        cg chainConfirmTarget = new cg() {
+            public void a(int e, int f) {
+                chainConfirmClicked[0] = true;
+            }
+        };
+        chainConfirm.C.a(new bt("Có", 1, chainConfirmTarget));
+        chainConfirm.C.a(new bt("Không", 2));
+        fu.s = chainConfirm;
+
+        call("dungeonInteract");
+        check("Full Chain: Step 2 confirmation invoked", chainConfirmClicked[0]);
+        check("Full Chain: State advanced to Step 3", ((Integer) get("dungeonStep")).intValue() == 3);
+
+        // Step E: Server teleports player to Map 48
+        fu.q.d = Zeus.DUNGEON_MAP;
+        call("dungeon");
+        check("Full Chain: Arrival in Map 48 enters DN_COMBAT",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_COMBAT);
+
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
     }
@@ -1041,5 +1312,62 @@ public class DungeonStateMachineTest {
         m.setAccessible(true);
         return ((Boolean) m.invoke(null, npc)).booleanValue();
     }
+
+    static int getFrH(fr menu) {
+        try {
+            Field f = fr.class.getDeclaredField("h");
+            f.setAccessible(true);
+            return f.getInt(menu);
+        } catch (Throwable t) {
+            return -999;
+        }
+    }
+
+    static void setFrH(fr menu, int val) {
+        try {
+            Field f = fr.class.getDeclaredField("h");
+            f.setAccessible(true);
+            f.setInt(menu, val);
+        } catch (Throwable t) {
+        }
+    }
+
+    static et getFrG(fr menu) {
+        try {
+            Field f = fr.class.getDeclaredField("g");
+            f.setAccessible(true);
+            return (et) f.get(menu);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    static void setFrG(fr menu, et items) {
+        try {
+            Field f = fr.class.getDeclaredField("g");
+            f.setAccessible(true);
+            f.set(menu, items);
+        } catch (Throwable t) {
+        }
+    }
+
+    static void setFrC(fr menu, int val) {
+        try {
+            Field f = fr.class.getDeclaredField("C");
+            f.setAccessible(true);
+            f.setInt(menu, val);
+        } catch (Throwable t) {
+        }
+    }
+
+    static void setFrB(fr menu, int val) {
+        try {
+            Field f = fr.class.getDeclaredField("B");
+            f.setAccessible(true);
+            f.setInt(menu, val);
+        } catch (Throwable t) {
+        }
+    }
 }
+
 

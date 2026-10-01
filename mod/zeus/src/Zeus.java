@@ -2910,10 +2910,12 @@ public final class Zeus {
                     labels[i] = entry instanceof bt ? ((bt) entry).a : null;
                 }
                 dungeonMenu = labels;
+                dungeonMenuItems = items;
                 dungeonMenuNpc = idNPC;
                 dungeonMenuId = idMenu;
             } catch (Throwable t) {
                 dungeonMenu = null;
+                dungeonMenuItems = null;
                 dungeonMenuNpc = Integer.MIN_VALUE;
             }
             // NOT swallowed, and that is deliberate rather than an oversight. Returning true makes
@@ -6125,21 +6127,103 @@ public final class Zeus {
         return -1;
     }
 
+    static int getFrIndex(fr menu) {
+        if (menu == null) {
+            return -1;
+        }
+        try {
+            java.lang.reflect.Field f = fr.class.getDeclaredField("h");
+            f.setAccessible(true);
+            return f.getInt(menu);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    static void setFrIndex(fr menu, int index) {
+        if (menu == null) {
+            return;
+        }
+        try {
+            java.lang.reflect.Field f = fr.class.getDeclaredField("h");
+            f.setAccessible(true);
+            f.setInt(menu, index);
+        } catch (Throwable t) {
+        }
+    }
+
+    static et getFrItems(fr menu) {
+        if (menu == null) {
+            return null;
+        }
+        try {
+            java.lang.reflect.Field f = fr.class.getDeclaredField("g");
+            f.setAccessible(true);
+            return (et) f.get(menu);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    static bt findGiaoTiepInDialog(da dialog) {
+        if (dialog == null) {
+            return null;
+        }
+        try {
+            if (dialog.ab != null && dialog.ab.a != null) {
+                String s = norm(dialog.ab.a);
+                if (s.indexOf("giao tiep") >= 0 && s.indexOf("giao dich") < 0) {
+                    return dialog.ab;
+                }
+            }
+            if (dialog.Z != null && dialog.Z.a != null) {
+                String s = norm(dialog.Z.a);
+                if (s.indexOf("giao tiep") >= 0 && s.indexOf("giao dich") < 0) {
+                    return dialog.Z;
+                }
+            }
+            if (dialog instanceof ah) {
+                et buttons = ((ah) dialog).C;
+                if (buttons != null) {
+                    for (int i = 0; i < buttons.c(); i++) {
+                        Object entry = buttons.a(i);
+                        if (entry instanceof bt) {
+                            bt btn = (bt) entry;
+                            if (btn.a != null) {
+                                String s = norm(btn.a);
+                                if (s.indexOf("giao tiep") >= 0 && s.indexOf("giao dich") < 0) {
+                                    return btn;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+        }
+        return null;
+    }
+
     /**
      * Picks a row of the captured menu and forgets the capture.
      *
-     * The menu is left on screen rather than dismissed: the server replaces the panel with the next
-     * one, and closing it here would race that replacement. Only a menu this module has decided it
-     * will not use is closed, by {@link #dungeonCloseMenu}.
+     * Invokes native server menu action handler fr.a(2, 0) when the active client menu is open,
+     * allowing the native client to manage network dispatch and panel closing side-effects.
+     * Falls back to raw network dispatch if fr is not active (mocked test harness).
      */
     private static boolean dungeonSelect(int index) {
         int npc = dungeonMenuNpc;
         int menuId = dungeonMenuId;
         dungeonMenu = null;
+        dungeonMenuItems = null;
         dungeonMenuNpc = Integer.MIN_VALUE;
         try {
-            // The idNPC/idMenu pair the server itself sent, not an assumed zero: this is the packet
-            // fr.a(2, _) builds when the operator taps the row.
+            if (fu.p != null && fu.p.a) {
+                setFrIndex(fu.p, index);
+                fu.p.a(2, 0);
+                return true;
+            }
+            // Fallback for mocked test harness
             q.a().b((short) npc, (byte) menuId, (byte) index);
         } catch (Throwable t) {
             return false;
@@ -6156,6 +6240,9 @@ public final class Zeus {
         } catch (Throwable t) {
             // A menu that will not close is not worth stalling the trip over.
         }
+        dungeonMenu = null;
+        dungeonMenuItems = null;
+        dungeonMenuNpc = Integer.MIN_VALUE;
     }
 
     /**
@@ -6338,8 +6425,9 @@ public final class Zeus {
     static int dungeonNoTargetTicks = 0;
     static int dungeonRunTicks = 0;
 
-    /** Labels of the server menu currently open, captured by {@link #serverMenu}. Its own trio: never TRAVEL's. */
+    /** Labels and item collection of the server menu currently open, captured by {@link #serverMenu}. Its own trio: never TRAVEL's. */
     static String[] dungeonMenu = null;
+    static et dungeonMenuItems = null;
     static int dungeonMenuNpc = Integer.MIN_VALUE;
     static int dungeonMenuId = 0;
 
@@ -6554,6 +6642,7 @@ public final class Zeus {
         dungeonLastY = Integer.MIN_VALUE;
         dungeonMapSeen = Integer.MIN_VALUE;
         dungeonMenu = null;
+        dungeonMenuItems = null;
         dungeonMenuNpc = Integer.MIN_VALUE;
         dungeonMenuId = Integer.MIN_VALUE;
         dungeonNavigating = false;
@@ -6912,7 +7001,7 @@ public final class Zeus {
         }
 
         switch (dungeonStep) {
-            case 0: { // Step 0: First menu -> pick "Giao tiếp"
+            case 0: { // Step 0: First menu -> pick "Giao tiếp" via native UI action
                 if (fu.s != null) {
                     if (isDungeonConfirmDialog(fu.s)) {
                         dismissDungeonDialog(fu.s);
@@ -6928,22 +7017,55 @@ public final class Zeus {
                         return;
                     }
                 }
-                if (dungeonMenu == null) {
-                    if (dungeonWait > 0) {
-                        --dungeonWait;
-                        return;
-                    }
-                    if (++dungeonTried >= 2) {
-                        dungeonStop(2, "the dungeon NPC gave no menu");
-                        return;
-                    }
-                    dungeonAskNpc();
-                    return;
+
+                // Locate "Giao tiếp" command button in active menu (fu.p), captured items, or dialog (fu.s)
+                et activeItems = (fu.p != null && fu.p.a) ? getFrItems(fu.p) : dungeonMenuItems;
+                if (activeItems == null && dungeonMenuItems != null) {
+                    activeItems = dungeonMenuItems;
                 }
-                int pick = dungeonMenuPick("giao tiep", "giao dich");
-                if (pick < 0) {
+                bt giaoTiepCmd = null;
+                int giaoTiepIndex = -1;
+                if (activeItems != null) {
+                    for (int i = 0; i < activeItems.c(); i++) {
+                        Object entry = activeItems.a(i);
+                        if (entry instanceof bt) {
+                            bt btn = (bt) entry;
+                            if (btn.a != null) {
+                                String label = norm(btn.a);
+                                if (label.indexOf("giao tiep") >= 0 && label.indexOf("giao dich") < 0) {
+                                    giaoTiepCmd = btn;
+                                    giaoTiepIndex = i;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (giaoTiepCmd == null && fu.s != null) {
+                    giaoTiepCmd = findGiaoTiepInDialog(fu.s);
+                }
+
+                int legacyPick = -1;
+                if (giaoTiepCmd == null && dungeonMenu != null) {
+                    legacyPick = dungeonMenuPick("giao tiep", "giao dich");
+                }
+
+                if (giaoTiepCmd == null && legacyPick < 0) {
+                    if (dungeonMenu == null && activeItems == null) {
+                        if (dungeonWait > 0) {
+                            --dungeonWait;
+                            return;
+                        }
+                        if (++dungeonTried >= 2) {
+                            dungeonStop(2, "the dungeon NPC gave no menu");
+                            return;
+                        }
+                        dungeonAskNpc();
+                        return;
+                    }
                     dungeonCloseMenu();
                     dungeonMenu = null;
+                    dungeonMenuItems = null;
                     dungeonMenuNpc = Integer.MIN_VALUE;
                     if (++dungeonTried >= DN_MAX_TRIES) {
                         dungeonStop(2, "no \"giao tiep\" row in the dungeon NPC's menu");
@@ -6952,14 +7074,30 @@ public final class Zeus {
                     dungeonWait = 10;
                     return;
                 }
-                if (!dungeonSelect(pick)) {
-                    dungeonStop(2, "selecting \"giao tiep\" failed");
-                    return;
+
+                // Native UI contract: set menu cursor index on active menu
+                if (fu.p != null && fu.p.a && giaoTiepIndex >= 0) {
+                    setFrIndex(fu.p, giaoTiepIndex);
                 }
+
+                // ARM NEXT STATE BEFORE DISPATCH to eliminate race conditions
                 dungeonStep = 1;
                 dungeonTried = 0;
                 dungeonWait = 60;
-                trace("DUNGEON picked the dialogue, waiting on the submenu");
+                dungeonMenu = null;
+                dungeonMenuItems = null;
+                dungeonMenuNpc = Integer.MIN_VALUE;
+                trace("DUNGEON invoked native 'Giao tiếp' command, waiting on second menu");
+
+                if (giaoTiepCmd != null) {
+                    // Execute verified native command callback exactly once
+                    giaoTiepCmd.a();
+                } else {
+                    // Legacy/string-only mock fallback
+                    if (!dungeonSelect(legacyPick)) {
+                        dungeonStop(2, "selecting \"giao tiep\" failed");
+                    }
+                }
                 return;
             }
 
@@ -6979,30 +7117,54 @@ public final class Zeus {
                         return;
                     }
                 }
-                if (dungeonMenu == null) {
-                    if (dungeonWait > 0) {
-                        --dungeonWait;
+
+                et secondItems = (fu.p != null && fu.p.a) ? getFrItems(fu.p) : dungeonMenuItems;
+                if (secondItems == null && dungeonMenuItems != null) {
+                    secondItems = dungeonMenuItems;
+                }
+                int pick = -1;
+                if (secondItems != null) {
+                    for (int i = 0; i < secondItems.c(); i++) {
+                        Object entry = secondItems.a(i);
+                        if (entry instanceof bt) {
+                            bt btn = (bt) entry;
+                            if (btn.a != null) {
+                                String label = norm(btn.a);
+                                if (label.indexOf("nga tu") >= 0 || label.indexOf("tu than") >= 0 || label.indexOf("vao nga tu") >= 0) {
+                                    pick = i;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (pick < 0) {
+                    pick = dungeonMenuPick("nga tu", null);
+                    if (pick < 0) {
+                        pick = dungeonMenuPick("tu than", null);
+                    }
+                    if (pick < 0) {
+                        pick = dungeonMenuPick("vao nga tu", null);
+                    }
+                }
+
+                if (pick < 0) {
+                    if (dungeonMenu == null && secondItems == null) {
+                        if (dungeonWait > 0) {
+                            --dungeonWait;
+                            return;
+                        }
+                        if (++dungeonTried >= DN_MAX_TRIES) {
+                            dungeonStop(2, "no submenu after the dialogue pick");
+                            return;
+                        }
+                        dungeonStep = 0;
+                        dungeonAskNpc();
                         return;
                     }
-                    if (++dungeonTried >= DN_MAX_TRIES) {
-                        dungeonStop(2, "no submenu after the dialogue pick");
-                        return;
-                    }
-                    dungeonStep = 0;
-                    dungeonAskNpc();
-                    return;
-                }
-                // Semantic match: look for "nga tu", then "tu than", then "vao nga tu"
-                int pick = dungeonMenuPick("nga tu", null);
-                if (pick < 0) {
-                    pick = dungeonMenuPick("tu than", null);
-                }
-                if (pick < 0) {
-                    pick = dungeonMenuPick("vao nga tu", null);
-                }
-                if (pick < 0) {
                     dungeonCloseMenu();
                     dungeonMenu = null;
+                    dungeonMenuItems = null;
                     dungeonMenuNpc = Integer.MIN_VALUE;
                     if (++dungeonTried >= DN_MAX_TRIES) {
                         dungeonStop(2, "no \"nga tu\" row in the dungeon submenu");
@@ -7011,14 +7173,31 @@ public final class Zeus {
                     dungeonWait = 10;
                     return;
                 }
-                if (!dungeonSelect(pick)) {
-                    dungeonStop(2, "selecting dungeon row " + pick + " failed");
-                    return;
-                }
+
+                int npc = dungeonMenuNpc;
+                int menuId = dungeonMenuId;
+                dungeonMenu = null;
+                dungeonMenuItems = null;
+                dungeonMenuNpc = Integer.MIN_VALUE;
                 dungeonStep = 2;
                 dungeonTried = 0;
                 dungeonWait = 60;
-                trace("DUNGEON picked dungeon submenu row " + pick + ", waiting on confirmation dialog");
+                trace("DUNGEON invoked native second-menu action for row " + pick + ", waiting on confirmation dialog");
+
+                if (fu.p != null && fu.p.a) {
+                    setFrIndex(fu.p, pick);
+                    try {
+                        fu.p.a(2, 0);
+                    } catch (Throwable t) {
+                        dungeonStop(2, "native server menu action failed: " + t);
+                    }
+                } else {
+                    try {
+                        q.a().b((short) npc, (byte) menuId, (byte) pick);
+                    } catch (Throwable t) {
+                        dungeonStop(2, "selecting dungeon row " + pick + " failed");
+                    }
+                }
                 return;
             }
 
