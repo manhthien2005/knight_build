@@ -6015,7 +6015,17 @@ public final class Zeus {
      */
     private static boolean dungeonClickNpc(fa npc) {
         dungeonNpcCu = npc.cu;
-        return dungeonAskNpc();
+        dungeonState = DN_PREPARATION;
+        dungeonStep = 0;
+        dungeonMenuId = Integer.MIN_VALUE;
+        if (dungeonAskNpc()) {
+            dungeonTried = 0;
+            dungeonStallTicks = 0;
+            trace("DUNGEON asked NPC cu=" + npc.cu + " at " + npc.aZ + "," + npc.ba);
+            return true;
+        }
+        dungeonState = DN_ROUTING;
+        return false;
     }
 
     /** Re-asks the NPC last clicked, by id. The bounded retry is a second question, not a tighter loop. */
@@ -6490,6 +6500,7 @@ public final class Zeus {
         dungeonMapSeen = Integer.MIN_VALUE;
         dungeonMenu = null;
         dungeonMenuNpc = Integer.MIN_VALUE;
+        dungeonMenuId = Integer.MIN_VALUE;
         dungeonNavigating = false;
         dungeonCombatEngaged = false;
         dungeonDiedInRun = false;
@@ -6500,6 +6511,9 @@ public final class Zeus {
         dungeonNoTargetTicks = 0;
         dungeonRunTicks = 0;
         dungeonConsecutiveFails = 0;
+        if (fu.s != null && isDungeonConfirmDialog(fu.s)) {
+            dismissDungeonDialog(fu.s);
+        }
         dungeonRestoreCombat();
     }
 
@@ -6512,6 +6526,13 @@ public final class Zeus {
         dungeonCloseMenu();
         dungeonMenu = null;
         dungeonMenuNpc = Integer.MIN_VALUE;
+        dungeonMenuId = Integer.MIN_VALUE;
+        dungeonStep = 0;
+        dungeonWait = 0;
+        dungeonTried = 0;
+        if (fu.s != null && isDungeonConfirmDialog(fu.s)) {
+            dismissDungeonDialog(fu.s);
+        }
         dungeonRestoreCombat();
         trace("DUNGEON stopped (" + why + "): " + reason);
     }
@@ -6706,7 +6727,7 @@ public final class Zeus {
                     dungeonStop(3, "unknown state " + dungeonState);
             }
         } catch (Throwable t) {
-            // A module must never stall the client tick.
+            trace("DUNGEON tick exception: " + t);
         }
     }
 
@@ -6795,13 +6816,22 @@ public final class Zeus {
             dungeonWait = 20;
             return;
         }
+        if (fu.s != null) {
+            if (isDungeonConfirmDialog(fu.s)) {
+                dismissDungeonDialog(fu.s);
+                return;
+            }
+            if (++dungeonTried >= DN_MAX_TRIES) {
+                dungeonStop(5, "unrelated dialog blocking dungeon NPC interaction: " + clean(dialogText(fu.s)));
+                return;
+            }
+            dungeonWait = 10;
+            return;
+        }
         if (dungeonClickNpc(npc)) {
-            dungeonState = DN_PREPARATION;
-            dungeonStep = 0;
-            dungeonTried = 0;
-            dungeonStallTicks = 0;
-            trace("DUNGEON asked NPC cu=" + npc.cu + " at " + npc.aZ + "," + npc.ba);
-        } else if (++dungeonTried >= DN_MAX_TRIES) {
+            return;
+        }
+        if (++dungeonTried >= DN_MAX_TRIES) {
             dungeonStop(2, "the dungeon NPC would not take a click");
         }
     }
@@ -6821,6 +6851,19 @@ public final class Zeus {
 
         switch (dungeonStep) {
             case 0: { // Step 0: First menu -> pick "Giao tiếp"
+                if (fu.s != null) {
+                    if (isDungeonConfirmDialog(fu.s)) {
+                        dismissDungeonDialog(fu.s);
+                        dungeonWait = 10;
+                        return;
+                    }
+                    if (++dungeonTried >= DN_MAX_TRIES) {
+                        dungeonStop(5, "unrelated dialog blocking first menu: " + clean(dialogText(fu.s)));
+                        return;
+                    }
+                    dungeonWait = 10;
+                    return;
+                }
                 if (dungeonMenu == null) {
                     if (dungeonWait > 0) {
                         --dungeonWait;
@@ -6857,6 +6900,19 @@ public final class Zeus {
             }
 
             case 1: { // Step 1: Second menu -> pick "Vào Ngã Tư Tử Thần"
+                if (fu.s != null) {
+                    if (isDungeonConfirmDialog(fu.s)) {
+                        dungeonStep = 2;
+                        dungeonWait = 0;
+                        return;
+                    }
+                    if (++dungeonTried >= DN_MAX_TRIES) {
+                        dungeonStop(5, "unrelated dialog blocking second menu: " + clean(dialogText(fu.s)));
+                        return;
+                    }
+                    dungeonWait = 10;
+                    return;
+                }
                 if (dungeonMenu == null) {
                     if (dungeonWait > 0) {
                         --dungeonWait;
@@ -7052,6 +7108,58 @@ public final class Zeus {
                 || cap.indexOf("khong") >= 0
                 || cap.indexOf("huy") >= 0
                 || cap.indexOf("bo qua") >= 0;
+    }
+
+    private static boolean isDungeonConfirmDialog(da dialog) {
+        if (dialog == null) {
+            return false;
+        }
+        try {
+            String text = norm(dialogText(dialog));
+            return text.indexOf("nga tu") >= 0 || text.indexOf("tu than") >= 0;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static void dismissDungeonDialog(da dialog) {
+        if (dialog == null) {
+            return;
+        }
+        try {
+            if (dialog instanceof ah) {
+                et buttons = ((ah) dialog).C;
+                if (buttons != null) {
+                    for (int i = 0; i < buttons.c(); i++) {
+                        Object entry = buttons.a(i);
+                        if (entry instanceof bt) {
+                            bt btn = (bt) entry;
+                            String cap = norm(btn.a).trim();
+                            if (isNegativeCaption(cap)) {
+                                trace("DUNGEON dismissing dialog via button \"" + clean(btn.a) + "\"");
+                                btn.a();
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            if (dialog.ab != null) {
+                String cap = norm(dialog.ab.a).trim();
+                if (isNegativeCaption(cap)) {
+                    trace("DUNGEON dismissing dialog via dialog.ab \"" + clean(dialog.ab.a) + "\"");
+                    dialog.ab.a();
+                    return;
+                }
+            }
+            if (fu.s == dialog) {
+                fu.s = null;
+            }
+        } catch (Throwable t) {
+            if (fu.s == dialog) {
+                fu.s = null;
+            }
+        }
     }
 
     /** Counts the run, resets failure streak, then either stops at the limit or goes round again. */

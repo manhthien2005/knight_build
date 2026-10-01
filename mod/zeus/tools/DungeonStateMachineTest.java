@@ -83,6 +83,24 @@ public class DungeonStateMachineTest {
             fu.p.a = false;
         }
         cn.j = new et("entities");
+        try {
+            Field fNet = ef.class.getDeclaredField("a");
+            fNet.setAccessible(true);
+            if (fNet.get(q.a()) == null) {
+                fNet.set(q.a(), new l());
+            }
+        } catch (Throwable t) {
+        }
+    }
+
+    static java.util.Vector getSentPackets() throws Exception {
+        Field fNet = ef.class.getDeclaredField("a");
+        fNet.setAccessible(true);
+        l netL = (l) fNet.get(q.a());
+        Field fAx = l.class.getDeclaredField("o");
+        fAx.setAccessible(true);
+        ax axObj = (ax) fAx.get(netL);
+        return axObj.a;
     }
 
     public static void main(String[] args) throws Exception {
@@ -489,6 +507,201 @@ public class DungeonStateMachineTest {
         check("First clear increments to 6", ((Integer) get("dungeonRuns")).intValue() == 6);
         // Repeated clear call without entering dungeon again
         check("dungeonWasIn is false after completion", !((Boolean) get("dungeonWasIn")).booleanValue());
+
+        // ---------------------------------------------------------------------
+        // Test 19: Fresh Dungeon Arm Transient Interaction Reset
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 19: Fresh Dungeon Arm Transient Interaction Reset ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 2);
+        set("dungeonWait", 50);
+        set("dungeonTried", 3);
+        set("dungeonMenu", new String[] { "Nhiệm vụ", "Vào Ngã Tư Tử Thần" });
+        set("dungeonMenuNpc", 123);
+        set("dungeonMenuId", 9999);
+        ah staleDialog = new ah();
+        staleDialog.C.a(new bt("Có", 1));
+        staleDialog.C.a(new bt("Không", 2));
+        staleDialog.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
+        fu.s = staleDialog;
+
+        Zeus.dungeonReset();
+        check("dungeonStep reset to 0", ((Integer) get("dungeonStep")).intValue() == 0);
+        check("dungeonWait reset to 0", ((Integer) get("dungeonWait")).intValue() == 0);
+        check("dungeonTried reset to 0", ((Integer) get("dungeonTried")).intValue() == 0);
+        check("dungeonMenu reset to null", get("dungeonMenu") == null);
+        check("dungeonMenuNpc reset to MIN_VALUE", ((Integer) get("dungeonMenuNpc")).intValue() == Integer.MIN_VALUE);
+        check("dungeonMenuId reset to MIN_VALUE", ((Integer) get("dungeonMenuId")).intValue() == Integer.MIN_VALUE);
+        check("stale dungeon dialog dismissed on reset", fu.s == null);
+
+        // ---------------------------------------------------------------------
+        // Test 20: Player Inside NPC Interaction Radius -> GOTO_NPC Dispatches Exactly One Opcode 23
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 20: Player Inside NPC Radius -> Exactly One Opcode 23 ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        set("navTarget", -1);
+        set("navDone", true);
+        fu.q.d = 1;
+        fa phoChiHuy = new fa();
+        phoChiHuy.cv = 2; // NPC
+        phoChiHuy.cu = -37;
+        phoChiHuy.cC = "Pho Chi Huy";
+        phoChiHuy.aZ = 552;
+        phoChiHuy.ba = 504;
+        cn.j = new et("entities");
+        cn.j.a(phoChiHuy);
+
+        cn.g.aZ = 552;
+        cn.g.ba = 504;
+        getSentPackets().clear();
+
+        callInt("dungeonGotoNpc", 1);
+        check("dungeonState transitions to DN_PREPARATION", ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
+        check("dungeonStep set to 0", ((Integer) get("dungeonStep")).intValue() == 0);
+        check("dungeonWait armed to 20", ((Integer) get("dungeonWait")).intValue() == 20);
+        check("Exactly one packet sent", getSentPackets().size() == 1);
+        ep sentPkt = (ep) getSentPackets().get(0);
+        check("Dispatched packet is opcode 23", sentPkt.a == 23);
+
+        // ---------------------------------------------------------------------
+        // Test 21: Player Outside Interaction Radius -> Movement, No Opcode 23
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 21: Player Outside Radius -> Movement, No Opcode 23 ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        fu.q.d = 1;
+        cn.g.aZ = 100; // Far outside 80-radius
+        cn.g.ba = 100;
+        getSentPackets().clear();
+
+        callInt("dungeonGotoNpc", 1);
+        check("dungeonState remains DN_ROUTING while approaching", ((Integer) get("dungeonState")).intValue() == Zeus.DN_ROUTING);
+        check("No opcode 23 sent while outside interaction radius", getSentPackets().size() == 0);
+
+        // ---------------------------------------------------------------------
+        // Test 22: Stale Confirmation Dialog Cleared Safely During GotoNpc / Fresh Arm
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 22: Stale Confirmation Dialog Cleared Safely ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        fu.q.d = 1;
+        cn.g.aZ = 552;
+        cn.g.ba = 504;
+        ah leftoverDialog = new ah();
+        leftoverDialog.C.a(new bt("Có", 1));
+        leftoverDialog.C.a(new bt("Không", 2));
+        leftoverDialog.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
+        fu.s = leftoverDialog;
+        getSentPackets().clear();
+
+        callInt("dungeonGotoNpc", 1);
+        check("Stale dialog dismissed during goto NPC", fu.s == null);
+        boolean hasOpcode23 = false;
+        for (int i = 0; i < getSentPackets().size(); i++) {
+            ep pkt = (ep) getSentPackets().get(i);
+            if (pkt.a == 23) {
+                hasOpcode23 = true;
+            }
+        }
+        check("No premature opcode 23 dispatched while clearing dialog", !hasOpcode23);
+
+        // ---------------------------------------------------------------------
+        // Test 23: Unrelated Dialog Does NOT Auto-Confirm and Fails Closed to DN_MANUAL_REVIEW
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 23: Unrelated Dialog Fails Closed Without Auto-Confirm ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        fu.q.d = 1;
+        cn.g.aZ = 552;
+        cn.g.ba = 504;
+        ah unrelatedDialog = new ah();
+        unrelatedDialog.q = new String[] { "Thong bao: Bao tri may chu!" };
+        bt okBtn = new bt("Dong", 1);
+        unrelatedDialog.C.a(okBtn);
+        fu.s = unrelatedDialog;
+        getSentPackets().clear();
+
+        // 3 consecutive ticks with unrelated dialog
+        for (int i = 0; i < 3; i++) {
+            callInt("dungeonGotoNpc", 1);
+        }
+        check("Unrelated dialog NOT auto-confirmed", fu.s == unrelatedDialog);
+        check("No opcode 23 dispatched while unrelated dialog present", getSentPackets().size() == 0);
+        check("State transitioned to DN_MANUAL_REVIEW on persistent dialog", ((Integer) get("dungeonState")).intValue() == Zeus.DN_MANUAL_REVIEW);
+        check("Why code set to 5", ((Integer) get("dungeonWhy")).intValue() == 5);
+
+        // ---------------------------------------------------------------------
+        // Test 24: No Duplicate Opcode 23 or NPC Reopen While Waiting
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 24: No Duplicate Opcode 23 or NPC Reopen While Waiting ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        fu.s = null;
+
+        // Subtest A: Waiting for first menu (Step 0)
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 15);
+        set("dungeonMenu", null);
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Wait budget decrements at step 0", ((Integer) get("dungeonWait")).intValue() == 14);
+        check("No opcode 23 dispatched while waiting for first menu", getSentPackets().size() == 0);
+
+        // Subtest B: Waiting for second menu (Step 1)
+        set("dungeonStep", 1);
+        set("dungeonWait", 15);
+        set("dungeonMenu", null);
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Wait budget decrements at step 1", ((Integer) get("dungeonWait")).intValue() == 14);
+        check("No reopen dispatched while waiting for second menu", getSentPackets().size() == 0);
+
+        // Subtest C: Waiting for confirmation dialog (Step 2)
+        set("dungeonStep", 2);
+        set("dungeonWait", 15);
+        fu.s = null;
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Wait budget decrements at step 2", ((Integer) get("dungeonWait")).intValue() == 14);
+        check("No reopen dispatched while waiting for confirmation dialog", getSentPackets().size() == 0);
+
+        // Subtest D: Waiting for teleport (Step 3)
+        set("dungeonStep", 3);
+        set("dungeonWait", 15);
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Wait budget decrements at step 3", ((Integer) get("dungeonWait")).intValue() == 14);
+        check("No reopen dispatched while waiting for teleport", getSentPackets().size() == 0);
+
+        // ---------------------------------------------------------------------
+        // Test 25: norm() and normSemantic() Length Safety & Accent Permutations
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 25: norm() and normSemantic() Safety ---");
+        Method normM = Zeus.class.getDeclaredMethod("norm", String.class);
+        normM.setAccessible(true);
+        Method normSemM = Zeus.class.getDeclaredMethod("normSemantic", String.class);
+        normSemM.setAccessible(true);
+
+        check("norm(null) returns empty string", "".equals(normM.invoke(null, (String) null)));
+        check("norm(\"\") returns empty string", "".equals(normM.invoke(null, "")));
+
+        String upperAccents = "ÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴÈÉẸẺẼÊỀẾỆỂỄÌÍỊỈĨÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠÙÚỤỦŨƯỪỨỰỬỮỲÝỴỶỸĐ";
+        String lowerAccents = "àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ";
+        String normUpper = (String) normM.invoke(null, upperAccents);
+        String normLower = (String) normM.invoke(null, lowerAccents);
+        check("norm(upper) does not throw and equals norm(lower)", normUpper != null && normUpper.equals(normLower));
+
+        String phrase = "  Vào   Ngã  Tư  Tử  Thần  ";
+        String semantic = (String) normSemM.invoke(null, phrase);
+        check("normSemantic collapses whitespace and normalizes", "vao nga tu tu than".equals(semantic));
 
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
