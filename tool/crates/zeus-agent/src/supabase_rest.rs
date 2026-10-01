@@ -916,7 +916,7 @@ impl JarManifest {
     pub const ENHANCEMENT_RESILIENT_COMPATIBLE_JAR_SHA256: &'static str =
         "3999f6b674c1780ac3f26d47ad035f5a2d749ef38cea5b256dcd8e1aec3c3504";
     pub const AUTO_DUNGEON_COMPATIBLE_JAR_SHA256: &'static str =
-        "e8f289fcabe9c35b2b997a6d591580a0ffbef95c89a9fec912efbdc68733ba1a";
+        "58bd0879709b263458647aa512fd6b9a3d6ed6994fa82e0a03ece721e0e1cfbf";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;

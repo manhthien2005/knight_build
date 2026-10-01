@@ -7041,6 +7041,10 @@ public final class Zeus {
                         }
                     }
                 }
+                // Inspect native NPC conversation container fu.t first (cn.java:358 -> fu.c() -> fu.t = ah2)
+                if (giaoTiepCmd == null && fu.t != null) {
+                    giaoTiepCmd = findGiaoTiepInDialog(fu.t);
+                }
                 if (giaoTiepCmd == null && fu.s != null) {
                     giaoTiepCmd = findGiaoTiepInDialog(fu.s);
                 }
@@ -7051,11 +7055,11 @@ public final class Zeus {
                 }
 
                 if (giaoTiepCmd == null && legacyPick < 0) {
-                    if (dungeonMenu == null && activeItems == null) {
-                        if (dungeonWait > 0) {
-                            --dungeonWait;
-                            return;
-                        }
+                    if (dungeonWait > 0) {
+                        --dungeonWait;
+                        return;
+                    }
+                    if (dungeonMenu == null && activeItems == null && fu.t == null) {
                         if (++dungeonTried >= 2) {
                             dungeonStop(2, "the dungeon NPC gave no menu");
                             return;

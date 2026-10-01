@@ -1274,6 +1274,196 @@ public class DungeonStateMachineTest {
         check("Full Chain: Arrival in Map 48 enters DN_COMBAT",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_COMBAT);
 
+        // ---------------------------------------------------------------------
+        // Test 43: fu.t Native NPC Dialog Discovery Contract (DUNGEON-04G2)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 43: fu.t Native NPC Dialog Discovery Contract ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 60);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        fu.s = null;
+        fu.p.a = false;
+        setFrG(fu.p, null);
+
+        ah futDialog = new ah();
+        futDialog.q = new String[] { "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!" };
+        futDialog.C = new et("buttons");
+        final boolean[] futGiaoTiepClicked = new boolean[1];
+        cg futTarget = new cg() {
+            public void a(int e, int f) {
+                futGiaoTiepClicked[0] = true;
+            }
+        };
+        futDialog.C.a(new bt("Giao tiếp", 4, futTarget));
+        futDialog.C.a(new bt("Đóng", 5));
+        fu.t = futDialog;
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("fu.t Dialog: Step 0 executes native bt.a() from fu.t", futGiaoTiepClicked[0]);
+        check("fu.t Dialog: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
+        check("fu.t Dialog: No synthetic q.b packet dispatched", getSentPackets().isEmpty());
+
+        // ---------------------------------------------------------------------
+        // Test 44: fu.s Broadcast Popup Coexistence with fu.t NPC Dialog
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 44: fu.s Broadcast Coexistence with fu.t NPC Dialog ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 60);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        fu.p.a = false;
+        setFrG(fu.p, null);
+
+        // fu.s has a server broadcast announcement
+        fu.s = makeBroadcastPopup("Chúc mừng người chơi x đã vượt qua đợt 5");
+        // fu.t has the active NPC dialog with Giao tiếp
+        final boolean[] futCoexistClicked = new boolean[1];
+        ah futCoexistDialog = new ah();
+        futCoexistDialog.q = new String[] { "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!" };
+        futCoexistDialog.C = new et("buttons");
+        futCoexistDialog.C.a(new bt("Giao tiếp", 4, new cg() {
+            public void a(int e, int f) {
+                futCoexistClicked[0] = true;
+            }
+        }));
+        futCoexistDialog.C.a(new bt("Đóng", 5));
+        fu.t = futCoexistDialog;
+
+        call("dungeonInteract");
+        check("fu.t + fu.s: Giao tiếp executed from fu.t", futCoexistClicked[0]);
+        check("fu.t + fu.s: Broadcast preserved in fu.s", fu.s != null);
+        check("fu.t + fu.s: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
+
+        // ---------------------------------------------------------------------
+        // Test 45: Stale fu.t Dialog Invalidation & Safety
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 45: Stale fu.t Dialog Invalidation & Safety ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 60);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        fu.p.a = false;
+        setFrG(fu.p, null);
+
+        // fu.t is replaced with a dialog that has NO Giao tiếp (e.g. general notice)
+        ah futNoGiaoTiep = new ah();
+        futNoGiaoTiep.q = new String[] { "Thông báo hệ thống" };
+        futNoGiaoTiep.C = new et("buttons");
+        futNoGiaoTiep.C.a(new bt("Đóng", 5));
+        fu.t = futNoGiaoTiep;
+        fu.s = null;
+
+        call("dungeonInteract");
+        check("Replaced fu.t without Giao tiếp does not advance", ((Integer) get("dungeonStep")).intValue() == 0);
+        check("Wait budget decrements", ((Integer) get("dungeonWait")).intValue() < 60);
+
+        // Null fu.t and null fu.p: wait budget decrements, no crash
+        fu.t = null;
+        call("dungeonInteract");
+        check("Null fu.t and fu.p: Step remains 0", ((Integer) get("dungeonStep")).intValue() == 0);
+
+        // ---------------------------------------------------------------------
+        // Test 46: Full Entry Chain with fu.t Native Dialog
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 46: Full Entry Chain with fu.t Native Dialog ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        fu.q.d = 1;
+        cn.g.aZ = 552;
+        cn.g.ba = 504;
+
+        fa pcf46 = new fa();
+        pcf46.cv = 2;
+        pcf46.cu = -37;
+        pcf46.cC = "Pho Chi Huy";
+        pcf46.aZ = 552;
+        pcf46.ba = 504;
+        cn.j = new et("entities");
+        cn.j.a(pcf46);
+
+        fu.s = makeBroadcastPopup("Server Broadcast Notice");
+        fu.p.a = false;
+        setFrG(fu.p, null);
+
+        // Arrival at NPC
+        getSentPackets().clear();
+        callInt("dungeonGotoNpc", 1);
+        check("Chain fu.t: Transitions to DN_PREPARATION",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
+        check("Chain fu.t: Opcode 23 sent to NPC",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+
+        // NPC dialog arrives in fu.t
+        ah chainFutDialog = new ah();
+        chainFutDialog.q = new String[] { "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!" };
+        chainFutDialog.C = new et("buttons");
+        final boolean[] chainFutClicked = new boolean[1];
+        chainFutDialog.C.a(new bt("Giao tiếp", 4, new cg() {
+            public void a(int e, int f) {
+                chainFutClicked[0] = true;
+            }
+        }));
+        chainFutDialog.C.a(new bt("Đóng", 5));
+        fu.t = chainFutDialog;
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Chain fu.t: Native callback invoked from fu.t", chainFutClicked[0]);
+        check("Chain fu.t: State advanced to Step 1", ((Integer) get("dungeonStep")).intValue() == 1);
+        check("Chain fu.t: Broadcast popup in fu.s preserved", fu.s != null);
+
+        // Second menu arrives in fu.p
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 3);
+        setFrH(fu.p, -1);
+        et chainFutSecond = new et("chainFutSecond");
+        chainFutSecond.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        chainFutSecond.a(new bt("Đóng", 1));
+        setFrG(fu.p, chainFutSecond);
+        callServerMenu(-37, 3, "Nga Tu", chainFutSecond);
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Chain fu.t: Step 1 native action sent q.b (opcode -30)",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+        check("Chain fu.t: State advanced to Step 2", ((Integer) get("dungeonStep")).intValue() == 2);
+
+        // Confirmation arrives in fu.s
+        ah chainFutConfirm = new ah();
+        chainFutConfirm.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
+        chainFutConfirm.C = new et("buttons");
+        final boolean[] chainFutConfirmClicked = new boolean[1];
+        chainFutConfirm.C.a(new bt("Có", 1, new cg() {
+            public void a(int e, int f) {
+                chainFutConfirmClicked[0] = true;
+            }
+        }));
+        chainFutConfirm.C.a(new bt("Không", 2));
+        fu.s = chainFutConfirm;
+
+        call("dungeonInteract");
+        check("Chain fu.t: Step 2 confirmation invoked", chainFutConfirmClicked[0]);
+        check("Chain fu.t: State advanced to Step 3", ((Integer) get("dungeonStep")).intValue() == 3);
+
+        // Arrival on Map 48
+        fu.q.d = Zeus.DUNGEON_MAP;
+        call("dungeon");
+        check("Chain fu.t: Arrival in Map 48 enters DN_COMBAT",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_COMBAT);
+
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
     }
