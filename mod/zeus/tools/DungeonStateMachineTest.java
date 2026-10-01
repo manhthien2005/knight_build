@@ -703,7 +703,68 @@ public class DungeonStateMachineTest {
         String semantic = (String) normSemM.invoke(null, phrase);
         check("normSemantic collapses whitespace and normalizes", "vao nga tu tu than".equals(semantic));
 
+        // ---------------------------------------------------------------------
+        // Test 26: Native NPC Interaction Parity and Interaction Range Enforcement
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 26: Native NPC Interaction Parity & Range Enforcement ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        set("navTarget", -1);
+        set("navDone", true);
+        fu.q.d = 1;
+
+        fa npcTarget = new fa();
+        npcTarget.cv = 2; // NPC
+        npcTarget.cu = -37;
+        npcTarget.cC = "Pho Chi Huy";
+        npcTarget.aZ = 552;
+        npcTarget.ba = 504;
+        cn.j = new et("entities");
+        cn.j.a(npcTarget);
+
+        // Subtest A: Character at (588, 476) - distance 64px (> 36px tolerance)
+        // Must NOT trigger interaction or send opcode 23
+        cn.g.aZ = 588;
+        cn.g.ba = 476;
+        cn.g.cH = 0;
+        cn.i = null;
+        getSentPackets().clear();
+
+        callInt("dungeonGotoNpc", 1);
+        check("At distance 64px (> 36px), dungeonState remains DN_ROUTING",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_ROUTING);
+        check("At distance 64px, no opcode 23 dispatched", getSentPackets().size() == 0);
+
+        // Subtest B: Character at (576, 504) - adjacent tile (distance 24px <= 36px)
+        // Must arrive, set target focus cn.i, face NPC (cH=2), stop velocity, and dispatch opcode 23
+        cn.g.aZ = 576;
+        cn.g.ba = 504;
+        cn.g.cH = 0;
+        cn.i = null;
+        getSentPackets().clear();
+
+        callInt("dungeonGotoNpc", 1);
+        check("At distance 24px (<= 36px), dungeonState transitions to DN_PREPARATION",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
+        check("Target entity focus cn.i is set to NPC", cn.i == npcTarget);
+        check("Character facing cH is turned towards NPC (cH=2)", cn.g.cH == 2);
+        check("Character movement velocity is zeroed", cn.g.bc == 0 && cn.g.bd == 0);
+        check("Exactly one opcode 23 dispatched on arrival",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+
+        // Subtest C: Retry via dungeonAskNpc() maintains cn.i and facing
+        cn.i = null;
+        cn.g.cH = 0;
+        getSentPackets().clear();
+        call("dungeonAskNpc");
+        check("dungeonAskNpc() re-establishes cn.i focus", cn.i == npcTarget);
+        check("dungeonAskNpc() re-establishes facing cH=2", cn.g.cH == 2);
+        check("dungeonAskNpc() dispatches opcode 23",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
     }
 }
+

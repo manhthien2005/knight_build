@@ -6018,6 +6018,15 @@ public final class Zeus {
         dungeonState = DN_PREPARATION;
         dungeonStep = 0;
         dungeonMenuId = Integer.MIN_VALUE;
+        cn.i = npc;
+        try {
+            fa.a(cn.g, npc);
+        } catch (Throwable t) {
+        }
+        try {
+            cn.g.N();
+        } catch (Throwable t) {
+        }
         if (dungeonAskNpc()) {
             dungeonTried = 0;
             dungeonStallTicks = 0;
@@ -6032,6 +6041,15 @@ public final class Zeus {
     private static boolean dungeonAskNpc() {
         if (dungeonNpcCu == -1) {
             return false;
+        }
+        fa npc = dungeonNpc();
+        if (npc != null && cn.g != null) {
+            cn.i = npc;
+            try {
+                fa.a(cn.g, npc);
+                cn.g.N();
+            } catch (Throwable t) {
+            }
         }
         dungeonMenu = null;
         dungeonMenuNpc = Integer.MIN_VALUE;
@@ -6794,7 +6812,7 @@ public final class Zeus {
             x = npc.aZ;
             y = npc.ba;
         }
-        if (!travelArrive(x, y, 80)) {
+        if (!travelArrive(x, y, 36)) {
             if (cn.g.aZ == dungeonLastX && cn.g.ba == dungeonLastY) {
                 if (++dungeonStallTicks > DN_STALL_TICKS) {
                     dungeonStop(3, "stalled walking to the dungeon NPC on map " + here);
