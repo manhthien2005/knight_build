@@ -1275,9 +1275,9 @@ public class DungeonStateMachineTest {
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_COMBAT);
 
         // ---------------------------------------------------------------------
-        // Test 43: fu.t Native NPC Dialog Discovery Contract (DUNGEON-04G2)
+        // Test 43: fu.t Total Rejection Contract (DUNGEON-04I)
         // ---------------------------------------------------------------------
-        System.out.println("--- Test 43: fu.t Native NPC Dialog Discovery Contract ---");
+        System.out.println("--- Test 43: fu.t Total Rejection Contract ---");
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_PREPARATION);
@@ -1289,6 +1289,7 @@ public class DungeonStateMachineTest {
         fu.p.a = false;
         setFrG(fu.p, null);
 
+        // Even if fu.t contains a dialog with "Giao tiếp", it must NEVER be accepted as NPC dialog
         ah futDialog = new ah();
         futDialog.q = new String[] { "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!" };
         futDialog.C = new et("buttons");
@@ -1304,165 +1305,135 @@ public class DungeonStateMachineTest {
 
         getSentPackets().clear();
         call("dungeonInteract");
-        check("fu.t Dialog: Step 0 executes native bt.a() from fu.t", futGiaoTiepClicked[0]);
-        check("fu.t Dialog: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
-        check("fu.t Dialog: No synthetic q.b packet dispatched", getSentPackets().isEmpty());
-
-        // ---------------------------------------------------------------------
-        // Test 44: fu.s Broadcast Popup Coexistence with fu.t NPC Dialog
-        // ---------------------------------------------------------------------
-        System.out.println("--- Test 44: fu.s Broadcast Coexistence with fu.t NPC Dialog ---");
-        Zeus.dungeonReset();
-        set("dungeonEnabled", true);
-        set("dungeonState", Zeus.DN_PREPARATION);
-        set("dungeonStep", 0);
-        set("dungeonWait", 60);
-        set("dungeonTried", 0);
-        fu.q.d = 1;
-        fu.p.a = false;
-        setFrG(fu.p, null);
-
-        // fu.s has a server broadcast announcement
-        fu.s = makeBroadcastPopup("Chúc mừng người chơi x đã vượt qua đợt 5");
-        // fu.t has the active NPC dialog with Giao tiếp
-        final boolean[] futCoexistClicked = new boolean[1];
-        ah futCoexistDialog = new ah();
-        futCoexistDialog.q = new String[] { "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!" };
-        futCoexistDialog.C = new et("buttons");
-        futCoexistDialog.C.a(new bt("Giao tiếp", 4, new cg() {
-            public void a(int e, int f) {
-                futCoexistClicked[0] = true;
-            }
-        }));
-        futCoexistDialog.C.a(new bt("Đóng", 5));
-        fu.t = futCoexistDialog;
-
-        call("dungeonInteract");
-        check("fu.t + fu.s: Giao tiếp executed from fu.t", futCoexistClicked[0]);
-        check("fu.t + fu.s: Broadcast preserved in fu.s", fu.s != null);
-        check("fu.t + fu.s: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
-
-        // ---------------------------------------------------------------------
-        // Test 45: Stale fu.t Dialog Invalidation & Safety
-        // ---------------------------------------------------------------------
-        System.out.println("--- Test 45: Stale fu.t Dialog Invalidation & Safety ---");
-        Zeus.dungeonReset();
-        set("dungeonEnabled", true);
-        set("dungeonState", Zeus.DN_PREPARATION);
-        set("dungeonStep", 0);
-        set("dungeonWait", 60);
-        set("dungeonTried", 0);
-        fu.q.d = 1;
-        fu.p.a = false;
-        setFrG(fu.p, null);
-
-        // fu.t is replaced with a dialog that has NO Giao tiếp (e.g. general notice)
-        ah futNoGiaoTiep = new ah();
-        futNoGiaoTiep.q = new String[] { "Thông báo hệ thống" };
-        futNoGiaoTiep.C = new et("buttons");
-        futNoGiaoTiep.C.a(new bt("Đóng", 5));
-        fu.t = futNoGiaoTiep;
-        fu.s = null;
-
-        call("dungeonInteract");
-        check("Replaced fu.t without Giao tiếp does not advance", ((Integer) get("dungeonStep")).intValue() == 0);
-        check("Wait budget decrements", ((Integer) get("dungeonWait")).intValue() < 60);
-
-        // Null fu.t and null fu.p: wait budget decrements, no crash
+        check("fu.t Rejection: Step 0 does NOT execute bt.a() from fu.t", !futGiaoTiepClicked[0]);
+        check("fu.t Rejection: Step remains 0", ((Integer) get("dungeonStep")).intValue() == 0);
+        check("fu.t Rejection: Wait budget decrements", ((Integer) get("dungeonWait")).intValue() < 60);
         fu.t = null;
-        call("dungeonInteract");
-        check("Null fu.t and fu.p: Step remains 0", ((Integer) get("dungeonStep")).intValue() == 0);
 
         // ---------------------------------------------------------------------
-        // Test 46: Full Entry Chain with fu.t Native Dialog
+        // Test 44: Exact Native fu.p NPC Dialog Contract (DUNGEON-04I)
         // ---------------------------------------------------------------------
-        System.out.println("--- Test 46: Full Entry Chain with fu.t Native Dialog ---");
+        System.out.println("--- Test 44: Exact Native fu.p NPC Dialog Contract ---");
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
-        set("dungeonState", Zeus.DN_ROUTING);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 60);
+        set("dungeonTried", 0);
         fu.q.d = 1;
+        fu.t = null;
+
+        // Broadcast in fu.s coexisting
+        ah coexistBroadcast = makeBroadcastPopup("Chúc mừng người chơi x đã vượt qua đợt 5");
+        fu.s = coexistBroadcast;
+
+        // Native NPC dialogue in fu.p
+        final fa livePhoChiHuy = new fa();
+        livePhoChiHuy.cv = 2;
+        livePhoChiHuy.cu = -37;
+        livePhoChiHuy.cC = "Pho Chi Huy";
+
+        fu.p.a = true;
+        setFrH(fu.p, -1);
+        et fupItems = new et("fupItems");
+        final boolean[] fupGiaoTiepClicked = new boolean[1];
+        bt liveGiaoTiep = new bt("Giao tiếp", 4, new cg() {
+            public void a(int e, int f) {
+                fupGiaoTiepClicked[0] = true;
+                try {
+                    q.a().a((byte) livePhoChiHuy.cu);
+                } catch (Throwable t) {}
+            }
+        });
+        fupItems.a(liveGiaoTiep);
+        fupItems.a(new bt("Đóng", 1));
+        setFrG(fu.p, fupItems);
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("fu.p Dialog: Step 0 executes native bt.a() from fu.p", fupGiaoTiepClicked[0]);
+        check("fu.p Dialog: fu.p.h cursor set to 0", getFrH(fu.p) == 0);
+        check("fu.p Dialog: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
+        check("fu.p Dialog: Exactly one Opcode 23 sent",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+        check("fu.p Dialog: Broadcast in fu.s preserved", fu.s == coexistBroadcast);
+
+        // ---------------------------------------------------------------------
+        // Test 45: V2 Speech Dialog Recognition & Non-Blocking Safety (DUNGEON-04I)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 45: V2 Speech Dialog Recognition & Non-Blocking Safety ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 60);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        fu.t = null;
+        fu.p.a = false;
+        setFrG(fu.p, null);
+
+        // Speech dialog with live text: "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!"
+        ah v2SpeechDialog = new ah();
+        v2SpeechDialog.q = new String[] { "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!" };
+        v2SpeechDialog.C = new et("buttons");
+        v2SpeechDialog.C.a(new bt("Giao tiếp", 4));
+        v2SpeechDialog.C.a(new bt("Đóng", 1));
+
+        Method mIsSpeech = Zeus.class.getDeclaredMethod("isNpcSpeechDialog", da.class);
+        mIsSpeech.setAccessible(true);
+        boolean recognized = ((Boolean) mIsSpeech.invoke(null, v2SpeechDialog)).booleanValue();
+        check("V2 Speech: isNpcSpeechDialog recognizes live text without nga tu", recognized);
+
+        boolean isBlock = Zeus.isBlockingDialog(v2SpeechDialog);
+        check("V2 Speech: isBlockingDialog does NOT block Pho Chi Huy speech dialog", !isBlock);
+
+        // Advance speech dialog via V2 softkey path
+        final boolean[] v2SoftkeyInvoked = new boolean[1];
+        v2SpeechDialog.ab = new bt("Giao tiếp", 4, new cg() {
+            public void a(int e, int f) {
+                v2SoftkeyInvoked[0] = true;
+            }
+        });
+        fu.s = v2SpeechDialog;
+
+        call("dungeonInteract");
+        check("V2 Speech: advances via softkey ab", v2SoftkeyInvoked[0]);
+        check("V2 Speech: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
+
+        // ---------------------------------------------------------------------
+        // Test 46: dialogText ah.r, ah.s, ah.t & Polymorphic Dispatch (DUNGEON-04I)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 46: dialogText ah.r, ah.s, ah.t & Polymorphic Dispatch ---");
+        ah titleAh = new ah();
+        Field fAhR = ah.class.getDeclaredField("r");
+        fAhR.setAccessible(true);
+        fAhR.set(titleAh, "Pho Chi Huy");
+
+        Method mDt = Zeus.class.getDeclaredMethod("dialogText", da.class);
+        mDt.setAccessible(true);
+        String extractedR = (String) mDt.invoke(null, titleAh);
+        check("dialogText: extracts text from ah.r", extractedR.indexOf("Pho Chi Huy") >= 0);
+
+        // Polymorphic NPC click dispatch
+        final boolean[] polymorphicKCalled = new boolean[1];
+        fa mockNpc = new fa() {
+            public void k() {
+                polymorphicKCalled[0] = true;
+            }
+        };
+        mockNpc.cv = 2;
+        mockNpc.cu = -37;
+        mockNpc.cC = "Pho Chi Huy";
+        mockNpc.aZ = 552;
+        mockNpc.ba = 504;
         cn.g.aZ = 552;
         cn.g.ba = 504;
 
-        fa pcf46 = new fa();
-        pcf46.cv = 2;
-        pcf46.cu = -37;
-        pcf46.cC = "Pho Chi Huy";
-        pcf46.aZ = 552;
-        pcf46.ba = 504;
-        cn.j = new et("entities");
-        cn.j.a(pcf46);
-
-        fu.s = makeBroadcastPopup("Server Broadcast Notice");
-        fu.p.a = false;
-        setFrG(fu.p, null);
-
-        // Arrival at NPC
-        getSentPackets().clear();
-        callInt("dungeonGotoNpc", 1);
-        check("Chain fu.t: Transitions to DN_PREPARATION",
-                ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
-        check("Chain fu.t: Opcode 23 sent to NPC",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
-
-        // NPC dialog arrives in fu.t
-        ah chainFutDialog = new ah();
-        chainFutDialog.q = new String[] { "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!" };
-        chainFutDialog.C = new et("buttons");
-        final boolean[] chainFutClicked = new boolean[1];
-        chainFutDialog.C.a(new bt("Giao tiếp", 4, new cg() {
-            public void a(int e, int f) {
-                chainFutClicked[0] = true;
-            }
-        }));
-        chainFutDialog.C.a(new bt("Đóng", 5));
-        fu.t = chainFutDialog;
-
-        getSentPackets().clear();
-        call("dungeonInteract");
-        check("Chain fu.t: Native callback invoked from fu.t", chainFutClicked[0]);
-        check("Chain fu.t: State advanced to Step 1", ((Integer) get("dungeonStep")).intValue() == 1);
-        check("Chain fu.t: Broadcast popup in fu.s preserved", fu.s != null);
-
-        // Second menu arrives in fu.p
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 3);
-        setFrH(fu.p, -1);
-        et chainFutSecond = new et("chainFutSecond");
-        chainFutSecond.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        chainFutSecond.a(new bt("Đóng", 1));
-        setFrG(fu.p, chainFutSecond);
-        callServerMenu(-37, 3, "Nga Tu", chainFutSecond);
-
-        getSentPackets().clear();
-        call("dungeonInteract");
-        check("Chain fu.t: Step 1 native action sent q.b (opcode -30)",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
-        check("Chain fu.t: State advanced to Step 2", ((Integer) get("dungeonStep")).intValue() == 2);
-
-        // Confirmation arrives in fu.s
-        ah chainFutConfirm = new ah();
-        chainFutConfirm.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
-        chainFutConfirm.C = new et("buttons");
-        final boolean[] chainFutConfirmClicked = new boolean[1];
-        chainFutConfirm.C.a(new bt("Có", 1, new cg() {
-            public void a(int e, int f) {
-                chainFutConfirmClicked[0] = true;
-            }
-        }));
-        chainFutConfirm.C.a(new bt("Không", 2));
-        fu.s = chainFutConfirm;
-
-        call("dungeonInteract");
-        check("Chain fu.t: Step 2 confirmation invoked", chainFutConfirmClicked[0]);
-        check("Chain fu.t: State advanced to Step 3", ((Integer) get("dungeonStep")).intValue() == 3);
-
-        // Arrival on Map 48
-        fu.q.d = Zeus.DUNGEON_MAP;
-        call("dungeon");
-        check("Chain fu.t: Arrival in Map 48 enters DN_COMBAT",
-                ((Integer) get("dungeonState")).intValue() == Zeus.DN_COMBAT);
+        Method mClickNpc = Zeus.class.getDeclaredMethod("dungeonClickNpc", fa.class);
+        mClickNpc.setAccessible(true);
+        mClickNpc.invoke(null, mockNpc);
+        check("Polymorphic Dispatch: dungeonClickNpc calls k() on non-ez fa subclass", polymorphicKCalled[0]);
 
         // ---------------------------------------------------------------------
         // Test 47: Exact Native First Dialog Dispatch Parity & V2 Contract (DUNGEON-04H)

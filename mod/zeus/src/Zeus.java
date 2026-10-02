@@ -6046,12 +6046,14 @@ public final class Zeus {
         } catch (Throwable t) {
         }
         boolean nativeDispatched = false;
-        if (npc instanceof ez) {
-            try {
-                npc.k();
+        boolean wasMenuOpen = (fu.p != null && fu.p.a);
+        da wasDialog = fu.s;
+        try {
+            npc.k();
+            if ((fu.p != null && fu.p.a && !wasMenuOpen) || (fu.s != null && fu.s != wasDialog)) {
                 nativeDispatched = true;
-            } catch (Throwable t) {
             }
+        } catch (Throwable t) {
         }
         if (!nativeDispatched) {
             try {
@@ -6081,13 +6083,15 @@ public final class Zeus {
                 cn.g.N();
             } catch (Throwable t) {
             }
-            if (npc instanceof ez) {
-                try {
-                    npc.k();
+            boolean wasMenuOpen = (fu.p != null && fu.p.a);
+            da wasDialog = fu.s;
+            try {
+                npc.k();
+                if ((fu.p != null && fu.p.a && !wasMenuOpen) || (fu.s != null && fu.s != wasDialog)) {
                     dungeonWait = 40;
                     return true;
-                } catch (Throwable t) {
                 }
+            } catch (Throwable t) {
             }
         }
         dungeonMenu = null;
@@ -6221,7 +6225,10 @@ public final class Zeus {
             String text = dialogText(dialog);
             if (text != null && text.length() > 0) {
                 String n = norm(text);
-                if (n.indexOf("pho chi huy") >= 0 || (n.indexOf("nhiem vu") >= 0 && n.indexOf("nga tu") >= 0)) {
+                if (n.indexOf("co muon") >= 0 || n.indexOf("ban co muon") >= 0) {
+                    return false;
+                }
+                if (n.indexOf("pho chi huy") >= 0 || n.indexOf("nhiem vu") >= 0 || (n.indexOf("nga tu") >= 0 && n.indexOf("muon") < 0)) {
                     return true;
                 }
             }
@@ -7044,6 +7051,22 @@ public final class Zeus {
                     }
                 }
 
+                // Fast-path: If the server submenu ("Vào Ngã Tư Tử Thần") is ALREADY present in fu.p, transition directly to Step 1
+                et currentItems = (fu.p != null && fu.p.a) ? getFrItems(fu.p) : dungeonMenuItems;
+                if (currentItems != null) {
+                    for (int i = 0; i < currentItems.c(); i++) {
+                        Object entry = currentItems.a(i);
+                        if (entry instanceof bt && ((bt) entry).a != null) {
+                            String l = norm(((bt) entry).a);
+                            if (l.indexOf("nga tu") >= 0 || l.indexOf("tu than") >= 0) {
+                                dungeonStep = 1;
+                                dungeonWait = 0;
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 // Locate "Giao tiếp" command button in active menu (fu.p), captured items, or dialog (fu.s)
                 et activeItems = (fu.p != null && fu.p.a) ? getFrItems(fu.p) : dungeonMenuItems;
                 if (activeItems == null && dungeonMenuItems != null) {
@@ -7066,10 +7089,6 @@ public final class Zeus {
                             }
                         }
                     }
-                }
-                // Inspect native NPC conversation container fu.t first (cn.java:358 -> fu.c() -> fu.t = ah2)
-                if (giaoTiepCmd == null && fu.t != null) {
-                    giaoTiepCmd = findGiaoTiepInDialog(fu.t);
                 }
                 if (giaoTiepCmd == null && fu.s != null) {
                     giaoTiepCmd = findGiaoTiepInDialog(fu.s);
@@ -7105,7 +7124,7 @@ public final class Zeus {
                         --dungeonWait;
                         return;
                     }
-                    if (dungeonMenu == null && activeItems == null && (fu.t == null || findGiaoTiepInDialog(fu.t) == null)) {
+                    if (dungeonMenu == null && activeItems == null && (fu.s == null || findGiaoTiepInDialog(fu.s) == null)) {
                         if (++dungeonTried >= 2) {
                             dungeonStop(2, "the dungeon NPC gave no menu");
                             return;
@@ -8442,16 +8461,47 @@ public final class Zeus {
         }
     }
 
-    /** Joins one dialog's wrapped body lines, or "" when it has none. */
+    /** Joins one dialog's wrapped body lines and title/caption fields, or "" when it has none. */
     private static String dialogText(da dialog) {
-        String[] lines = dialog.q;
-        if (lines == null) {
+        if (dialog == null) {
             return "";
         }
         StringBuffer out = new StringBuffer(64);
-        for (int i = 0; i < lines.length; i++) {
-            if (lines[i] != null) {
-                out.append(lines[i]).append(' ');
+        if (dialog instanceof ah) {
+            try {
+                java.lang.reflect.Field fr = ah.class.getDeclaredField("r");
+                fr.setAccessible(true);
+                Object vr = fr.get(dialog);
+                if (vr instanceof String && ((String) vr).length() > 0) {
+                    out.append((String) vr).append(' ');
+                }
+            } catch (Throwable t) {
+            }
+            try {
+                java.lang.reflect.Field fs = ah.class.getDeclaredField("s");
+                fs.setAccessible(true);
+                Object vs = fs.get(dialog);
+                if (vs instanceof String && ((String) vs).length() > 0) {
+                    out.append((String) vs).append(' ');
+                }
+            } catch (Throwable t) {
+            }
+            try {
+                java.lang.reflect.Field ft = ah.class.getDeclaredField("t");
+                ft.setAccessible(true);
+                Object vt = ft.get(dialog);
+                if (vt instanceof String && ((String) vt).length() > 0) {
+                    out.append((String) vt).append(' ');
+                }
+            } catch (Throwable t) {
+            }
+        }
+        String[] lines = dialog.q;
+        if (lines != null) {
+            for (int i = 0; i < lines.length; i++) {
+                if (lines[i] != null) {
+                    out.append(lines[i]).append(' ');
+                }
             }
         }
         return out.toString();
