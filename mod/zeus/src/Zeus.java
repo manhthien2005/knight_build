@@ -3666,6 +3666,17 @@ public final class Zeus {
     private static long reconnectRecoveryBackoffUntil = 0L;
     private static String reconnectRecoveryLastFingerprint = "";
 
+    // R2B2: Bounded Native Login Recovery Policy
+    public static final long RC_LOGIN_DWELL_MS = 5000L;
+    public static final long RC_LOGIN_RETRY_INTERVAL_MS = 30000L;
+    public static final int RC_LOGIN_MAX_ACTIONS = 3;
+    public static final long RC_LOGIN_BACKOFF_MS = 600000L;
+
+    private static int reconnectLoginAttempts = 0;
+    private static long reconnectLoginLastActionAt = 0L;
+    private static long reconnectLoginBackoffUntil = 0L;
+    private static String reconnectLoginLastFingerprint = "";
+
     public static boolean isReconnectEpisodeActive() {
         return reconnectEpisodeActive;
     }
@@ -3708,6 +3719,22 @@ public final class Zeus {
 
     public static String getReconnectRecoveryLastFingerprint() {
         return reconnectRecoveryLastFingerprint;
+    }
+
+    public static int getReconnectLoginAttempts() {
+        return reconnectLoginAttempts;
+    }
+
+    public static long getReconnectLoginLastActionAt() {
+        return reconnectLoginLastActionAt;
+    }
+
+    public static long getReconnectLoginBackoffUntil() {
+        return reconnectLoginBackoffUntil;
+    }
+
+    public static String getReconnectLoginLastFingerprint() {
+        return reconnectLoginLastFingerprint;
     }
 
     private static String stateName(int state) {
@@ -3861,6 +3888,101 @@ public final class Zeus {
     }
 
     /**
+     * Evaluates and executes the bounded native LoginScreen recovery action.
+     * Guaranteed to only be called when reconnectEpisodeActive == true,
+     * reconnectWorldSeenBeforeEpisode == true, and reconnectState == RC_LOGIN.
+     */
+    private static void evaluateReconnectLoginAction(long now) {
+        if (!reconnectEpisodeActive || !reconnectWorldSeenBeforeEpisode || reconnectState != RC_LOGIN) {
+            return;
+        }
+        if (detectStrongDisconnectReason() != null) {
+            return;
+        }
+
+        // Clean UI routing checks
+        if (fu.a == null || fu.a != fu.b || fu.b == null) {
+            return;
+        }
+        if (fu.s != null || fu.t != null) {
+            return;
+        }
+        if (fu.p == null || fu.p.a) {
+            return;
+        }
+        if (d.b) {
+            return;
+        }
+
+        // Live center command slot check
+        bt loginBtn = fu.b.ab;
+        if (loginBtn == null || loginBtn.e != 0 || loginBtn.a == null) {
+            return;
+        }
+        String caption = norm(loginBtn.a).trim();
+        if (!caption.equals("choi tiep")) {
+            return;
+        }
+
+        // Normal textbox credentials check (bs.g is username, bs.h is password)
+        if (bs.g == null || bs.h == null) {
+            return;
+        }
+        String user = bs.g.j();
+        String pass = bs.h.j();
+        if (user == null || user.trim().length() == 0 || pass == null || pass.trim().length() == 0) {
+            // Special credential mode or empty normal fields: FAIL_CLOSED
+            return;
+        }
+
+        // Dwell time: RC_LOGIN must have dwelled for at least RC_LOGIN_DWELL_MS (5000 ms)
+        long dwell = (now >= reconnectStateSince) ? (now - reconnectStateSince) : 0L;
+        if (dwell < RC_LOGIN_DWELL_MS) {
+            return;
+        }
+
+        // Backoff check: 10 minutes (600000 ms) after 3 actions
+        if (reconnectLoginBackoffUntil > 0L) {
+            if (now < reconnectLoginBackoffUntil) {
+                return;
+            } else {
+                // Backoff expired; reset attempts for another bounded cycle
+                reconnectLoginBackoffUntil = 0L;
+                reconnectLoginAttempts = 0;
+            }
+        }
+
+        // Cooldown / retry interval check: at least 30000 ms between actions
+        if (reconnectLoginLastActionAt > 0L) {
+            long elapsed = (now >= reconnectLoginLastActionAt) ? (now - reconnectLoginLastActionAt) : -1L;
+            if (elapsed < RC_LOGIN_RETRY_INTERVAL_MS) {
+                return;
+            }
+        }
+
+        // Deduplicated diagnostics fingerprint
+        reconnectLoginLastFingerprint = caption + "|" + user.trim() + "|" + loginBtn.e;
+
+        // Action accounting MUST be armed before loginBtn.a() dispatch
+        reconnectLoginAttempts++;
+        reconnectLoginLastActionAt = now;
+        if (reconnectLoginAttempts >= RC_LOGIN_MAX_ACTIONS) {
+            reconnectLoginBackoffUntil = now + RC_LOGIN_BACKOFF_MS;
+        }
+
+        trace("RECONNECT login action try=" + reconnectLoginAttempts
+                + " max=" + RC_LOGIN_MAX_ACTIONS
+                + " btn=" + clean(loginBtn.a)
+                + " cmd=" + loginBtn.e
+                + (reconnectLoginBackoffUntil > 0L ? " backoffMs=" + RC_LOGIN_BACKOFF_MS : ""));
+
+        // Revalidate all routing guards immediately before dispatch
+        if (fu.a == fu.b && fu.s == null && fu.t == null && fu.p != null && !fu.p.a && !d.b && fu.b.ab == loginBtn) {
+            loginBtn.a();
+        }
+    }
+
+    /**
      * Ticked from tick() after sessionTick() and before auth().
      * A transient fu.a == null pauses observation without resetting the active episode.
      */
@@ -3880,6 +4002,12 @@ public final class Zeus {
                     reconnectRecoveryBackoffUntil = now + RC_RECOVERY_BACKOFF_MS;
                 }
                 reconnectRecoveryLastActionAt = now;
+            }
+            if (now < reconnectLoginLastActionAt) {
+                if (reconnectLoginBackoffUntil > reconnectLoginLastActionAt) {
+                    reconnectLoginBackoffUntil = now + RC_LOGIN_BACKOFF_MS;
+                }
+                reconnectLoginLastActionAt = now;
             }
 
             // Normal prior stable gameplay sets reconnectEverStableWorldSeen when no episode is active
@@ -3907,6 +4035,12 @@ public final class Zeus {
                     reconnectRecoveryAttempts = 0;
                     reconnectRecoveryBackoffUntil = 0L;
                     reconnectRecoveryLastFingerprint = "";
+
+                    // R2B2: reset per-episode login state
+                    reconnectLoginAttempts = 0;
+                    reconnectLoginLastActionAt = 0L;
+                    reconnectLoginBackoffUntil = 0L;
+                    reconnectLoginLastFingerprint = "";
 
                     trace("RECONNECT episode open id=" + reconnectEpisodeId
                             + " reason=" + reason
@@ -3942,6 +4076,12 @@ public final class Zeus {
                 reconnectRecoveryAttempts = 0;
                 reconnectRecoveryBackoffUntil = 0L;
                 reconnectRecoveryLastFingerprint = "";
+
+                // R2B2: reset per-episode login state on successful close
+                reconnectLoginAttempts = 0;
+                reconnectLoginLastActionAt = 0L;
+                reconnectLoginBackoffUntil = 0L;
+                reconnectLoginLastFingerprint = "";
                 return;
             }
 
@@ -3976,6 +4116,12 @@ public final class Zeus {
             // Action is only authorized when reconnectState == RC_NATIVE_WAIT and reconnectWorldSeenBeforeEpisode == true
             if (reconnectState == RC_NATIVE_WAIT && reconnectWorldSeenBeforeEpisode) {
                 evaluateReconnectRecoveryAction(now);
+            }
+
+            // R2B2: BOUNDED NATIVE LOGIN RECOVERY ACTION
+            // Action is only authorized when reconnectState == RC_LOGIN and reconnectWorldSeenBeforeEpisode == true
+            if (reconnectState == RC_LOGIN && reconnectWorldSeenBeforeEpisode) {
+                evaluateReconnectLoginAction(now);
             }
         } catch (Throwable t) {
             // Fail silent: supervisor observation must never stall client tick
