@@ -3650,6 +3650,7 @@ public final class Zeus {
     private static long reconnectStateSince = 0L;
     private static int reconnectEpisodeId = 0;
     private static int reconnectTransitions = 0;
+    private static boolean reconnectEverStableWorldSeen = false;
     private static boolean reconnectWorldSeenBeforeEpisode = false;
     private static String reconnectLastReason = "";
 
@@ -3667,6 +3668,10 @@ public final class Zeus {
 
     public static int getReconnectTransitions() {
         return reconnectTransitions;
+    }
+
+    public static boolean isReconnectEverStableWorldSeen() {
+        return reconnectEverStableWorldSeen;
     }
 
     public static boolean isReconnectWorldSeenBeforeEpisode() {
@@ -3729,9 +3734,9 @@ public final class Zeus {
                 reconnectStateSince = now;
             }
 
-            // Track whether an authoritative stable world has ever been observed
-            if (fu.a == fu.c && gameReady() && mapStable()) {
-                reconnectWorldSeenBeforeEpisode = true;
+            // Normal prior stable gameplay sets reconnectEverStableWorldSeen when no episode is active
+            if (!reconnectEpisodeActive && fu.a == fu.c && gameReady() && mapStable()) {
+                reconnectEverStableWorldSeen = true;
             }
 
             String reason = detectStrongDisconnectReason();
@@ -3746,6 +3751,8 @@ public final class Zeus {
                     reconnectStateSince = now;
                     reconnectState = RC_NATIVE_WAIT;
                     reconnectTransitions = 0;
+                    // R2A-S2: snapshot immutable copy from reconnectEverStableWorldSeen exactly once at open
+                    reconnectWorldSeenBeforeEpisode = reconnectEverStableWorldSeen;
                     reconnectLastReason = reason;
                     trace("RECONNECT episode open id=" + reconnectEpisodeId
                             + " reason=" + reason
@@ -3760,9 +3767,14 @@ public final class Zeus {
                 return;
             }
 
-            // SUCCESSFUL CLOSE RULE:
-            // An active episode is successful only when fu.a == fu.c AND gameReady() AND mapStable().
-            if (fu.a == fu.c && gameReady() && mapStable()) {
+            // SUCCESSFUL CLOSE RULE (R2A-S1 & R2A-S3):
+            // An active episode is successful only when strongDisconnect is false AND fu.a == fu.c AND gameReady() AND mapStable().
+            // strongDisconnect strictly outranks screen readiness and prevents successful close.
+            if (!strongDisconnect && fu.a == fu.c && gameReady() && mapStable()) {
+                reconnectEverStableWorldSeen = true;
+                if (reconnectState != RC_IDLE) {
+                    reconnectTransitions++;
+                }
                 long duration = (now >= reconnectStartedAt) ? (now - reconnectStartedAt) : 0L;
                 trace("RECONNECT episode close id=" + reconnectEpisodeId
                         + " status=SUCCESS durationMs=" + duration

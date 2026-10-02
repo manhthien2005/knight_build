@@ -54,7 +54,7 @@ fn test_reconnect_supervisor_java_source_contract() {
         );
     }
 
-    // 4. Episode contract fields
+    // 4. Episode contract fields (including R2A-S2 reconnectEverStableWorldSeen)
     let episode_fields = [
         "reconnectEpisodeActive",
         "reconnectState",
@@ -62,6 +62,7 @@ fn test_reconnect_supervisor_java_source_contract() {
         "reconnectStateSince",
         "reconnectEpisodeId",
         "reconnectTransitions",
+        "reconnectEverStableWorldSeen",
         "reconnectWorldSeenBeforeEpisode",
         "reconnectLastReason",
     ];
@@ -82,7 +83,6 @@ fn test_reconnect_supervisor_java_source_contract() {
     );
 
     // 6. No Action Contract (in supervisor section)
-    // Extract reconnect supervisor implementation scope
     let section_start = content.find("// ---- RECONNECT")
         .expect("RECONNECT section must exist");
     let section_end = content[section_start..]
@@ -137,6 +137,24 @@ fn test_reconnect_supervisor_java_source_contract() {
     assert!(supervisor_body.contains("dialogText("), "Supervisor must use dialogText helper");
     assert!(supervisor_body.contains("norm("), "Supervisor must use norm helper");
 
+    // R2A-S1: Strong disconnect precedence over successful close
+    assert!(
+        supervisor_body.contains("!strongDisconnect && fu.a == fu.c && gameReady() && mapStable()"),
+        "Successful close must require !strongDisconnect"
+    );
+
+    // R2A-S2: Snapshot reconnectEverStableWorldSeen into reconnectWorldSeenBeforeEpisode at open
+    assert!(
+        supervisor_body.contains("reconnectWorldSeenBeforeEpisode = reconnectEverStableWorldSeen;"),
+        "reconnectWorldSeenBeforeEpisode must be snapshotted from reconnectEverStableWorldSeen at open"
+    );
+
+    // R2A-S3: Transition count increment on close to RC_IDLE
+    assert!(
+        supervisor_body.contains("reconnectTransitions++;") || supervisor_body.contains("++reconnectTransitions;"),
+        "Successful close must increment reconnectTransitions"
+    );
+
     // 8. Health and AUTH contracts intact
     assert!(content.contains("AUTH_MAX_ATTEMPTS = 3"), "AUTH_MAX_ATTEMPTS must remain 3");
     assert!(content.contains("AUTH_RETRY_INTERVAL_TICKS = 75"), "AUTH_RETRY_INTERVAL_TICKS must remain 75");
@@ -160,6 +178,7 @@ struct ReconnectSupervisorSimulator {
     state_since: u64,
     episode_id: u32,
     transitions: u32,
+    ever_stable_world_seen: bool,
     world_seen_before_episode: bool,
     last_reason: String,
 }
@@ -173,6 +192,7 @@ impl ReconnectSupervisorSimulator {
             state_since: 0,
             episode_id: 0,
             transitions: 0,
+            ever_stable_world_seen: false,
             world_seen_before_episode: false,
             last_reason: String::new(),
         }
@@ -206,16 +226,17 @@ impl ReconnectSupervisorSimulator {
         game_ready: bool,
         map_stable: bool,
     ) {
-        if screen == Some("world") && game_ready && map_stable {
-            self.world_seen_before_episode = true;
-        }
-
         // Clock rollback handling
         if now < self.started_at {
             self.started_at = now;
         }
         if now < self.state_since {
             self.state_since = now;
+        }
+
+        // Normal prior stable gameplay sets ever_stable_world_seen when no episode is active
+        if !self.active && screen == Some("world") && game_ready && map_stable {
+            self.ever_stable_world_seen = true;
         }
 
         let (strong_disconnect, reason) = Self::is_strong_disconnect(dialog_text, bv_a);
@@ -229,6 +250,8 @@ impl ReconnectSupervisorSimulator {
                 self.state_since = now;
                 self.state = ReconnectState::RcNativeWait;
                 self.transitions = 0;
+                // R2A-S2: Snapshot immutable copy from ever_stable_world_seen exactly once at open
+                self.world_seen_before_episode = self.ever_stable_world_seen;
                 self.last_reason = reason.to_string();
             }
             return;
@@ -242,16 +265,18 @@ impl ReconnectSupervisorSimulator {
 
         let current_screen = screen.unwrap();
 
-        // Successful close rule
-        if current_screen == "world" && game_ready && map_stable {
+        // R2A-S1: Successful close rule is ONLY allowed if !strong_disconnect
+        if !strong_disconnect && current_screen == "world" && game_ready && map_stable {
+            self.ever_stable_world_seen = true;
             self.active = false;
             self.state = ReconnectState::RcIdle;
             self.state_since = now;
+            // R2A-S3: increment transitions on successful close
             self.transitions += 1;
             return;
         }
 
-        // State Derivation
+        // State Derivation for Active Episode
         let target_state = if strong_disconnect {
             ReconnectState::RcNativeWait
         } else if current_screen == "server" {
@@ -291,7 +316,7 @@ fn test_state_machine_contract_scenarios() {
     // Transition into world and become ready/stable
     sim.tick(3000, Some("world"), None, false, true, true);
     assert!(!sim.active);
-    assert!(sim.world_seen_before_episode);
+    assert!(sim.ever_stable_world_seen);
 
     // 3. No episode when manually leaving world without transport evidence
     sim.tick(4000, Some("login"), None, false, false, false);
@@ -304,6 +329,7 @@ fn test_state_machine_contract_scenarios() {
     assert_eq!(sim.episode_id, 1);
     assert_eq!(sim.state, ReconnectState::RcNativeWait);
     assert_eq!(sim.last_reason, "NATIVE_BV_A");
+    assert!(sim.world_seen_before_episode, "Episode snapshotted prior stable world");
 
     // 6. Repeated same disconnect evidence does not increment episode id repeatedly
     sim.tick(5100, Some("world"), None, true, false, false);
@@ -345,6 +371,7 @@ fn test_state_machine_contract_scenarios() {
     sim.tick(9300, Some("world"), None, false, true, true);
     assert!(!sim.active, "12. gameReady()+mapStable() must close episode");
     assert_eq!(sim.state, ReconnectState::RcIdle);
+    assert_eq!(sim.transitions, 5, "Successful close increments transition count to 5");
 
     // 5. Strong recognized disconnect dialog opens exactly one reconnect episode
     sim.tick(10000, Some("world"), Some("Mat ket noi voi may chu"), false, false, false);
@@ -362,4 +389,94 @@ fn test_state_machine_contract_scenarios() {
     sim.tick(5000, Some("world"), Some("Mat ket noi voi may chu"), false, false, false);
     assert!(sim.started_at <= 5000);
     assert!(sim.state_since <= 5000);
+}
+
+#[test]
+fn test_r2a_s1_strong_disconnect_blocks_successful_close() {
+    let mut sim = ReconnectSupervisorSimulator::new();
+
+    // Prior normal gameplay
+    sim.tick(1000, Some("world"), None, false, true, true);
+    assert!(sim.ever_stable_world_seen);
+
+    // Open episode via bv.a
+    sim.tick(2000, Some("world"), None, true, false, false);
+    assert!(sim.active);
+    assert_eq!(sim.state, ReconnectState::RcNativeWait);
+
+    // Scenario: World screen returns, gameReady=true and mapStable=true,
+    // BUT bv.a=true still indicates disconnect!
+    sim.tick(3000, Some("world"), None, true, true, true);
+    assert!(sim.active, "Episode must NOT close while bv.a is true");
+    assert_eq!(sim.state, ReconnectState::RcNativeWait, "State must remain RC_NATIVE_WAIT");
+
+    // Also modal disconnect dialog while in stable world
+    sim.tick(4000, Some("world"), Some("Ket noi that bai"), false, true, true);
+    assert!(sim.active, "Episode must NOT close while disconnect modal exists");
+    assert_eq!(sim.state, ReconnectState::RcNativeWait, "State must remain RC_NATIVE_WAIT");
+
+    // Once disconnect evidence clears on next stable tick, close is authorized
+    sim.tick(5000, Some("world"), None, false, true, true);
+    assert!(!sim.active, "Episode successfully closes once disconnect evidence clears");
+    assert_eq!(sim.state, ReconnectState::RcIdle);
+}
+
+#[test]
+fn test_r2a_s2_world_seen_before_episode_snapshot_invariance() {
+    let mut sim = ReconnectSupervisorSimulator::new();
+
+    // 1. Initial failure before any stable world
+    sim.tick(1000, Some("login"), Some("Vui long dang nhap lai"), false, false, false);
+    assert!(sim.active);
+    assert_eq!(sim.episode_id, 1);
+    assert_eq!(sim.world_seen_before_episode, false, "Initial failure has world_seen_before_episode=false");
+
+    // During this episode, stable world conditions appear while bv.a=true
+    sim.tick(2000, Some("world"), None, true, true, true);
+    assert_eq!(
+        sim.world_seen_before_episode, false,
+        "world_seen_before_episode must NOT be mutated during active episode"
+    );
+
+    // Close episode
+    sim.tick(3000, Some("world"), None, false, true, true);
+    assert!(!sim.active);
+    assert!(sim.ever_stable_world_seen, "Successful close establishes ever_stable_world_seen");
+
+    // 2. Subsequent failure snapshots true
+    sim.tick(4000, Some("world"), None, true, false, false);
+    assert!(sim.active);
+    assert_eq!(sim.episode_id, 2);
+    assert_eq!(sim.world_seen_before_episode, true, "Episode 2 snapshots prior stable world as true");
+}
+
+#[test]
+fn test_r2a_s3_successful_close_increments_transition_parity() {
+    let mut sim = ReconnectSupervisorSimulator::new();
+
+    // Start episode
+    sim.tick(1000, Some("world"), None, true, false, false);
+    assert_eq!(sim.transitions, 0);
+
+    // Transition 1: RcLogin
+    sim.tick(2000, Some("login"), None, false, false, false);
+    assert_eq!(sim.transitions, 1);
+
+    // Transition 2: RcCharacter
+    sim.tick(3000, Some("character"), None, false, false, false);
+    assert_eq!(sim.transitions, 2);
+
+    // Transition 3: RcWorldSettle
+    sim.tick(4000, Some("world"), None, false, false, false);
+    assert_eq!(sim.transitions, 3);
+
+    // Transition 4: RcIdle (successful close)
+    sim.tick(5000, Some("world"), None, false, true, true);
+    assert!(!sim.active);
+    assert_eq!(sim.state, ReconnectState::RcIdle);
+    assert_eq!(sim.transitions, 4, "Close to RC_IDLE must increment transitions");
+
+    // Subsequent ticks while idle do not increment transitions
+    sim.tick(6000, Some("world"), None, false, true, true);
+    assert_eq!(sim.transitions, 4, "Idle ticks must not increment transitions");
 }
