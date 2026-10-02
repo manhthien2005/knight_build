@@ -134,14 +134,43 @@ cp "$JARS/$OUT" . && jar xf "$OUT" Zeus.class cn.class
 keys=$(javap -p -constants Zeus.class | grep -c 'static final int K_')
 ver=$(javap -p -constants Zeus.class | grep -oP 'CTL_VERSION = \K[0-9]+')
 paint=$(javap -c cn.class | grep -c 'Zeus.paint')
-snapv=$(javap -p -constants -c Zeus.class | grep -oE 'String v=[0-9]' | sort -u | tail -1)
+# Extract method bytecode of `private static void publish(long)` only.
+# Extraction starts at `private static void publish(long);` and stops at the next member declaration or class end.
+pub_bytecode=$(javap -p -constants -c Zeus.class | awk '
+  /^[ ]*private static void publish\(long\);/ { in_pub=1; next }
+  in_pub && /^[ ]*(public|protected|private|static|\})/ { exit }
+  in_pub { print }
+')
+
+snapver=""
+snap_key_count=0
+
+if [ -z "$pub_bytecode" ]; then
+    echo "   !! failed to extract publish(long) bytecode from Zeus.class"
+    rc=1
+else
+    # Derive snapshot version strictly from `v=<number>` literal in publish(long)
+    snap_versions=$(echo "$pub_bytecode" | grep -oP 'String v=\K[0-9]+' | sort -u)
+    snap_ver_count=$(echo "$snap_versions" | grep -c . || true)
+    if [ "$snap_ver_count" -ne 1 ]; then
+        echo "   !! expected exactly 1 snapshot version in publish(long), found $snap_ver_count: $snap_versions"
+        rc=1
+        snapver="unknown"
+    else
+        snapver="$snap_versions"
+    fi
+
+    # Derive snapshot key count strictly from `key=` string literals in publish(long)
+    snap_key_count=$(echo "$pub_bytecode" | grep -coE 'String [a-z]+=')
+fi
 
 srckeys=$(grep -oE 'K_[A-Z_0-9]+ *= *[0-9]+' "$ZEUS_SRC/Zeus.java" | sort -u | wc -l)
 
 printf '   K_* in jar         %s  (source: %s)\n' "$keys" "$srckeys"
 printf '   CTL_VERSION        %s\n' "$ver"
 printf '   Zeus.paint sites   %s  (must be 2; 1 = broken patcher)\n' "$paint"
-printf '   snapshot header    %s\n' "$snapv"
+printf '   snapshot version   %s  (must be 6)\n' "$snapver"
+printf '   snapshot keys      %s  (must be 49)\n' "$snap_key_count"
 
 # Check POTATO.class present
 potato_ok=0
@@ -150,9 +179,11 @@ jar tf "$JARS/$OUT" | grep -q 'POTATO.class' && potato_ok=1
 printf '   POTATO.class       %s\n' "$([ $potato_ok = 1 ] && echo 'present' || echo 'MISSING')"
 
 rc=0
-[ "$keys" = "$srckeys" ] || { echo "   !! jar key count differs from source"; rc=1; }
-[ "$paint" = "2" ]       || { echo "   !! Zeus.paint != 2 call sites"; rc=1; }
-[ "$potato_ok" = "1" ]   || { echo "   !! POTATO.class not in jar"; rc=1; }
+[ "$keys" = "$srckeys" ]      || { echo "   !! jar key count differs from source"; rc=1; }
+[ "$paint" = "2" ]            || { echo "   !! Zeus.paint != 2 call sites"; rc=1; }
+[ "$potato_ok" = "1" ]        || { echo "   !! POTATO.class not in jar"; rc=1; }
+[ "$snapver" = "6" ]          || { echo "   !! snapshot version != 6 (got '$snapver')"; rc=1; }
+[ "$snap_key_count" = "49" ]  || { echo "   !! snapshot key count != 49 (got '$snap_key_count')"; rc=1; }
 
 # Verify POTATO.guard default is true in SOURCE (not bytecode — it's a runtime field,
 # not a compile-time constant, so javap -p -constants won't show 'boolean guard = true').
@@ -176,7 +207,6 @@ fi
 # -- Build manifest (only on gate pass) --------------------------------------
 if [ "$rc" = 0 ]; then
     JAR_PATH="$JARS/$OUT"
-    snapver="${snapv##*v=}"
     jar_sha=$(sha256sum "$JAR_PATH" | cut -d' ' -f1)
     jar_sz=$(stat -c %s "$JAR_PATH")
     patcher_sha=$(sha256sum "$ZEUS_TOOLS/PatchZeus.java" | cut -d' ' -f1)
@@ -188,7 +218,7 @@ if [ "$rc" = 0 ]; then
   "ctl_version":        $ver,
   "snapshot_version":   $snapver,
   "ctl_key_count":      $keys,
-  "snapshot_key_count": $(javap -p -constants -c Zeus.class | grep -coE 'String [a-z]+='),
+  "snapshot_key_count": $snap_key_count,
   "built_at":           "$built_at",
   "patcher_sha256":     "$patcher_sha"
 }

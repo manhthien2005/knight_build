@@ -3300,10 +3300,10 @@ public final class Zeus {
             String screen;
             if (fu.a == null) {
                 screen = "none";
+            } else if (fu.a == fu.b && fu.t == fu.g) {
+                screen = "server";
             } else if (fu.a == fu.b) {
                 screen = "login";
-            } else if (fu.a == fu.g) {
-                screen = "server";
             } else if (fu.a == fu.i) {
                 screen = "character";
             } else if (fu.a == fu.c) {
