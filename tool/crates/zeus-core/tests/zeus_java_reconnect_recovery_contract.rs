@@ -387,6 +387,21 @@ fn test_reconnect_recovery_java_source_contract() {
         "Action accounting (attempts++) must be armed BEFORE button .a() dispatch"
     );
 
+    // Final live dialog validation must precede accounting
+    let recovery_fn_start = supervisor_body.find("private static void evaluateReconnectRecoveryAction")
+        .expect("evaluateReconnectRecoveryAction must exist");
+    let recovery_fn_body = &supervisor_body[recovery_fn_start..];
+    let fn_attempts_pos = recovery_fn_body.find("reconnectRecoveryAttempts++")
+        .or_else(|| recovery_fn_body.find("++reconnectRecoveryAttempts"))
+        .expect("reconnectRecoveryAttempts++ must exist in evaluateReconnectRecoveryAction");
+    let live_ok_btn_pos = recovery_fn_body.find("liveOkBtn")
+        .or_else(|| recovery_fn_body.find("fu.s != dialog"))
+        .expect("Final live dialog validation must exist");
+    assert!(
+        live_ok_btn_pos < fn_attempts_pos,
+        "Final live dialog validation must precede recovery accounting increment"
+    );
+
     // 6. Reset on episode open & successful close
     assert!(
         supervisor_body.contains("reconnectRecoveryAttempts = 0;"),

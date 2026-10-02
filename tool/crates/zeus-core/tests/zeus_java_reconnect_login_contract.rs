@@ -217,8 +217,8 @@ impl ReconnectLoginSimulator {
             }
         }
 
-        // Diagnostics fingerprint
-        self.login_last_fingerprint = format!("{}|{}|{}", cap, user, btn.cmd_id);
+        // Diagnostics fingerprint (non-sensitive action identity only)
+        self.login_last_fingerprint = format!("{}|{}", cap, btn.cmd_id);
 
         // Increment and arm BEFORE dispatch
         self.login_attempts += 1;
@@ -459,7 +459,7 @@ fn test_reconnect_login_java_source_contract() {
         "Must check normal username (bs.g) and password (bs.h) textboxes"
     );
 
-    // 5. Dispatch ordering: accounting BEFORE live dispatch
+    // 5. Dispatch ordering: accounting BEFORE live dispatch, and final validation BEFORE accounting
     let dispatch_pos = fn_body.find(".a();").expect("Live button dispatch .a() must exist");
     let attempts_inc_pos = fn_body.find("reconnectLoginAttempts++")
         .or_else(|| fn_body.find("++reconnectLoginAttempts"))
@@ -467,6 +467,23 @@ fn test_reconnect_login_java_source_contract() {
     assert!(
         attempts_inc_pos < dispatch_pos,
         "Action accounting (reconnectLoginAttempts++) must precede .a() dispatch"
+    );
+
+    // Final live validation must precede accounting
+    let final_valid_pos = fn_body.find("fu.b.ab != loginBtn")
+        .or_else(|| fn_body.find("fu.b.ab == loginBtn"))
+        .expect("Final live button check must exist");
+    assert!(
+        final_valid_pos < attempts_inc_pos,
+        "Final live validation must precede action accounting"
+    );
+
+    // Privacy check: fingerprint must NOT contain username or user
+    let fp_line = fn_body.lines().find(|l| l.contains("reconnectLoginLastFingerprint ="))
+        .expect("reconnectLoginLastFingerprint assignment must exist");
+    assert!(
+        !fp_line.contains("user"),
+        "reconnectLoginLastFingerprint must NOT embed username"
     );
 
     // 6. Forbidden primitives check

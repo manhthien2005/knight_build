@@ -46,6 +46,7 @@ fn test_reconnect_supervisor_java_source_contract() {
         "RC_CHARACTER",
         "RC_WORLD_SETTLE",
         "RC_OTHER",
+        "RC_LOADING",
     ];
     for state in states {
         assert!(
@@ -135,10 +136,10 @@ fn test_reconnect_supervisor_java_source_contract() {
     assert!(supervisor_body.contains("dialogText("), "Supervisor must use dialogText helper");
     assert!(supervisor_body.contains("norm("), "Supervisor must use norm helper");
 
-    // R2A-S1: Strong disconnect precedence over successful close
+    // R2A-S1 & R2C: Strong disconnect precedence over successful close with reconnectWorldReady
     assert!(
-        supervisor_body.contains("!strongDisconnect && fu.a == fu.c && gameReady() && mapStable()"),
-        "Successful close must require !strongDisconnect"
+        supervisor_body.contains("!strongDisconnect && reconnectWorldReady()"),
+        "Successful close must require !strongDisconnect && reconnectWorldReady()"
     );
 
     // R2A-S2: Snapshot reconnectEverStableWorldSeen into reconnectWorldSeenBeforeEpisode at open
@@ -167,6 +168,7 @@ enum ReconnectState {
     RcCharacter,
     RcWorldSettle,
     RcOther,
+    RcLoading,
 }
 
 struct ReconnectSupervisorSimulator {
@@ -277,6 +279,8 @@ impl ReconnectSupervisorSimulator {
         // State Derivation for Active Episode
         let target_state = if strong_disconnect {
             ReconnectState::RcNativeWait
+        } else if current_screen == "loading" {
+            ReconnectState::RcLoading
         } else if current_screen == "server" {
             ReconnectState::RcServer
         } else if current_screen == "login" {
@@ -350,10 +354,15 @@ fn test_state_machine_contract_scenarios() {
     assert_eq!(sim.state, ReconnectState::RcCharacter, "9. Must map to RC_CHARACTER");
     assert_eq!(sim.transitions, 3);
 
+    // 9b. Active episode + fu.a == fu.d maps to RC_LOADING
+    sim.tick(8500, Some("loading"), None, false, false, false);
+    assert_eq!(sim.state, ReconnectState::RcLoading, "9b. fu.a == fu.d maps to RC_LOADING");
+    assert_eq!(sim.transitions, 4);
+
     // 10. Active episode + world not ready/stable maps to RC_WORLD_SETTLE
     sim.tick(9000, Some("world"), None, false, false, false);
     assert_eq!(sim.state, ReconnectState::RcWorldSettle, "10. Must map to RC_WORLD_SETTLE");
-    assert_eq!(sim.transitions, 4);
+    assert_eq!(sim.transitions, 5);
 
     // 11. World screen alone does not close episode
     sim.tick(9100, Some("world"), None, false, true, false); // ready but not stable
@@ -365,11 +374,11 @@ fn test_state_machine_contract_scenarios() {
     assert!(sim.active, "13. Transient null screen must not reset episode");
     assert_eq!(sim.state, ReconnectState::RcWorldSettle);
 
-    // 12. gameReady()+mapStable() closes the episode
+    // 12. reconnectWorldReady closes the episode
     sim.tick(9300, Some("world"), None, false, true, true);
-    assert!(!sim.active, "12. gameReady()+mapStable() must close episode");
+    assert!(!sim.active, "12. reconnectWorldReady must close episode");
     assert_eq!(sim.state, ReconnectState::RcIdle);
-    assert_eq!(sim.transitions, 5, "Successful close increments transition count to 5");
+    assert_eq!(sim.transitions, 6, "Successful close increments transition count to 6");
 
     // 5. Strong recognized disconnect dialog opens exactly one reconnect episode
     sim.tick(10000, Some("world"), Some("Mat ket noi voi may chu"), false, false, false);

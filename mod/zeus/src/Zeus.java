@@ -3643,6 +3643,7 @@ public final class Zeus {
     public static final int RC_CHARACTER = 4;
     public static final int RC_WORLD_SETTLE = 5;
     public static final int RC_OTHER = 6;
+    public static final int RC_LOADING = 7;
 
     private static boolean reconnectEpisodeActive = false;
     private static int reconnectState = RC_IDLE;
@@ -3746,6 +3747,7 @@ public final class Zeus {
             case RC_CHARACTER: return "RC_CHARACTER";
             case RC_WORLD_SETTLE: return "RC_WORLD_SETTLE";
             case RC_OTHER: return "RC_OTHER";
+            case RC_LOADING: return "RC_LOADING";
             default: return "RC_UNKNOWN(" + state + ")";
         }
     }
@@ -3865,10 +3867,32 @@ public final class Zeus {
             }
         }
 
+        // Final live dialog and button revalidation before accounting and dispatch
+        if (fu.s != dialog || !(fu.s instanceof ah)) {
+            return;
+        }
+        ah liveDialog = (ah) fu.s;
+        String liveRawText = dialogText(liveDialog);
+        String liveText = norm(liveRawText);
+        boolean liveProvenDisconnect = (liveText.indexOf("mat ket noi") >= 0
+                || liveText.indexOf("ket noi that bai") >= 0
+                || liveText.indexOf("vui long dang nhap lai") >= 0);
+        if (!liveProvenDisconnect) {
+            return;
+        }
+        if (liveText.indexOf("dang ket noi") >= 0 || liveText.indexOf("vui long cho") >= 0
+                || liveText.indexOf("cho ket noi") >= 0) {
+            return;
+        }
+        bt liveOkBtn = findReconnectOkButton(liveDialog);
+        if (liveOkBtn == null || liveOkBtn != okBtn) {
+            return;
+        }
+
         // Diagnostics fingerprint (deduplicated tracing)
-        et btns = dialog.C;
+        et btns = liveDialog.C;
         int btnCount = (btns != null) ? btns.c() : 0;
-        reconnectRecoveryLastFingerprint = text + "|" + btnCount + "|" + okBtn.e + ":" + norm(okBtn.a).trim();
+        reconnectRecoveryLastFingerprint = liveText + "|" + btnCount + "|" + okBtn.e + ":" + norm(okBtn.a).trim();
 
         // Increment and arm action accounting BEFORE dispatch (mandatory ordering)
         reconnectRecoveryAttempts++;
@@ -3960,8 +3984,23 @@ public final class Zeus {
             }
         }
 
-        // Deduplicated diagnostics fingerprint
-        reconnectLoginLastFingerprint = caption + "|" + user.trim() + "|" + loginBtn.e;
+        // Final complete live LoginScreen routing and credential revalidation before accounting and dispatch
+        if (fu.a != fu.b || fu.b == null || fu.s != null || fu.t != null
+                || fu.p == null || fu.p.a || d.b
+                || fu.b.ab != loginBtn || loginBtn.e != 0 || loginBtn.a == null
+                || !norm(loginBtn.a).trim().equals("choi tiep")
+                || bs.g == null || bs.h == null) {
+            return;
+        }
+        String liveUser = bs.g.j();
+        String livePass = bs.h.j();
+        if (liveUser == null || liveUser.trim().length() == 0
+                || livePass == null || livePass.trim().length() == 0) {
+            return;
+        }
+
+        // Deduplicated diagnostics fingerprint (non-sensitive action identity only: no username/password)
+        reconnectLoginLastFingerprint = caption + "|" + loginBtn.e;
 
         // Action accounting MUST be armed before loginBtn.a() dispatch
         reconnectLoginAttempts++;
@@ -3976,10 +4015,16 @@ public final class Zeus {
                 + " cmd=" + loginBtn.e
                 + (reconnectLoginBackoffUntil > 0L ? " backoffMs=" + RC_LOGIN_BACKOFF_MS : ""));
 
-        // Revalidate all routing guards immediately before dispatch
-        if (fu.a == fu.b && fu.s == null && fu.t == null && fu.p != null && !fu.p.a && !d.b && fu.b.ab == loginBtn) {
-            loginBtn.a();
-        }
+        loginBtn.a();
+    }
+
+    /**
+     * Authoritative world readiness predicate for reconnect lifecycle.
+     * Evaluates map stability and existence of authoritative player object.
+     * Does NOT require alive(), absence of captcha, or absence of non-disconnect dialog.
+     */
+    private static boolean reconnectWorldReady() {
+        return fu.a == fu.c && cn.g != null && mapStable();
     }
 
     /**
@@ -4011,7 +4056,7 @@ public final class Zeus {
             }
 
             // Normal prior stable gameplay sets reconnectEverStableWorldSeen when no episode is active
-            if (!reconnectEpisodeActive && fu.a == fu.c && gameReady() && mapStable()) {
+            if (!reconnectEpisodeActive && reconnectWorldReady()) {
                 reconnectEverStableWorldSeen = true;
             }
 
@@ -4055,10 +4100,10 @@ public final class Zeus {
                 return;
             }
 
-            // SUCCESSFUL CLOSE RULE (R2A-S1 & R2A-S3):
-            // An active episode is successful only when strongDisconnect is false AND fu.a == fu.c AND gameReady() AND mapStable().
+            // SUCCESSFUL CLOSE RULE (R2A-S1 & R2A-S3 & R2C):
+            // An active episode is successful only when strongDisconnect is false AND reconnectWorldReady().
             // strongDisconnect strictly outranks screen readiness and prevents successful close.
-            if (!strongDisconnect && fu.a == fu.c && gameReady() && mapStable()) {
+            if (!strongDisconnect && reconnectWorldReady()) {
                 reconnectEverStableWorldSeen = true;
                 if (reconnectState != RC_IDLE) {
                     reconnectTransitions++;
@@ -4089,6 +4134,8 @@ public final class Zeus {
             int targetState;
             if (strongDisconnect) {
                 targetState = RC_NATIVE_WAIT;
+            } else if (fu.a == fu.d) {
+                targetState = RC_LOADING;
             } else if (fu.a == fu.b && fu.t == fu.g) {
                 targetState = RC_SERVER;
             } else if (fu.a == fu.b) {
