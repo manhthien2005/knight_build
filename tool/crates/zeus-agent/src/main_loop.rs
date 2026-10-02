@@ -62,7 +62,7 @@ use crate::{
 
 #[cfg(unix)]
 use zeus_core::wire::{
-    clear_credentials, clear_settings, clear_snapshot, write_settings, SUPPORTED_VERSION,
+    clear_credentials, clear_health, clear_settings, clear_snapshot, write_settings, SUPPORTED_VERSION,
 };
 
 #[cfg(any(unix, test))]
@@ -133,6 +133,10 @@ struct AccountState {
     pending_enhancement: Option<crate::enhancement::PendingEnhancement>,
     /// Enhancement queue orchestrator tracker.
     pub queue_tracker: crate::enhancement_queue::AccountQueueTracker,
+    /// Quản lý thế hệ process phục vụ quan sát health sidecar.
+    process_generation: u64,
+    /// Strictly observe-only health sensor (AUTO-RECONNECT-R1B).
+    health_observer: crate::health_observer::HealthObserver,
 }
 
 /// Cấu hình môi trường agent. Đọc từ biến môi trường lúc boot.
@@ -273,6 +277,9 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
         let paths = AccountPaths::for_slot(acc.slot_index);
         let _ = clear_snapshot(&paths.home);
         let _ = clear_settings(&paths.home);
+        if let Err(e) = clear_health(&paths.home) {
+            eprintln!("[boot] clear_health failed: {e}");
+        }
         crate::spot_scan::clean_spot_files(&paths.home);
         let _ = crate::enhancement_queue::recover_account_enhancement_queue_on_boot(
             &paths.home,
@@ -427,6 +434,10 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
             last_snapshot_tick = now;
             for acc in accounts.values_mut() {
                 tick_snapshot_telemetry(acc, &rest);
+                if acc.process.as_ref().map(|p| p.alive()).unwrap_or(false) {
+                    let paths = AccountPaths::for_slot(acc.slot_index);
+                    acc.health_observer.observe_account_home(&paths.home, &acc.id, now);
+                }
             }
 
             // Kiểm tra Xvnc socket còn sống — Issue #27
@@ -594,6 +605,9 @@ fn handle_cloud_event(
                     let paths = AccountPaths::for_slot(acc.slot_index);
                     let _ = crate::launch::prepare_directories(&paths);
                     let _ = clear_snapshot(&paths.home);
+                    if let Err(e) = clear_health(&paths.home) {
+                        eprintln!("[cloud] clear_health failed: {e}");
+                    }
                     let mut acc = acc;
                     let _ = try_apply_config(&mut acc, jar_ctl_version, rest);
                     reconcile_desired_state(&mut acc, rest, identity);
@@ -624,6 +638,9 @@ fn handle_cloud_event(
                 let paths = AccountPaths::for_slot(acc.slot_index);
                 let _ = crate::launch::prepare_directories(&paths);
                 let _ = clear_snapshot(&paths.home);
+                if let Err(e) = clear_health(&paths.home) {
+                    eprintln!("[cloud] clear_health failed: {e}");
+                }
                 crate::spot_scan::clean_spot_files(&paths.home);
                 let mut acc = acc;
                 let _ = try_apply_config(&mut acc, jar_ctl_version, rest);
@@ -880,6 +897,9 @@ fn reconcile_desired_state(
 
             // Dọn sạch snapshot cũ — Issue #82
             let _ = clear_snapshot(&paths.home);
+            if let Err(e) = clear_health(&paths.home) {
+                eprintln!("[reconcile] clear_health failed: {e}");
+            }
 
             // Ghi potato.ctl ban đầu "0 3" — Issue #24
             write_potato_ctl_for_path(&paths, "0 3");
@@ -933,6 +953,8 @@ fn reconcile_desired_state(
             match crate::process_unix::spawn(command) {
                 Ok(child) => {
                     eprintln!("[reconcile] account={} spawned pid={}", acc.id, child.pid);
+                    acc.process_generation += 1;
+                    acc.health_observer.reset_for_new_generation(acc.process_generation, Some(child.pid as u32));
                     // Báo cáo process_state ngay — Issue #39
                     let now_str = crate::supabase_rest::now_rfc3339();
                     if let Err(e) = rest.push_runtime(
@@ -993,6 +1015,7 @@ fn reconcile_desired_state(
             match evaluate_stop_transition(has_process, is_alive, outcome) {
                 StopTransition::ConfirmedStopped => {
                     acc.process = None;
+                    acc.health_observer.reset_stopped();
                     // Xóa credentials và snapshot — Issues #32, #89
                     let paths = AccountPaths::for_slot(acc.slot_index);
                     if let Err(e) = clear_credentials(&paths.home) {
@@ -1000,6 +1023,9 @@ fn reconcile_desired_state(
                     }
                     if let Err(e) = clear_snapshot(&paths.home) {
                         eprintln!("[reconcile] clear_snapshot failed: {e}");
+                    }
+                    if let Err(e) = clear_health(&paths.home) {
+                        eprintln!("[reconcile] clear_health failed: {e}");
                     }
                 }
                 StopTransition::FailedStillAlive => {
@@ -2084,6 +2110,10 @@ fn retire_account_safely(
             }
             crate::spot_scan::clean_spot_files(&paths.home);
             crate::enhancement::clean_enhancement_files(&paths.home);
+            if let Err(e) = clear_health(&paths.home) {
+                eprintln!("[retire] account={}: clear_health failed: {e}", account_id);
+            }
+            acc.health_observer.reset_stopped();
             acc.process = None;
             accounts.remove(account_id);
         }
@@ -2184,6 +2214,8 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
                 last_spot_scan: None,
                 pending_enhancement: None,
                 queue_tracker: crate::enhancement_queue::AccountQueueTracker::default(),
+                process_generation: 0,
+                health_observer: crate::health_observer::HealthObserver::new(),
             };
             (id, state)
         })
@@ -2223,6 +2255,8 @@ fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountS
         last_spot_scan: None,
         pending_enhancement: None,
         queue_tracker: crate::enhancement_queue::AccountQueueTracker::default(),
+        process_generation: 0,
+        health_observer: crate::health_observer::HealthObserver::new(),
     })
 }
 
@@ -2267,6 +2301,9 @@ fn merge_account_states(
             let paths = AccountPaths::for_slot(fresh_acc.slot_index);
             let _ = crate::launch::prepare_directories(&paths);
             let _ = clear_snapshot(&paths.home);
+            if let Err(e) = clear_health(&paths.home) {
+                eprintln!("[reconcile_cloud] clear_health failed: {e}");
+            }
             crate::spot_scan::clean_spot_files(&paths.home);
             crate::enhancement::clean_enhancement_files(&paths.home);
             let mut acc = fresh_acc;

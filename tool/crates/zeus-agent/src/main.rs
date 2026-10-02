@@ -59,6 +59,10 @@ pub mod enhancement;
 #[allow(dead_code)]
 pub mod enhancement_queue;
 
+/// Strictly observe-only game-loop health progress sensor (AUTO-RECONNECT-R1B). Cross-platform.
+#[allow(dead_code)]
+pub mod health_observer;
+
 /// Main loop — B5+B6+B7+B8 (AGENT-SPEC §4.2).
 /// unix-only: reads /proc, /sys/fs/cgroup, runs ss, calls waitpid.
 #[cfg(unix)]
