@@ -26,7 +26,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use zeus_core::wire::{CONTROL_FILE_NAME, SNAPSHOT_FILE_NAME};
+use zeus_core::wire::{CONTROL_FILE_NAME, HEALTH_FILE_NAME, SNAPSHOT_FILE_NAME};
 
 /// MicroEmulator's entry point. From `runtime-descriptor.json`: `"main_class"`.
 pub const MAIN_CLASS: &str = "org.microemu.app.Main";
@@ -95,6 +95,9 @@ impl AccountPaths {
     }
     pub fn enhancement_cancel_file(&self) -> PathBuf {
         self.home.join(crate::enhancement::ENHANCE_CANCEL_FILE_NAME)
+    }
+    pub fn health_file(&self) -> PathBuf {
+        self.home.join(HEALTH_FILE_NAME)
     }
 }
 
@@ -292,9 +295,11 @@ pub fn container_paths(slot: &str) -> AccountPaths {
 /// model here is narrow and deliberate: the node itself is allowed to be compromised, but one
 /// compromised node must not yield any other user's credentials.
 pub fn prepare_directories(paths: &AccountPaths) -> std::io::Result<()> {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     for dir in [&paths.home, &paths.tmp] {
         std::fs::create_dir_all(dir)?;
+        #[cfg(unix)]
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
@@ -349,12 +354,13 @@ mod tests {
     /// writer uses. If they ever diverge, the mod fails closed and reports `ctl=-1`.
     #[test]
     fn transport_properties_point_at_the_account_home() {
-        let args = argv(&spec());
-        let home = "/opt/knight/accounts/acc1/home";
+        let s = spec();
+        let args = argv(&s);
+        let home = s.paths.home.display().to_string();
         assert!(args.contains(&format!("-Duser.home={home}")));
-        assert!(args.contains(&format!("-Dzeus.ctl.in={home}/{CONTROL_FILE_NAME}")));
-        assert!(args.contains(&format!("-Dzeus.player.out={home}/{SNAPSHOT_FILE_NAME}")));
-        assert!(args.contains(&format!("-Dpotato.ctl={home}/{POTATO_FILE_NAME}")));
+        assert!(args.contains(&format!("-Dzeus.ctl.in={}", s.paths.control_file().display())));
+        assert!(args.contains(&format!("-Dzeus.player.out={}", s.paths.snapshot_file().display())));
+        assert!(args.contains(&format!("-Dpotato.ctl={}", s.paths.potato_file().display())));
     }
 
     /// `--quit` is what lets the supervisor notice a death. Without it the JVM outlives the
@@ -449,6 +455,14 @@ mod tests {
         let slot_pos = args1.iter().position(|a| a == "-Dzeus.auth.slot=0").unwrap();
         let cp_pos = args1.iter().position(|a| a == "-cp").unwrap();
         assert!(slot_pos < cp_pos, "System property must precede -cp");
+    }
+
+    #[test]
+    fn health_file_agrees_with_core_constant() {
+        let paths = AccountPaths::for_slot(1);
+        assert_eq!(paths.health_file(), paths.home.join(HEALTH_FILE_NAME));
+        assert_eq!(paths.health_file().file_name().unwrap(), HEALTH_FILE_NAME);
+        assert_eq!(HEALTH_FILE_NAME, "zeus-health.txt");
     }
 }
 

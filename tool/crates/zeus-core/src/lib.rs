@@ -10,6 +10,7 @@ mod control;
 mod credential_vault;
 mod data_root;
 mod error;
+mod health;
 mod launch_snapshot;
 #[cfg(windows)]
 mod manager;
@@ -40,6 +41,7 @@ pub use launch_snapshot::{
     HeapSettings, JvmFlag, LaunchEnvironmentKey, LaunchEnvironmentVariable, LaunchSnapshot,
     RmsMode, ScreenSize,
 };
+pub use health::{HealthError, HealthScreen, HealthSnapshot};
 #[cfg(windows)]
 pub use manager::{
     MAX_RUN_BATCH, ManagerAccountId, ManagerAccountPassword, ManagerAccountStatus,

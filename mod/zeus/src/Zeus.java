@@ -83,6 +83,7 @@ public final class Zeus {
 
     /** Called at the end of fu.b() every tick. */
     public static void tick() {
+        healthSidecarTick();
         if (fu.a == null) {
             sessionReset();
             return;
@@ -251,6 +252,7 @@ public final class Zeus {
     private static final String ENH_REQ_FILE = "zeus-enhance.req";
     private static final String ENH_STATUS_FILE = "zeus-enhance-status.json";
     private static final String ENH_CANCEL_FILE = "zeus-enhance.cancel";
+    private static final String HEALTH_FILE = "zeus-health.txt";
 
     /**
      * Derived paths for the two above, declared here for a sharper reason: a static field with an
@@ -269,6 +271,9 @@ public final class Zeus {
     private static String enhReqPath;
     private static String enhStatusPath;
     private static String enhCancelPath;
+    private static String healthPath;
+    private static long lastHealthPublishedAt = 0L;
+    private static long healthSeq = 0L;
     private static long lastInventoryHash = Long.MIN_VALUE;
     private static boolean inventoryWritten = false;
 
@@ -1048,6 +1053,11 @@ public final class Zeus {
             enhReqPath = home + ENH_REQ_FILE;
             enhStatusPath = home + ENH_STATUS_FILE;
             enhCancelPath = home + ENH_CANCEL_FILE;
+            healthPath = home + HEALTH_FILE;
+        }
+        String explicitHealth = System.getProperty("zeus.health.out");
+        if (explicitHealth != null && explicitHealth.trim().length() > 0) {
+            healthPath = explicitHealth.trim();
         }
         writeEveryMs = (long) intProp("zeus.player.writeMs", 1000);
         if (writeEveryMs < 200L) {
@@ -3260,6 +3270,88 @@ public final class Zeus {
                     stream.close();
                 } catch (Throwable t) {
                     // nothing useful to do on a failed close
+                }
+            }
+        }
+    }
+
+    // ---- HEALTH SIDECAR (R1A) ------------------------------------------------
+    /**
+     * Observational runtime health sidecar (zeus-health.txt, contract v1).
+     * Proves game-loop progress across login/reconnect states even when fu.a == null or cn.g == null.
+     * Publishes ~1000ms cadence against dx.a() to zeus-health.txt via temp file and atomic replace.
+     */
+    private static void healthSidecarTick() {
+        try {
+            if (healthPath == null) {
+                return;
+            }
+            long now = dx.a();
+            if (now < lastHealthPublishedAt) {
+                // Defensive wall-clock rollback handling
+                lastHealthPublishedAt = now;
+            }
+            if (now - lastHealthPublishedAt < 1000L) {
+                return;
+            }
+            lastHealthPublishedAt = now;
+            healthSeq++;
+
+            String screen;
+            if (fu.a == null) {
+                screen = "none";
+            } else if (fu.a == fu.b) {
+                screen = "login";
+            } else if (fu.a == fu.g) {
+                screen = "server";
+            } else if (fu.a == fu.i) {
+                screen = "character";
+            } else if (fu.a == fu.c) {
+                screen = "world";
+            } else {
+                screen = "other";
+            }
+
+            int dialog = fu.s != null ? 1 : 0;
+            int disconnect = bv.a ? 1 : 0;
+
+            StringBuffer sb = new StringBuffer(128);
+            sb.append("v=1\n");
+            sb.append("t=").append(now).append('\n');
+            sb.append("seq=").append(healthSeq).append('\n');
+            sb.append("screen=").append(screen).append('\n');
+            sb.append("dialog=").append(dialog).append('\n');
+            sb.append("disconnect=").append(disconnect).append('\n');
+
+            writeHealth(sb.toString());
+        } catch (Throwable t) {
+            // Fail silent: health publishing must never stall the client tick.
+        }
+    }
+
+    private static void writeHealth(String body) {
+        if (healthPath == null) {
+            return;
+        }
+        java.io.OutputStream stream = null;
+        try {
+            java.io.File target = new java.io.File(healthPath);
+            java.io.File temp = new java.io.File(healthPath + ".tmp");
+            stream = new java.io.FileOutputStream(temp);
+            stream.write(body.getBytes("UTF-8"));
+            stream.close();
+            stream = null;
+            if (target.exists() && !target.delete()) {
+                return;
+            }
+            temp.renameTo(target);
+        } catch (Throwable t) {
+            // Fail silent
+        } finally {
+            if (stream != null) {
+                try {
+                    stream.close();
+                } catch (Throwable ignored) {
                 }
             }
         }
