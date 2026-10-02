@@ -90,10 +90,8 @@ fn test_reconnect_supervisor_java_source_contract() {
         .expect("end RECONNECT marker must exist");
     let supervisor_body = &content[section_start..section_start + section_end];
 
-    // No button/dialog click actions
-    assert!(!supervisor_body.contains("bt.a()"), "Supervisor must not invoke bt.a()");
-    assert!(!supervisor_body.contains(".a()") || supervisor_body.contains("dx.a()"), 
-        "Supervisor must not invoke action methods (.a()) other than dx.a()");
+    // Safe button/dialog click actions:
+    // R2B1 authorizes only the exact live reconnect OK button .a() dispatch; all direct b(...) fallbacks are forbidden.
     assert!(!supervisor_body.contains(".b("), "Supervisor must not invoke .b(...) UI/action methods");
     assert!(!supervisor_body.contains("fu.s.b("), "Supervisor must not invoke fu.s.b()");
     assert!(!supervisor_body.contains("ah.b("), "Supervisor must not invoke ah.b()");

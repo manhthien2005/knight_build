@@ -3654,6 +3654,18 @@ public final class Zeus {
     private static boolean reconnectWorldSeenBeforeEpisode = false;
     private static String reconnectLastReason = "";
 
+    // R2B1: Bounded Native Dialog Fallback Recovery Policy
+    private static final long RC_RECOVERY_COOLDOWN_MS = 5000L;
+    private static final int RC_RECOVERY_MAX_ACTIONS = 4;
+    private static final long RC_RECOVERY_BACKOFF_MS = 600000L;
+    private static final long RC_NATIVE_GRACE_MS = 5000L;
+    private static final long RC_STATE_DWELL_MS = 5000L;
+
+    private static int reconnectRecoveryAttempts = 0;
+    private static long reconnectRecoveryLastActionAt = 0L;
+    private static long reconnectRecoveryBackoffUntil = 0L;
+    private static String reconnectRecoveryLastFingerprint = "";
+
     public static boolean isReconnectEpisodeActive() {
         return reconnectEpisodeActive;
     }
@@ -3680,6 +3692,22 @@ public final class Zeus {
 
     public static String getReconnectLastReason() {
         return reconnectLastReason;
+    }
+
+    public static int getReconnectRecoveryAttempts() {
+        return reconnectRecoveryAttempts;
+    }
+
+    public static long getReconnectRecoveryLastActionAt() {
+        return reconnectRecoveryLastActionAt;
+    }
+
+    public static long getReconnectRecoveryBackoffUntil() {
+        return reconnectRecoveryBackoffUntil;
+    }
+
+    public static String getReconnectRecoveryLastFingerprint() {
+        return reconnectRecoveryLastFingerprint;
     }
 
     private static String stateName(int state) {
@@ -3719,6 +3747,120 @@ public final class Zeus {
     }
 
     /**
+     * Inspects a live ah modal dialog and finds the exact reconnect OK button.
+     * Candidate must be a bt object, candidate command id bt.e must equal 0,
+     * and candidate caption must normalize to an explicitly OK-like caption ("ok" or "o k").
+     * Returns null if no exact command can be proven.
+     */
+    private static bt findReconnectOkButton(ah dialog) {
+        if (dialog == null) {
+            return null;
+        }
+        et buttons = dialog.C;
+        if (buttons == null) {
+            return null;
+        }
+        for (int i = 0; i < buttons.c(); i++) {
+            Object obj = buttons.a(i);
+            if (obj instanceof bt) {
+                bt btn = (bt) obj;
+                if (btn.e == 0) {
+                    String cap = norm(btn.a).trim();
+                    if (cap.equals("ok") || cap.equals("o k")) {
+                        return btn;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Evaluates and executes the bounded native reconnect fallback action.
+     * Guaranteed to only be called when reconnectEpisodeActive == true,
+     * reconnectState == RC_NATIVE_WAIT, and reconnectWorldSeenBeforeEpisode == true.
+     */
+    private static void evaluateReconnectRecoveryAction(long now) {
+        if (fu.s == null || !(fu.s instanceof ah)) {
+            return;
+        }
+        ah dialog = (ah) fu.s;
+        String rawText = dialogText(dialog);
+        String text = norm(rawText);
+
+        // Fail closed unless proven disconnect modal
+        boolean isProvenDisconnect = (text.indexOf("mat ket noi") >= 0
+                || text.indexOf("ket noi that bai") >= 0
+                || text.indexOf("vui long dang nhap lai") >= 0);
+        if (!isProvenDisconnect) {
+            return;
+        }
+        // In-progress connecting or wait dialogs must fail closed
+        if (text.indexOf("dang ket noi") >= 0 || text.indexOf("vui long cho") >= 0
+                || text.indexOf("cho ket noi") >= 0) {
+            return;
+        }
+
+        bt okBtn = findReconnectOkButton(dialog);
+        if (okBtn == null) {
+            return;
+        }
+
+        // Native deadline & grace policy: wait for native bv.b deadline + 5000 ms grace
+        if (bv.a && bv.b > 0L) {
+            if (now < bv.b + RC_NATIVE_GRACE_MS) {
+                return;
+            }
+        }
+
+        // Require current RC_NATIVE_WAIT state to have dwelled for at least RC_STATE_DWELL_MS (5000 ms)
+        long dwell = (now >= reconnectStateSince) ? (now - reconnectStateSince) : 0L;
+        if (dwell < RC_STATE_DWELL_MS) {
+            return;
+        }
+
+        // Cooldown check (5000 ms)
+        if (reconnectRecoveryLastActionAt > 0L) {
+            long elapsed = (now >= reconnectRecoveryLastActionAt) ? (now - reconnectRecoveryLastActionAt) : -1L;
+            if (elapsed < RC_RECOVERY_COOLDOWN_MS) {
+                return;
+            }
+        }
+
+        // Backoff check (600000 ms after 4 actions)
+        if (reconnectRecoveryBackoffUntil > 0L) {
+            if (now < reconnectRecoveryBackoffUntil) {
+                return;
+            } else {
+                // Backoff expired; reset attempts for another bounded cycle
+                reconnectRecoveryBackoffUntil = 0L;
+                reconnectRecoveryAttempts = 0;
+            }
+        }
+
+        // Diagnostics fingerprint (deduplicated tracing)
+        et btns = dialog.C;
+        int btnCount = (btns != null) ? btns.c() : 0;
+        reconnectRecoveryLastFingerprint = text + "|" + btnCount + "|" + okBtn.e + ":" + norm(okBtn.a).trim();
+
+        // Increment and arm action accounting BEFORE dispatch (mandatory ordering)
+        reconnectRecoveryAttempts++;
+        reconnectRecoveryLastActionAt = now;
+        if (reconnectRecoveryAttempts >= RC_RECOVERY_MAX_ACTIONS) {
+            reconnectRecoveryBackoffUntil = now + RC_RECOVERY_BACKOFF_MS;
+        }
+
+        trace("RECONNECT recovery action try=" + reconnectRecoveryAttempts
+                + " max=" + RC_RECOVERY_MAX_ACTIONS
+                + " btn=" + clean(okBtn.a)
+                + " cmd=" + okBtn.e
+                + (reconnectRecoveryBackoffUntil > 0L ? " backoffMs=" + RC_RECOVERY_BACKOFF_MS : ""));
+
+        // Dispatch exact live native OK command
+        okBtn.a();
+    }
+
+    /**
      * Ticked from tick() after sessionTick() and before auth().
      * A transient fu.a == null pauses observation without resetting the active episode.
      */
@@ -3732,6 +3874,12 @@ public final class Zeus {
             }
             if (now < reconnectStateSince) {
                 reconnectStateSince = now;
+            }
+            if (now < reconnectRecoveryLastActionAt) {
+                if (reconnectRecoveryBackoffUntil > reconnectRecoveryLastActionAt) {
+                    reconnectRecoveryBackoffUntil = now + RC_RECOVERY_BACKOFF_MS;
+                }
+                reconnectRecoveryLastActionAt = now;
             }
 
             // Normal prior stable gameplay sets reconnectEverStableWorldSeen when no episode is active
@@ -3754,6 +3902,12 @@ public final class Zeus {
                     // R2A-S2: snapshot immutable copy from reconnectEverStableWorldSeen exactly once at open
                     reconnectWorldSeenBeforeEpisode = reconnectEverStableWorldSeen;
                     reconnectLastReason = reason;
+
+                    // R2B1: reset per-episode recovery state
+                    reconnectRecoveryAttempts = 0;
+                    reconnectRecoveryBackoffUntil = 0L;
+                    reconnectRecoveryLastFingerprint = "";
+
                     trace("RECONNECT episode open id=" + reconnectEpisodeId
                             + " reason=" + reason
                             + " worldSeenBefore=" + reconnectWorldSeenBeforeEpisode);
@@ -3783,6 +3937,11 @@ public final class Zeus {
                 reconnectState = RC_IDLE;
                 reconnectStateSince = now;
                 reconnectLastReason = "";
+
+                // R2B1: reset per-episode recovery state on successful close
+                reconnectRecoveryAttempts = 0;
+                reconnectRecoveryBackoffUntil = 0L;
+                reconnectRecoveryLastFingerprint = "";
                 return;
             }
 
@@ -3811,6 +3970,12 @@ public final class Zeus {
                         + " from=" + stateName(oldState)
                         + " to=" + stateName(targetState)
                         + " count=" + reconnectTransitions);
+            }
+
+            // R2B1: BOUNDED NATIVE RECOVERY ACTION
+            // Action is only authorized when reconnectState == RC_NATIVE_WAIT and reconnectWorldSeenBeforeEpisode == true
+            if (reconnectState == RC_NATIVE_WAIT && reconnectWorldSeenBeforeEpisode) {
+                evaluateReconnectRecoveryAction(now);
             }
         } catch (Throwable t) {
             // Fail silent: supervisor observation must never stall client tick
