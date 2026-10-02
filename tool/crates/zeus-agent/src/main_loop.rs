@@ -62,7 +62,7 @@ use crate::{
 
 #[cfg(unix)]
 use zeus_core::wire::{
-    clear_credentials, clear_health, clear_settings, clear_snapshot, write_settings, SUPPORTED_VERSION,
+    clear_credentials, clear_health, clear_reconnect_status, clear_settings, clear_snapshot, write_settings, SUPPORTED_VERSION,
 };
 
 #[cfg(any(unix, test))]
@@ -137,6 +137,8 @@ struct AccountState {
     process_generation: u64,
     /// Strictly observe-only health sensor (AUTO-RECONNECT-R1B).
     health_observer: crate::health_observer::HealthObserver,
+    /// Strictly observe-only reconnect lifecycle duration observer (AUTO-RECONNECT-R3A).
+    reconnect_observer: crate::reconnect_observer::ReconnectObserver,
 }
 
 /// Cấu hình môi trường agent. Đọc từ biến môi trường lúc boot.
@@ -279,6 +281,9 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
         let _ = clear_settings(&paths.home);
         if let Err(e) = clear_health(&paths.home) {
             eprintln!("[boot] clear_health failed: {e}");
+        }
+        if let Err(e) = clear_reconnect_status(&paths.home) {
+            eprintln!("[boot] clear_reconnect_status failed: {e}");
         }
         crate::spot_scan::clean_spot_files(&paths.home);
         let _ = crate::enhancement_queue::recover_account_enhancement_queue_on_boot(
@@ -437,6 +442,7 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
                 if acc.process.as_ref().map(|p| p.alive()).unwrap_or(false) {
                     let paths = AccountPaths::for_slot(acc.slot_index);
                     acc.health_observer.observe_account_home(&paths.home, &acc.id, now);
+                    acc.reconnect_observer.observe_account_home(&paths.home, &acc.id, now);
                 }
             }
 
@@ -608,6 +614,9 @@ fn handle_cloud_event(
                     if let Err(e) = clear_health(&paths.home) {
                         eprintln!("[cloud] clear_health failed: {e}");
                     }
+                    if let Err(e) = clear_reconnect_status(&paths.home) {
+                        eprintln!("[cloud] clear_reconnect_status failed: {e}");
+                    }
                     let mut acc = acc;
                     let _ = try_apply_config(&mut acc, jar_ctl_version, rest);
                     reconcile_desired_state(&mut acc, rest, identity);
@@ -640,6 +649,9 @@ fn handle_cloud_event(
                 let _ = clear_snapshot(&paths.home);
                 if let Err(e) = clear_health(&paths.home) {
                     eprintln!("[cloud] clear_health failed: {e}");
+                }
+                if let Err(e) = clear_reconnect_status(&paths.home) {
+                    eprintln!("[cloud] clear_reconnect_status failed: {e}");
                 }
                 crate::spot_scan::clean_spot_files(&paths.home);
                 let mut acc = acc;
@@ -900,6 +912,9 @@ fn reconcile_desired_state(
             if let Err(e) = clear_health(&paths.home) {
                 eprintln!("[reconcile] clear_health failed: {e}");
             }
+            if let Err(e) = clear_reconnect_status(&paths.home) {
+                eprintln!("[reconcile] clear_reconnect_status failed: {e}");
+            }
 
             // Ghi potato.ctl ban đầu "0 3" — Issue #24
             write_potato_ctl_for_path(&paths, "0 3");
@@ -955,6 +970,7 @@ fn reconcile_desired_state(
                     eprintln!("[reconcile] account={} spawned pid={}", acc.id, child.pid);
                     acc.process_generation += 1;
                     acc.health_observer.reset_for_new_generation(acc.process_generation, Some(child.pid as u32));
+                    acc.reconnect_observer.reset_for_new_generation(acc.process_generation, Some(child.pid as u32));
                     // Báo cáo process_state ngay — Issue #39
                     let now_str = crate::supabase_rest::now_rfc3339();
                     if let Err(e) = rest.push_runtime(
@@ -1016,6 +1032,7 @@ fn reconcile_desired_state(
                 StopTransition::ConfirmedStopped => {
                     acc.process = None;
                     acc.health_observer.reset_stopped();
+                    acc.reconnect_observer.reset_stopped();
                     // Xóa credentials và snapshot — Issues #32, #89
                     let paths = AccountPaths::for_slot(acc.slot_index);
                     if let Err(e) = clear_credentials(&paths.home) {
@@ -1026,6 +1043,9 @@ fn reconcile_desired_state(
                     }
                     if let Err(e) = clear_health(&paths.home) {
                         eprintln!("[reconcile] clear_health failed: {e}");
+                    }
+                    if let Err(e) = clear_reconnect_status(&paths.home) {
+                        eprintln!("[reconcile] clear_reconnect_status failed: {e}");
                     }
                 }
                 StopTransition::FailedStillAlive => {
@@ -2113,7 +2133,11 @@ fn retire_account_safely(
             if let Err(e) = clear_health(&paths.home) {
                 eprintln!("[retire] account={}: clear_health failed: {e}", account_id);
             }
+            if let Err(e) = clear_reconnect_status(&paths.home) {
+                eprintln!("[retire] account={}: clear_reconnect_status failed: {e}", account_id);
+            }
             acc.health_observer.reset_stopped();
+            acc.reconnect_observer.reset_stopped();
             acc.process = None;
             accounts.remove(account_id);
         }
@@ -2216,6 +2240,7 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
                 queue_tracker: crate::enhancement_queue::AccountQueueTracker::default(),
                 process_generation: 0,
                 health_observer: crate::health_observer::HealthObserver::new(),
+                reconnect_observer: crate::reconnect_observer::ReconnectObserver::new(),
             };
             (id, state)
         })
@@ -2257,6 +2282,7 @@ fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountS
         queue_tracker: crate::enhancement_queue::AccountQueueTracker::default(),
         process_generation: 0,
         health_observer: crate::health_observer::HealthObserver::new(),
+        reconnect_observer: crate::reconnect_observer::ReconnectObserver::new(),
     })
 }
 
@@ -2303,6 +2329,9 @@ fn merge_account_states(
             let _ = clear_snapshot(&paths.home);
             if let Err(e) = clear_health(&paths.home) {
                 eprintln!("[reconcile_cloud] clear_health failed: {e}");
+            }
+            if let Err(e) = clear_reconnect_status(&paths.home) {
+                eprintln!("[reconcile_cloud] clear_reconnect_status failed: {e}");
             }
             crate::spot_scan::clean_spot_files(&paths.home);
             crate::enhancement::clean_enhancement_files(&paths.home);

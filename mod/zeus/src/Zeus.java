@@ -84,6 +84,7 @@ public final class Zeus {
     /** Called at the end of fu.b() every tick. */
     public static void tick() {
         healthSidecarTick();
+        reconnectStatusSidecarTick();
         if (fu.a == null) {
             sessionReset();
             return;
@@ -254,6 +255,7 @@ public final class Zeus {
     private static final String ENH_STATUS_FILE = "zeus-enhance-status.json";
     private static final String ENH_CANCEL_FILE = "zeus-enhance.cancel";
     private static final String HEALTH_FILE = "zeus-health.txt";
+    private static final String RECONNECT_STATUS_FILE = "zeus-reconnect.txt";
 
     /**
      * Derived paths for the two above, declared here for a sharper reason: a static field with an
@@ -275,6 +277,9 @@ public final class Zeus {
     private static String healthPath;
     private static long lastHealthPublishedAt = 0L;
     private static long healthSeq = 0L;
+    private static String reconnectStatusPath;
+    private static long lastReconnectStatusPublishedAt = 0L;
+    private static long reconnectStatusSeq = 0L;
     private static long lastInventoryHash = Long.MIN_VALUE;
     private static boolean inventoryWritten = false;
 
@@ -1055,6 +1060,7 @@ public final class Zeus {
             enhStatusPath = home + ENH_STATUS_FILE;
             enhCancelPath = home + ENH_CANCEL_FILE;
             healthPath = home + HEALTH_FILE;
+            reconnectStatusPath = home + RECONNECT_STATUS_FILE;
         }
         String explicitHealth = System.getProperty("zeus.health.out");
         if (explicitHealth != null && explicitHealth.trim().length() > 0) {
@@ -3338,6 +3344,93 @@ public final class Zeus {
         try {
             java.io.File target = new java.io.File(healthPath);
             java.io.File temp = new java.io.File(healthPath + ".tmp");
+            stream = new java.io.FileOutputStream(temp);
+            stream.write(body.getBytes("UTF-8"));
+            stream.close();
+            stream = null;
+            if (target.exists() && !target.delete()) {
+                return;
+            }
+            temp.renameTo(target);
+        } catch (Throwable t) {
+            // Fail silent
+        } finally {
+            if (stream != null) {
+                try {
+                    stream.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    /**
+     * Observational reconnect status sidecar (zeus-reconnect.txt, contract v1).
+     * Publishes ~1000ms cadence against dx.a() to zeus-reconnect.txt via temp file and atomic replace.
+     * Strictly observe-only: zero mutations to reconnect state machine or game loop.
+     */
+    private static void reconnectStatusSidecarTick() {
+        try {
+            if (reconnectStatusPath == null) {
+                return;
+            }
+            long now = dx.a();
+            if (now < lastReconnectStatusPublishedAt) {
+                // Defensive wall-clock rollback handling
+                lastReconnectStatusPublishedAt = now;
+            }
+            if (now - lastReconnectStatusPublishedAt < 1000L) {
+                return;
+            }
+            lastReconnectStatusPublishedAt = now;
+            reconnectStatusSeq++;
+
+            int active;
+            String stateStr;
+            int worldBefore;
+            if (!reconnectEpisodeActive) {
+                active = 0;
+                stateStr = "idle";
+                worldBefore = 0;
+            } else {
+                active = 1;
+                switch (reconnectState) {
+                    case RC_NATIVE_WAIT: stateStr = "native_wait"; break;
+                    case RC_LOGIN: stateStr = "login"; break;
+                    case RC_SERVER: stateStr = "server"; break;
+                    case RC_CHARACTER: stateStr = "character"; break;
+                    case RC_LOADING: stateStr = "loading"; break;
+                    case RC_WORLD_SETTLE: stateStr = "world_settle"; break;
+                    case RC_OTHER: stateStr = "other"; break;
+                    default: stateStr = "other"; break;
+                }
+                worldBefore = reconnectWorldSeenBeforeEpisode ? 1 : 0;
+            }
+
+            StringBuffer sb = new StringBuffer(128);
+            sb.append("v=1\n");
+            sb.append("t=").append(now).append('\n');
+            sb.append("seq=").append(reconnectStatusSeq).append('\n');
+            sb.append("episode=").append(reconnectEpisodeId).append('\n');
+            sb.append("active=").append(active).append('\n');
+            sb.append("state=").append(stateStr).append('\n');
+            sb.append("transitions=").append(reconnectTransitions).append('\n');
+            sb.append("world_before=").append(worldBefore).append('\n');
+
+            writeReconnectStatus(sb.toString());
+        } catch (Throwable t) {
+            // Fail silent: status publishing must never stall the client tick.
+        }
+    }
+
+    private static void writeReconnectStatus(String body) {
+        if (reconnectStatusPath == null) {
+            return;
+        }
+        java.io.OutputStream stream = null;
+        try {
+            java.io.File target = new java.io.File(reconnectStatusPath);
+            java.io.File temp = new java.io.File(reconnectStatusPath + ".tmp");
             stream = new java.io.FileOutputStream(temp);
             stream.write(body.getBytes("UTF-8"));
             stream.close();

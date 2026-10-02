@@ -29,3 +29,17 @@ fn account_paths_health_file_agrees_with_zeus_core_health_file_name() {
     );
     assert_eq!(zeus_core::wire::HEALTH_FILE_NAME, "zeus-health.txt");
 }
+
+#[test]
+fn account_paths_reconnect_status_file_agrees_with_zeus_core_constant() {
+    let paths = launch::AccountPaths::for_slot(1);
+    assert_eq!(
+        paths.reconnect_status_file(),
+        paths.home.join(zeus_core::wire::RECONNECT_STATUS_FILE_NAME)
+    );
+    assert_eq!(
+        paths.reconnect_status_file().file_name().unwrap(),
+        zeus_core::wire::RECONNECT_STATUS_FILE_NAME
+    );
+    assert_eq!(zeus_core::wire::RECONNECT_STATUS_FILE_NAME, "zeus-reconnect.txt");
+}

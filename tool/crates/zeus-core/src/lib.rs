@@ -12,6 +12,7 @@ mod data_root;
 mod error;
 mod health;
 mod launch_snapshot;
+mod reconnect_status;
 #[cfg(windows)]
 mod manager;
 mod player;
@@ -42,6 +43,7 @@ pub use launch_snapshot::{
     RmsMode, ScreenSize,
 };
 pub use health::{HealthError, HealthScreen, HealthSnapshot};
+pub use reconnect_status::{ReconnectState, ReconnectStatusError, ReconnectStatusSnapshot};
 #[cfg(windows)]
 pub use manager::{
     MAX_RUN_BATCH, ManagerAccountId, ManagerAccountPassword, ManagerAccountStatus,

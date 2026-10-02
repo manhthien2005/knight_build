@@ -26,7 +26,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use zeus_core::wire::{CONTROL_FILE_NAME, HEALTH_FILE_NAME, SNAPSHOT_FILE_NAME};
+use zeus_core::wire::{
+    CONTROL_FILE_NAME, HEALTH_FILE_NAME, RECONNECT_STATUS_FILE_NAME, SNAPSHOT_FILE_NAME,
+};
 
 /// MicroEmulator's entry point. From `runtime-descriptor.json`: `"main_class"`.
 pub const MAIN_CLASS: &str = "org.microemu.app.Main";
@@ -98,6 +100,9 @@ impl AccountPaths {
     }
     pub fn health_file(&self) -> PathBuf {
         self.home.join(HEALTH_FILE_NAME)
+    }
+    pub fn reconnect_status_file(&self) -> PathBuf {
+        self.home.join(RECONNECT_STATUS_FILE_NAME)
     }
 }
 
