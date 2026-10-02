@@ -89,6 +89,7 @@ public final class Zeus {
             return;
         }
         sessionTick();
+        reconnectSupervisorTick();
         auth();
         control();
         dialogRecovery();
@@ -3630,6 +3631,180 @@ public final class Zeus {
             mapStableReset();
         }
     }
+
+    // ---- RECONNECT (R2A OBSERVE-ONLY SUPERVISOR) ------------------------------
+    // Models reconnect episodes and native lifecycle transitions before recovery actions are authorized.
+    // R2A strictly observes and traces: no dialog dismissal, no login packets, no field mutations.
+
+    public static final int RC_IDLE = 0;
+    public static final int RC_NATIVE_WAIT = 1;
+    public static final int RC_LOGIN = 2;
+    public static final int RC_SERVER = 3;
+    public static final int RC_CHARACTER = 4;
+    public static final int RC_WORLD_SETTLE = 5;
+    public static final int RC_OTHER = 6;
+
+    private static boolean reconnectEpisodeActive = false;
+    private static int reconnectState = RC_IDLE;
+    private static long reconnectStartedAt = 0L;
+    private static long reconnectStateSince = 0L;
+    private static int reconnectEpisodeId = 0;
+    private static int reconnectTransitions = 0;
+    private static boolean reconnectWorldSeenBeforeEpisode = false;
+    private static String reconnectLastReason = "";
+
+    public static boolean isReconnectEpisodeActive() {
+        return reconnectEpisodeActive;
+    }
+
+    public static int getReconnectState() {
+        return reconnectState;
+    }
+
+    public static int getReconnectEpisodeId() {
+        return reconnectEpisodeId;
+    }
+
+    public static int getReconnectTransitions() {
+        return reconnectTransitions;
+    }
+
+    public static boolean isReconnectWorldSeenBeforeEpisode() {
+        return reconnectWorldSeenBeforeEpisode;
+    }
+
+    public static String getReconnectLastReason() {
+        return reconnectLastReason;
+    }
+
+    private static String stateName(int state) {
+        switch (state) {
+            case RC_IDLE: return "RC_IDLE";
+            case RC_NATIVE_WAIT: return "RC_NATIVE_WAIT";
+            case RC_LOGIN: return "RC_LOGIN";
+            case RC_SERVER: return "RC_SERVER";
+            case RC_CHARACTER: return "RC_CHARACTER";
+            case RC_WORLD_SETTLE: return "RC_WORLD_SETTLE";
+            case RC_OTHER: return "RC_OTHER";
+            default: return "RC_UNKNOWN(" + state + ")";
+        }
+    }
+
+    /**
+     * Conservative observer-only classifier for strong transport/disconnect evidence.
+     * Evaluates bv.a and strongly recognized disconnect phrases in modal dialogs.
+     */
+    private static String detectStrongDisconnectReason() {
+        if (bv.a) {
+            return "NATIVE_BV_A";
+        }
+        if (fu.s != null && (fu.s instanceof ah)) {
+            String text = norm(dialogText(fu.s));
+            if (text.indexOf("mat ket noi") >= 0) {
+                return "MODAL_DISCONNECT_MAT_KET_NOI";
+            }
+            if (text.indexOf("ket noi that bai") >= 0) {
+                return "MODAL_DISCONNECT_KET_NOI_THAT_BAI";
+            }
+            if (text.indexOf("vui long dang nhap lai") >= 0) {
+                return "MODAL_DISCONNECT_VUI_LONG_DANG_NHAP_LAI";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Ticked from tick() after sessionTick() and before auth().
+     * A transient fu.a == null pauses observation without resetting the active episode.
+     */
+    private static void reconnectSupervisorTick() {
+        try {
+            long now = dx.a();
+
+            // Clock rollback defensive re-anchor
+            if (now < reconnectStartedAt) {
+                reconnectStartedAt = now;
+            }
+            if (now < reconnectStateSince) {
+                reconnectStateSince = now;
+            }
+
+            // Track whether an authoritative stable world has ever been observed
+            if (fu.a == fu.c && gameReady() && mapStable()) {
+                reconnectWorldSeenBeforeEpisode = true;
+            }
+
+            String reason = detectStrongDisconnectReason();
+            boolean strongDisconnect = (reason != null);
+
+            // EPISODE OPENING RULE
+            if (!reconnectEpisodeActive) {
+                if (strongDisconnect) {
+                    reconnectEpisodeActive = true;
+                    reconnectEpisodeId++;
+                    reconnectStartedAt = now;
+                    reconnectStateSince = now;
+                    reconnectState = RC_NATIVE_WAIT;
+                    reconnectTransitions = 0;
+                    reconnectLastReason = reason;
+                    trace("RECONNECT episode open id=" + reconnectEpisodeId
+                            + " reason=" + reason
+                            + " worldSeenBefore=" + reconnectWorldSeenBeforeEpisode);
+                }
+                return;
+            }
+
+            // ACTIVE EPISODE HANDLING
+            if (fu.a == null) {
+                // Transient null-screen pauses observation; does NOT reset episode
+                return;
+            }
+
+            // SUCCESSFUL CLOSE RULE:
+            // An active episode is successful only when fu.a == fu.c AND gameReady() AND mapStable().
+            if (fu.a == fu.c && gameReady() && mapStable()) {
+                long duration = (now >= reconnectStartedAt) ? (now - reconnectStartedAt) : 0L;
+                trace("RECONNECT episode close id=" + reconnectEpisodeId
+                        + " status=SUCCESS durationMs=" + duration
+                        + " transitions=" + reconnectTransitions);
+                reconnectEpisodeActive = false;
+                reconnectState = RC_IDLE;
+                reconnectStateSince = now;
+                reconnectLastReason = "";
+                return;
+            }
+
+            // DERIVE STATE FOR ACTIVE EPISODE
+            int targetState;
+            if (strongDisconnect) {
+                targetState = RC_NATIVE_WAIT;
+            } else if (fu.a == fu.b && fu.t == fu.g) {
+                targetState = RC_SERVER;
+            } else if (fu.a == fu.b) {
+                targetState = RC_LOGIN;
+            } else if (fu.a == fu.i) {
+                targetState = RC_CHARACTER;
+            } else if (fu.a == fu.c) {
+                targetState = RC_WORLD_SETTLE;
+            } else {
+                targetState = RC_OTHER;
+            }
+
+            if (targetState != reconnectState) {
+                int oldState = reconnectState;
+                reconnectState = targetState;
+                reconnectStateSince = now;
+                reconnectTransitions++;
+                trace("RECONNECT transition id=" + reconnectEpisodeId
+                        + " from=" + stateName(oldState)
+                        + " to=" + stateName(targetState)
+                        + " count=" + reconnectTransitions);
+            }
+        } catch (Throwable t) {
+            // Fail silent: supervisor observation must never stall client tick
+        }
+    }
+    // ---- end RECONNECT --------------------------------------------------------
 
     /**
      * Strict allowlist for harmless informational server notices and announcements.
