@@ -1089,12 +1089,116 @@ fn seed_account_credentials(
     Ok(())
 }
 
-// ── recover game loop watchdog (AUTO-RECONNECT-R3B) ───────────────────────────
+// ── external watchdog recovery (AUTO-RECONNECT-R3B / R3C) ─────────────────────
+
+/// Typed reason for automatic external watchdog process recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalWatchdogRecoveryReason {
+    GameLoopFreeze,
+    StartupNoHealth,
+    ReconnectLoadingStall,
+    ReconnectWorldSettleStall,
+}
+
+impl ExternalWatchdogRecoveryReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::GameLoopFreeze => "game_loop_freeze",
+            Self::StartupNoHealth => "startup_no_health",
+            Self::ReconnectLoadingStall => "reconnect_loading_stall",
+            Self::ReconnectWorldSettleStall => "reconnect_world_settle_stall",
+        }
+    }
+}
+
+impl From<crate::game_loop_watchdog::WatchdogRecoveryReason> for ExternalWatchdogRecoveryReason {
+    fn from(r: crate::game_loop_watchdog::WatchdogRecoveryReason) -> Self {
+        match r {
+            crate::game_loop_watchdog::WatchdogRecoveryReason::GameLoopFreeze => Self::GameLoopFreeze,
+            crate::game_loop_watchdog::WatchdogRecoveryReason::StartupNoHealth => Self::StartupNoHealth,
+        }
+    }
+}
+
+impl From<crate::logical_reconnect_watchdog::LogicalStallRecoveryReason> for ExternalWatchdogRecoveryReason {
+    fn from(r: crate::logical_reconnect_watchdog::LogicalStallRecoveryReason) -> Self {
+        match r {
+            crate::logical_reconnect_watchdog::LogicalStallRecoveryReason::ReconnectLoadingStall => {
+                Self::ReconnectLoadingStall
+            }
+            crate::logical_reconnect_watchdog::LogicalStallRecoveryReason::ReconnectWorldSettleStall => {
+                Self::ReconnectWorldSettleStall
+            }
+        }
+    }
+}
+
+/// Diagnostic context for an external watchdog recovery action.
+///
+/// Contains typed reason and observable diagnostics for logging and telemetry.
+/// Diagnostics do NOT participate in authorization or process lifecycle decisions.
+#[derive(Debug, Clone)]
+pub struct ExternalWatchdogRecoveryContext {
+    pub reason: ExternalWatchdogRecoveryReason,
+    pub decision_generation: u64,
+    pub decision_pid: Option<i32>,
+    pub health_seq: Option<u64>,
+    pub reconnect_seq: Option<u64>,
+    pub health_no_progress_duration: Option<Duration>,
+    pub reconnect_episode_id: Option<u32>,
+    pub reconnect_state: Option<zeus_core::wire::ReconnectState>,
+    pub reconnect_state_duration: Option<Duration>,
+}
+
+impl ExternalWatchdogRecoveryContext {
+    pub fn for_game_loop(
+        reason: crate::game_loop_watchdog::WatchdogRecoveryReason,
+        decision_generation: u64,
+        decision_pid: Option<i32>,
+        health_seq: Option<u64>,
+        health_no_progress_duration: Option<Duration>,
+    ) -> Self {
+        Self {
+            reason: reason.into(),
+            decision_generation,
+            decision_pid,
+            health_seq,
+            reconnect_seq: None,
+            health_no_progress_duration,
+            reconnect_episode_id: None,
+            reconnect_state: None,
+            reconnect_state_duration: None,
+        }
+    }
+
+    pub fn for_logical_reconnect(
+        reason: crate::logical_reconnect_watchdog::LogicalStallRecoveryReason,
+        decision_generation: u64,
+        decision_pid: Option<i32>,
+        health_seq: Option<u64>,
+        reconnect_seq: Option<u64>,
+        reconnect_episode_id: Option<u32>,
+        reconnect_state: Option<zeus_core::wire::ReconnectState>,
+        reconnect_state_duration: Option<Duration>,
+    ) -> Self {
+        Self {
+            reason: reason.into(),
+            decision_generation,
+            decision_pid,
+            health_seq,
+            reconnect_seq,
+            health_no_progress_duration: None,
+            reconnect_episode_id,
+            reconnect_state,
+            reconnect_state_duration,
+        }
+    }
+}
 
 /// Bounded external game-loop freeze watchdog recovery helper (AUTO-RECONNECT-R3B).
 ///
-/// Executes safe process-group recovery for an account whose game-loop health sequence
-/// has frozen or whose newly spawned JVM produced no health sample within startup grace.
+/// Thin typed wrapper: packages R3B diagnostic context and delegates the actual
+/// recovery lifecycle to the single shared `execute_external_watchdog_recovery`.
 #[cfg(unix)]
 fn recover_game_loop_watchdog(
     acc: &mut AccountState,
@@ -1108,20 +1212,44 @@ fn recover_game_loop_watchdog(
     no_progress_duration: Option<Duration>,
     now: Instant,
 ) -> bool {
+    let ctx = ExternalWatchdogRecoveryContext::for_game_loop(
+        reason,
+        decision_generation,
+        decision_pid,
+        health_seq,
+        no_progress_duration,
+    );
+    execute_external_watchdog_recovery(acc, rest, identity, retired_tombstones, ctx, now)
+}
+
+/// Single safety-critical external process recovery helper for automatic watchdog actions.
+///
+/// Shared by GameLoopWatchdog (R3B) and LogicalReconnectWatchdog (R3C).
+/// Executes process-group stop, evaluates stop transition, marks replacement_pending,
+/// and delegates process recreation to watchdog-authorized reconcile.
+#[cfg(unix)]
+fn execute_external_watchdog_recovery(
+    acc: &mut AccountState,
+    rest: &SupabaseRest,
+    identity: &crate::crypto::DeviceIdentity,
+    retired_tombstones: &std::collections::HashSet<String>,
+    ctx: ExternalWatchdogRecoveryContext,
+    now: Instant,
+) -> bool {
     // 1. Revalidate account is not retiring/tombstoned and desired_state is still running
     if acc.retiring || retired_tombstones.contains(&acc.id) || acc.desired_state != "running" {
         return false;
     }
 
-    // 2. Revalidate exact current process generation and PID still match the freeze decision
+    // 2. Revalidate exact current process generation and PID still match the recovery decision
     let child = match acc.process.as_ref() {
         Some(c) => c,
         None => return false,
     };
-    if acc.process_generation != decision_generation {
+    if acc.process_generation != ctx.decision_generation {
         return false;
     }
-    if let Some(expected_pid) = decision_pid {
+    if let Some(expected_pid) = ctx.decision_pid {
         if child.pid != expected_pid {
             return false;
         }
@@ -1135,11 +1263,43 @@ fn recover_game_loop_watchdog(
 
     // 4. Arm watchdog recovery budget state BEFORE calling process_unix::stop()
     acc.game_loop_watchdog.arm_recovery_attempt(now);
-    let duration_secs = no_progress_duration.map(|d| d.as_secs_f64()).unwrap_or(0.0);
-    eprintln!(
-        "[watchdog] account={} gen={} pid={} reason={} seq={:?} no_progress={:.1}s: executing recovery",
-        acc.id, acc.process_generation, child.pid, reason.as_str(), health_seq, duration_secs
-    );
+    match ctx.reason {
+        ExternalWatchdogRecoveryReason::GameLoopFreeze
+        | ExternalWatchdogRecoveryReason::StartupNoHealth => {
+            let duration_secs = ctx
+                .health_no_progress_duration
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            eprintln!(
+                "[watchdog] account={} gen={} pid={} reason={} seq={:?} no_progress={:.1}s: executing recovery",
+                acc.id,
+                acc.process_generation,
+                child.pid,
+                ctx.reason.as_str(),
+                ctx.health_seq,
+                duration_secs
+            );
+        }
+        ExternalWatchdogRecoveryReason::ReconnectLoadingStall
+        | ExternalWatchdogRecoveryReason::ReconnectWorldSettleStall => {
+            let duration_secs = ctx
+                .reconnect_state_duration
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            eprintln!(
+                "[watchdog] account={} gen={} pid={} episode_id={:?} state={:?} state_duration={:.1}s health_seq={:?} reconnect_seq={:?} reason={}: executing recovery",
+                acc.id,
+                acc.process_generation,
+                child.pid,
+                ctx.reconnect_episode_id,
+                ctx.reconnect_state,
+                duration_secs,
+                ctx.health_seq,
+                ctx.reconnect_seq,
+                ctx.reason.as_str()
+            );
+        }
+    }
 
     // 5. Call existing process_unix::stop(child, Duration::from_secs(5))
     let (has_process, is_alive) = (true, child.pgid_alive());
@@ -1191,8 +1351,8 @@ fn recover_game_loop_watchdog(
 
 /// Bounded logical reconnect stall watchdog recovery helper (AUTO-RECONNECT-R3C).
 ///
-/// Executes the exact same safe process-group recovery, budget arming, stop evaluation,
-/// and replacement-pending lifecycle for logical Loading and WorldSettle reconnect stalls.
+/// Thin typed wrapper: packages R3C diagnostic context and delegates the actual
+/// recovery lifecycle to the single shared `execute_external_watchdog_recovery`.
 #[cfg(unix)]
 fn recover_logical_reconnect_watchdog(
     acc: &mut AccountState,
@@ -1209,84 +1369,17 @@ fn recover_logical_reconnect_watchdog(
     state_duration: Option<Duration>,
     now: Instant,
 ) -> bool {
-    // 1. Revalidate account is not retiring/tombstoned and desired_state is still running
-    if acc.retiring || retired_tombstones.contains(&acc.id) || acc.desired_state != "running" {
-        return false;
-    }
-
-    // 2. Revalidate exact current process generation and PID still match the recovery decision
-    let child = match acc.process.as_ref() {
-        Some(c) => c,
-        None => return false,
-    };
-    if acc.process_generation != decision_generation {
-        return false;
-    }
-    if let Some(expected_pid) = decision_pid {
-        if child.pid != expected_pid {
-            return false;
-        }
-    }
-
-    // 3. Revalidate process group is still alive
-    if !child.pgid_alive() {
-        return false;
-    }
-
-    // 4. Arm watchdog recovery budget state BEFORE calling process_unix::stop()
-    acc.game_loop_watchdog.arm_recovery_attempt(now);
-    let duration_secs = state_duration.map(|d| d.as_secs_f64()).unwrap_or(0.0);
-    eprintln!(
-        "[watchdog] account={} gen={} pid={} episode_id={:?} state={:?} state_duration={:.1}s health_seq={:?} reconnect_seq={:?} reason={}: executing recovery",
-        acc.id, acc.process_generation, child.pid, episode_id, reconnect_state, duration_secs, health_seq, reconnect_seq, reason.as_str()
+    let ctx = ExternalWatchdogRecoveryContext::for_logical_reconnect(
+        reason,
+        decision_generation,
+        decision_pid,
+        health_seq,
+        reconnect_seq,
+        episode_id,
+        reconnect_state,
+        state_duration,
     );
-
-    // 5. Call existing process_unix::stop(child, Duration::from_secs(5))
-    let (has_process, is_alive) = (true, child.pgid_alive());
-    let res = process_unix::stop(child, Duration::from_secs(5));
-    match res {
-        StopOutcome::AlreadyGone | StopOutcome::Terminated => {
-            eprintln!("[watchdog] account={}: stopped cleanly", acc.id);
-        }
-        StopOutcome::Killed => {
-            eprintln!("[watchdog] account={}: killed", acc.id);
-        }
-        StopOutcome::Failed => {
-            eprintln!(
-                "[watchdog] account={}: stop failed, process group still alive",
-                acc.id
-            );
-        }
-    }
-
-    // 6. Evaluate stop transition using existing evaluate_stop_transition
-    match evaluate_stop_transition(has_process, is_alive, Some(res)) {
-        StopTransition::ConfirmedStopped => {
-            eprintln!(
-                "[watchdog] account={}: stop confirmed, handing off to reconcile_desired_state",
-                acc.id
-            );
-            acc.process = None;
-            acc.health_observer.reset_stopped();
-            acc.reconnect_observer.reset_stopped();
-            acc.restarts += 1;
-            acc.game_loop_watchdog.mark_replacement_pending();
-            reconcile_desired_state_with_cause(
-                acc,
-                rest,
-                identity,
-                ReconcileCause::WatchdogReplacement,
-            );
-            true
-        }
-        StopTransition::FailedStillAlive => {
-            eprintln!(
-                "[watchdog] account={}: process still alive after stop; retaining process handle and live observer state",
-                acc.id
-            );
-            false
-        }
-    }
+    execute_external_watchdog_recovery(acc, rest, identity, retired_tombstones, ctx, now)
 }
 
 // ── reconcile desired state (B7.3) ────────────────────────────────────────────

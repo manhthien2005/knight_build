@@ -780,23 +780,56 @@ fn test_process_lifecycle_source_inspection() {
     let main_loop_path = manifest_dir.join("src/main_loop.rs");
     let content = std::fs::read_to_string(&main_loop_path).expect("main_loop.rs must exist");
 
-    // 1. Verify recover_game_loop_watchdog exists
-    let fn_idx = content
+    // 1. Verify recover_game_loop_watchdog and recover_logical_reconnect_watchdog delegate to execute_external_watchdog_recovery
+    let r3b_idx = content
         .find("fn recover_game_loop_watchdog")
         .expect("recover_game_loop_watchdog must exist in main_loop.rs");
-    let fn_body = &content[fn_idx..fn_idx + 3500];
+    let r3b_body = &content[r3b_idx..r3b_idx + 1200];
+    assert!(
+        r3b_body.contains("execute_external_watchdog_recovery("),
+        "recover_game_loop_watchdog must delegate to execute_external_watchdog_recovery"
+    );
+    assert!(
+        !r3b_body.contains("process_unix::stop")
+            && !r3b_body.contains("evaluate_stop_transition")
+            && !r3b_body.contains("acc.restarts +=")
+            && !r3b_body.contains("mark_replacement_pending"),
+        "recover_game_loop_watchdog wrapper must not contain recovery lifecycle actions"
+    );
 
-    // 2. Verify FailedStillAlive retains process and does NOT call reconcile_desired_state
+    let r3c_idx = content
+        .find("fn recover_logical_reconnect_watchdog")
+        .expect("recover_logical_reconnect_watchdog must exist in main_loop.rs");
+    let r3c_body = &content[r3c_idx..r3c_idx + 1200];
+    assert!(
+        r3c_body.contains("execute_external_watchdog_recovery("),
+        "recover_logical_reconnect_watchdog must delegate to execute_external_watchdog_recovery"
+    );
+    assert!(
+        !r3c_body.contains("process_unix::stop")
+            && !r3c_body.contains("evaluate_stop_transition")
+            && !r3c_body.contains("acc.restarts +=")
+            && !r3c_body.contains("mark_replacement_pending"),
+        "recover_logical_reconnect_watchdog wrapper must not contain recovery lifecycle actions"
+    );
+
+    // 2. Verify shared execute_external_watchdog_recovery handles the entire lifecycle
+    let fn_idx = content
+        .find("fn execute_external_watchdog_recovery")
+        .expect("execute_external_watchdog_recovery must exist in main_loop.rs");
+    let fn_body = &content[fn_idx..fn_idx + 5000];
+
+    // Verify FailedStillAlive retains process and does NOT call reconcile_desired_state
     let failed_block_idx = fn_body
         .find("StopTransition::FailedStillAlive => {")
-        .expect("FailedStillAlive must be handled in recover_game_loop_watchdog");
+        .expect("FailedStillAlive must be handled in execute_external_watchdog_recovery");
     let after_failed = &fn_body[failed_block_idx..failed_block_idx + 300];
     assert!(
         !after_failed.contains("reconcile_desired_state"),
         "FailedStillAlive must not call reconcile_desired_state"
     );
 
-    // 3. Verify ConfirmedStopped increments restarts once and delegates to reconcile_desired_state
+    // Verify ConfirmedStopped increments restarts once and delegates to reconcile_desired_state
     let confirmed_block_idx = fn_body
         .find("StopTransition::ConfirmedStopped => {")
         .expect("ConfirmedStopped must be handled");
@@ -813,6 +846,51 @@ fn test_process_lifecycle_source_inspection() {
         after_confirmed.contains("reconcile_desired_state_with_cause(")
             && after_confirmed.contains("ReconcileCause::WatchdogReplacement"),
         "ConfirmedStopped must delegate spawn to reconcile_desired_state_with_cause with WatchdogReplacement"
+    );
+
+    // 3. Verify exactly one function contains process_unix::stop and evaluate_stop_transition in external recovery
+    let watchdog_section_start = content
+        .find("// ── external watchdog recovery")
+        .expect("external watchdog recovery section must exist");
+    let watchdog_section_end = content
+        .find("// ── reconcile desired state")
+        .expect("reconcile desired state section must exist");
+    let watchdog_section = &content[watchdog_section_start..watchdog_section_end];
+
+    let non_comment_lines: Vec<&str> = watchdog_section
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.starts_with("//") && !l.starts_with("///"))
+        .collect();
+
+    let stop_calls = non_comment_lines
+        .iter()
+        .filter(|l| l.contains("process_unix::stop("))
+        .count();
+    assert_eq!(
+        stop_calls, 1,
+        "Exactly one process_unix::stop call must exist in external watchdog recovery"
+    );
+
+    let transition_evals = non_comment_lines
+        .iter()
+        .filter(|l| l.contains("evaluate_stop_transition("))
+        .count();
+    assert_eq!(
+        transition_evals, 1,
+        "Exactly one evaluate_stop_transition call must exist in external watchdog recovery"
+    );
+    assert_eq!(
+        watchdog_section.matches("acc.restarts += 1;").count(),
+        1,
+        "No duplicated acc.restarts += 1 watchdog lifecycle block remains"
+    );
+    assert_eq!(
+        watchdog_section
+            .matches("mark_replacement_pending();")
+            .count(),
+        1,
+        "No duplicated mark_replacement_pending watchdog lifecycle block remains"
     );
 
     // 4. Verify no manual Java spawn in watchdog
