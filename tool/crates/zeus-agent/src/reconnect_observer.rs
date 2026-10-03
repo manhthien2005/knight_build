@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 use zeus_core::wire::{
-    read_reconnect_status, ReconnectState, ReconnectStatusError, ReconnectStatusSnapshot,
+    ReconnectState, ReconnectStatusError, ReconnectStatusSnapshot, read_reconnect_status,
 };
 
 /// Observable reconnect read conditions for transition-only diagnostics and logging.
@@ -83,6 +83,7 @@ pub struct ReconnectObserver {
     current_episode_id: Option<u32>,
     current_state: Option<ReconnectState>,
     state_since: Option<Instant>,
+    last_progress_at: Option<Instant>,
     last_read_condition: ReconnectReadCondition,
 }
 
@@ -103,6 +104,7 @@ impl ReconnectObserver {
             current_episode_id: None,
             current_state: None,
             state_since: None,
+            last_progress_at: None,
             last_read_condition: ReconnectReadCondition::Stopped,
         }
     }
@@ -119,6 +121,7 @@ impl ReconnectObserver {
         self.current_episode_id = None;
         self.current_state = None;
         self.state_since = None;
+        self.last_progress_at = None;
         self.last_read_condition = ReconnectReadCondition::AwaitingFirstSample;
     }
 
@@ -131,6 +134,7 @@ impl ReconnectObserver {
         self.current_episode_id = None;
         self.current_state = None;
         self.state_since = None;
+        self.last_progress_at = None;
         self.last_read_condition = ReconnectReadCondition::Stopped;
     }
 
@@ -157,6 +161,17 @@ impl ReconnectObserver {
     /// Returns the monotonic instant when the current reconnect state was entered.
     pub fn state_since(&self) -> Option<Instant> {
         self.state_since
+    }
+
+    /// Returns the monotonic instant of the last observed publication progress.
+    pub fn last_progress_at(&self) -> Option<Instant> {
+        self.last_progress_at
+    }
+
+    /// Returns elapsed time since last observed reconnect publication progress, if any progress has been recorded.
+    pub fn duration_since_last_progress(&self, now: Instant) -> Option<Duration> {
+        self.last_progress_at
+            .and_then(|progress_time| now.checked_duration_since(progress_time))
     }
 
     /// Returns elapsed duration in the current reconnect state, if known.
@@ -218,6 +233,7 @@ impl ReconnectObserver {
                             self.last_read_condition != ReconnectReadCondition::Healthy;
                         self.last_read_condition = ReconnectReadCondition::Healthy;
                         self.last_sequence = Some(sample.sequence);
+                        self.last_progress_at = Some(now);
                         self.current_episode_id = Some(sample.episode_id);
                         self.current_state = Some(sample.state);
                         self.state_since = Some(now);
@@ -243,7 +259,8 @@ impl ReconnectObserver {
                         let prev_episode = self.current_episode_id;
                         let prev_active = self.last_valid_snapshot.as_ref().map(|s| s.active);
                         let prev_state = self.current_state;
-                        let prev_transitions = self.last_valid_snapshot.as_ref().map(|s| s.transitions);
+                        let prev_transitions =
+                            self.last_valid_snapshot.as_ref().map(|s| s.transitions);
 
                         let episode_changed = if prev_episode != Some(sample.episode_id) {
                             prev_episode.map(|prev| (prev, sample.episode_id))
@@ -266,7 +283,10 @@ impl ReconnectObserver {
                             None
                         };
 
-                        if episode_changed.is_some() || active_changed.is_some() || state_changed.is_some() {
+                        if episode_changed.is_some()
+                            || active_changed.is_some()
+                            || state_changed.is_some()
+                        {
                             // Any lifecycle state transition resets state_since to local now
                             self.state_since = Some(now);
                             self.current_episode_id = Some(sample.episode_id);
@@ -276,6 +296,7 @@ impl ReconnectObserver {
                         // NOT reset merely because seq advanced! This preserves logical stall duration measurement.
 
                         self.last_sequence = Some(sample.sequence);
+                        self.last_progress_at = Some(now);
                         self.last_valid_snapshot = Some(sample.clone());
 
                         ReconnectObservationEvent::Progress {

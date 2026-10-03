@@ -10,9 +10,9 @@ mod game_loop_watchdog;
 mod health_observer;
 
 use game_loop_watchdog::{
-    GameLoopWatchdog, RateLimitReason, ReplacementRetryEvaluation, WatchdogEvaluation,
-    WatchdogRecoveryReason, HEALTH_FREEZE_THRESHOLD_MS, HEALTH_STARTUP_GRACE_MS,
-    WATCHDOG_BACKOFF_MS, WATCHDOG_MIN_RECOVERY_INTERVAL_MS,
+    GameLoopWatchdog, HEALTH_FREEZE_THRESHOLD_MS, HEALTH_STARTUP_GRACE_MS, RateLimitReason,
+    ReplacementRetryEvaluation, WATCHDOG_BACKOFF_MS, WATCHDOG_MIN_RECOVERY_INTERVAL_MS,
+    WatchdogEvaluation, WatchdogRecoveryReason,
 };
 use health_observer::{HealthObservationEvent, HealthReadCondition};
 
@@ -1377,4 +1377,50 @@ fn test_startup_no_health_post_backoff_reconfirmation() {
         },
         "Second post-backoff startup poll produces RecoveryRequested"
     );
+}
+
+#[test]
+fn test_shared_backoff_epoch_lifecycle() {
+    let t0 = Instant::now();
+    let mut wd = GameLoopWatchdog::new(t0);
+
+    // Initial epoch is 0
+    assert_eq!(wd.long_backoff_epoch(), 0);
+
+    // Normal recovery attempts do not increment epoch
+    let t1 = t0 + Duration::from_secs(65);
+    wd.arm_recovery_attempt(t1);
+    assert_eq!(wd.long_backoff_epoch(), 0);
+
+    let t2 = t1 + Duration::from_secs(65);
+    wd.arm_recovery_attempt(t2);
+    assert_eq!(wd.long_backoff_epoch(), 0);
+
+    // 3rd recovery arms 30-minute backoff; epoch still 0
+    let t3 = t2 + Duration::from_secs(65);
+    wd.arm_recovery_attempt(t3);
+    assert_eq!(wd.long_backoff_epoch(), 0);
+
+    // During backoff: epoch still 0
+    let t_during = t3 + Duration::from_secs(600); // 10 minutes in
+    assert!(wd.is_in_backoff(t_during));
+    assert_eq!(wd.long_backoff_epoch(), 0);
+
+    // At backoff expiry: epoch increments to 1
+    let t_expiry = t3 + Duration::from_millis(WATCHDOG_BACKOFF_MS);
+    assert!(!wd.is_in_backoff(t_expiry));
+    assert_eq!(wd.long_backoff_epoch(), 1);
+
+    // Subsequent checks after expiry do not repeatedly increment epoch
+    let t_after = t_expiry + Duration::from_secs(60);
+    assert_eq!(wd.check_budget(t_after), Ok(()));
+    assert_eq!(wd.long_backoff_epoch(), 1);
+
+    // on_successful_spawn preserves epoch!
+    wd.on_successful_spawn(2, t_after);
+    assert_eq!(wd.long_backoff_epoch(), 1);
+
+    // on_explicit_user_stop_or_retirement resets epoch to 0
+    wd.on_explicit_user_stop_or_retirement();
+    assert_eq!(wd.long_backoff_epoch(), 0);
 }

@@ -113,6 +113,7 @@ pub struct GameLoopWatchdog {
     replacement_pending: bool,
     last_suppression_class: Option<RateLimitSuppressionClass>,
     needs_post_backoff_reconfirmation: bool,
+    long_backoff_epoch: u64,
 }
 
 impl Default for GameLoopWatchdog {
@@ -137,6 +138,7 @@ impl GameLoopWatchdog {
             replacement_pending: false,
             last_suppression_class: None,
             needs_post_backoff_reconfirmation: false,
+            long_backoff_epoch: 0,
         }
     }
 
@@ -199,6 +201,7 @@ impl GameLoopWatchdog {
         self.replacement_pending = false;
         self.last_suppression_class = None;
         self.needs_post_backoff_reconfirmation = false;
+        self.long_backoff_epoch = 0;
     }
 
     /// Evaluates whether a pending replacement retry is authorized under the watchdog budget.
@@ -276,15 +279,21 @@ impl GameLoopWatchdog {
         self.backoff_until.is_some()
     }
 
+    /// Returns the monotonically increasing epoch of 30-minute long-backoff expirations.
+    pub fn long_backoff_epoch(&self) -> u64 {
+        self.long_backoff_epoch
+    }
+
     /// Maintains window expiration and backoff expiration based on current monotonic time.
-    fn maintain_budget_window(&mut self, now: Instant) {
+    pub fn maintain_budget_window(&mut self, now: Instant) {
         if let Some(backoff_deadline) = self.backoff_until {
             if now >= backoff_deadline {
-                // Backoff expired: clear budget cycle and arm post-backoff anomaly reconfirmation
+                // Backoff expired: clear budget cycle, increment shared epoch, and arm post-backoff anomaly reconfirmation
                 self.backoff_until = None;
                 self.recoveries_in_window = 0;
                 self.window_started_at = None;
                 self.needs_post_backoff_reconfirmation = true;
+                self.long_backoff_epoch += 1;
             }
         } else if let Some(win_start) = self.window_started_at {
             if now.duration_since(win_start) >= Duration::from_millis(WATCHDOG_BUDGET_WINDOW_MS) {

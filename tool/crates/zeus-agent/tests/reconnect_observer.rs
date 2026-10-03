@@ -1,16 +1,14 @@
 use std::time::{Duration, Instant};
 use zeus_core::wire::{
-    clear_reconnect_status, ReconnectState, ReconnectStatusError, ReconnectStatusSnapshot,
-    RECONNECT_STATUS_FILE_NAME,
+    RECONNECT_STATUS_FILE_NAME, ReconnectState, ReconnectStatusError, ReconnectStatusSnapshot,
+    clear_reconnect_status,
 };
 
 #[path = "../src/reconnect_observer.rs"]
 #[allow(dead_code)]
 mod reconnect_observer;
 
-use reconnect_observer::{
-    ReconnectObservationEvent, ReconnectObserver, ReconnectReadCondition,
-};
+use reconnect_observer::{ReconnectObservationEvent, ReconnectObserver, ReconnectReadCondition};
 
 #[test]
 fn test_first_sample_establishes_baseline() {
@@ -348,11 +346,11 @@ fn test_malformed_read_preserves_last_good_state() {
     observer.observe_reading(Ok(Some(sample1.clone())), t0);
 
     let t1 = t0 + Duration::from_secs(2);
-    let event = observer.observe_reading(
-        Err(ReconnectStatusError::InvalidEncoding),
-        t1,
-    );
-    assert!(matches!(event, ReconnectObservationEvent::InvalidOrIo { .. }));
+    let event = observer.observe_reading(Err(ReconnectStatusError::InvalidEncoding), t1);
+    assert!(matches!(
+        event,
+        ReconnectObservationEvent::InvalidOrIo { .. }
+    ));
 
     // Preserves last known good state and state_since
     assert_eq!(observer.last_sequence(), Some(5));
@@ -510,7 +508,8 @@ fn test_lifecycle_safe_clear_reconnect_status() {
 fn test_invariants_source_code_inspection() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let observer_path = manifest_dir.join("src/reconnect_observer.rs");
-    let content = std::fs::read_to_string(&observer_path).expect("reconnect_observer.rs must exist");
+    let content =
+        std::fs::read_to_string(&observer_path).expect("reconnect_observer.rs must exist");
 
     // 1. Verify no stall thresholds are defined in R3A
     assert!(
@@ -536,6 +535,216 @@ fn test_invariants_source_code_inspection() {
             "reconnect_observer.rs must not contain forbidden phrase: {word}"
         );
     }
+}
+
+#[test]
+fn test_reconnect_first_valid_sample_sets_last_progress_at() {
+    let mut observer = ReconnectObserver::new();
+    assert_eq!(observer.last_progress_at(), None);
+
+    observer.reset_for_new_generation(1, Some(1234));
+    assert_eq!(observer.last_progress_at(), None);
+
+    let t0 = Instant::now();
+    let sample = ReconnectStatusSnapshot {
+        written_at_unix_ms: 1000,
+        sequence: 1,
+        episode_id: 10,
+        active: true,
+        state: ReconnectState::Loading,
+        transitions: 1,
+        world_seen_before_episode: true,
+    };
+
+    let event = observer.observe_reading(Ok(Some(sample)), t0);
+    assert!(matches!(
+        event,
+        ReconnectObservationEvent::BaselineSample { .. }
+    ));
+    assert_eq!(observer.last_progress_at(), Some(t0));
+}
+
+#[test]
+fn test_reconnect_sequence_progress_updates_last_progress_at() {
+    let mut observer = ReconnectObserver::new();
+    observer.reset_for_new_generation(1, Some(1234));
+
+    let t0 = Instant::now();
+    let sample1 = ReconnectStatusSnapshot {
+        written_at_unix_ms: 1000,
+        sequence: 1,
+        episode_id: 10,
+        active: true,
+        state: ReconnectState::Loading,
+        transitions: 1,
+        world_seen_before_episode: true,
+    };
+    observer.observe_reading(Ok(Some(sample1)), t0);
+    assert_eq!(observer.last_progress_at(), Some(t0));
+
+    let t1 = t0 + Duration::from_secs(2);
+    let sample2 = ReconnectStatusSnapshot {
+        written_at_unix_ms: 3000,
+        sequence: 2,
+        episode_id: 10,
+        active: true,
+        state: ReconnectState::Loading,
+        transitions: 1,
+        world_seen_before_episode: true,
+    };
+    let event = observer.observe_reading(Ok(Some(sample2)), t1);
+    assert!(matches!(event, ReconnectObservationEvent::Progress { .. }));
+    assert_eq!(observer.last_progress_at(), Some(t1));
+}
+
+#[test]
+fn test_reconnect_unchanged_does_not_update_last_progress_at() {
+    let mut observer = ReconnectObserver::new();
+    observer.reset_for_new_generation(1, Some(1234));
+
+    let t0 = Instant::now();
+    let sample1 = ReconnectStatusSnapshot {
+        written_at_unix_ms: 1000,
+        sequence: 1,
+        episode_id: 10,
+        active: true,
+        state: ReconnectState::Loading,
+        transitions: 1,
+        world_seen_before_episode: true,
+    };
+    observer.observe_reading(Ok(Some(sample1.clone())), t0);
+    assert_eq!(observer.last_progress_at(), Some(t0));
+
+    let t1 = t0 + Duration::from_secs(2);
+    let event = observer.observe_reading(Ok(Some(sample1)), t1);
+    assert!(matches!(event, ReconnectObservationEvent::Unchanged { .. }));
+    // Crucial: last_progress_at MUST NOT be updated on Unchanged!
+    assert_eq!(observer.last_progress_at(), Some(t0));
+}
+
+#[test]
+fn test_reconnect_missing_invalid_regression_does_not_update_last_progress_at() {
+    let mut observer = ReconnectObserver::new();
+    observer.reset_for_new_generation(1, Some(1234));
+
+    let t0 = Instant::now();
+    let sample1 = ReconnectStatusSnapshot {
+        written_at_unix_ms: 1000,
+        sequence: 5,
+        episode_id: 10,
+        active: true,
+        state: ReconnectState::WorldSettle,
+        transitions: 2,
+        world_seen_before_episode: true,
+    };
+    observer.observe_reading(Ok(Some(sample1)), t0);
+    assert_eq!(observer.last_progress_at(), Some(t0));
+
+    // MissingFile
+    let t1 = t0 + Duration::from_secs(2);
+    let event1 = observer.observe_reading(Ok(None), t1);
+    assert!(matches!(
+        event1,
+        ReconnectObservationEvent::MissingFile { .. }
+    ));
+    assert_eq!(observer.last_progress_at(), Some(t0));
+
+    // InvalidOrIo
+    let t2 = t1 + Duration::from_secs(2);
+    let event2 = observer.observe_reading(Err(ReconnectStatusError::MalformedInteger("seq")), t2);
+    assert!(matches!(
+        event2,
+        ReconnectObservationEvent::InvalidOrIo { .. }
+    ));
+    assert_eq!(observer.last_progress_at(), Some(t0));
+
+    // SequenceRegression
+    let t3 = t2 + Duration::from_secs(2);
+    let sample_regression = ReconnectStatusSnapshot {
+        written_at_unix_ms: 2000,
+        sequence: 3, // regression from 5
+        episode_id: 10,
+        active: true,
+        state: ReconnectState::WorldSettle,
+        transitions: 2,
+        world_seen_before_episode: true,
+    };
+    let event3 = observer.observe_reading(Ok(Some(sample_regression)), t3);
+    assert!(matches!(
+        event3,
+        ReconnectObservationEvent::SequenceRegression { .. }
+    ));
+    assert_eq!(observer.last_progress_at(), Some(t0));
+}
+
+#[test]
+fn test_reconnect_new_generation_and_stopped_resets_last_progress_at() {
+    let mut observer = ReconnectObserver::new();
+    observer.reset_for_new_generation(1, Some(1234));
+
+    let t0 = Instant::now();
+    let sample1 = ReconnectStatusSnapshot {
+        written_at_unix_ms: 1000,
+        sequence: 1,
+        episode_id: 10,
+        active: true,
+        state: ReconnectState::Loading,
+        transitions: 1,
+        world_seen_before_episode: true,
+    };
+    observer.observe_reading(Ok(Some(sample1)), t0);
+    assert_eq!(observer.last_progress_at(), Some(t0));
+
+    // reset_for_new_generation clears last_progress_at
+    observer.reset_for_new_generation(2, Some(5678));
+    assert_eq!(observer.last_progress_at(), None);
+
+    // establish baseline in gen 2
+    let t1 = t0 + Duration::from_secs(10);
+    let sample2 = ReconnectStatusSnapshot {
+        written_at_unix_ms: 11000,
+        sequence: 1,
+        episode_id: 1,
+        active: true,
+        state: ReconnectState::Loading,
+        transitions: 1,
+        world_seen_before_episode: true,
+    };
+    observer.observe_reading(Ok(Some(sample2)), t1);
+    assert_eq!(observer.last_progress_at(), Some(t1));
+
+    // reset_stopped clears last_progress_at
+    observer.reset_stopped();
+    assert_eq!(observer.last_progress_at(), None);
+}
+
+#[test]
+fn test_reconnect_duration_since_last_progress_uses_local_instant() {
+    let mut observer = ReconnectObserver::new();
+    assert_eq!(observer.duration_since_last_progress(Instant::now()), None);
+
+    observer.reset_for_new_generation(1, Some(1234));
+    let t0 = Instant::now();
+    let sample = ReconnectStatusSnapshot {
+        written_at_unix_ms: 1000,
+        sequence: 1,
+        episode_id: 10,
+        active: true,
+        state: ReconnectState::Loading,
+        transitions: 1,
+        world_seen_before_episode: true,
+    };
+    observer.observe_reading(Ok(Some(sample)), t0);
+
+    let t1 = t0 + Duration::from_millis(4500);
+    assert_eq!(
+        observer.duration_since_last_progress(t1),
+        Some(Duration::from_millis(4500))
+    );
+
+    // monotonic check: earlier time returns None (saturating/checked)
+    let t_before = t0 - Duration::from_secs(1);
+    assert_eq!(observer.duration_since_last_progress(t_before), None);
 }
 
 #[test]
@@ -566,7 +775,9 @@ fn test_main_loop_reconnect_integration_inspection() {
     // 4. Both observers observed in 2-second tick
     assert!(
         content.contains("acc.health_observer.observe_account_home(&paths.home, &acc.id, now);")
-            && content.contains("acc.reconnect_observer.observe_account_home(&paths.home, &acc.id, now);"),
+            && content.contains(
+                "acc.reconnect_observer.observe_account_home(&paths.home, &acc.id, now);"
+            ),
         "both observers must be called on 2s supervision tick"
     );
 
@@ -584,7 +795,9 @@ fn test_main_loop_reconnect_integration_inspection() {
     for line in content.lines() {
         if line.contains("reconnect_observer") {
             assert!(
-                !line.contains("stop(") && !line.contains("restarts +=") && !line.contains("reconcile_desired_state"),
+                !line.contains("stop(")
+                    && !line.contains("restarts +=")
+                    && !line.contains("reconcile_desired_state"),
                 "reconnect observation line must not invoke stop, restarts, or reconcile: {line}"
             );
         }
@@ -592,7 +805,8 @@ fn test_main_loop_reconnect_integration_inspection() {
 
     // 7. RuntimePayload does not contain reconnect fields
     let supabase_rest_path = manifest_dir.join("src/supabase_rest.rs");
-    let sb_content = std::fs::read_to_string(&supabase_rest_path).expect("supabase_rest.rs must exist");
+    let sb_content =
+        std::fs::read_to_string(&supabase_rest_path).expect("supabase_rest.rs must exist");
     let start = sb_content
         .find("pub struct RuntimePayload {")
         .expect("RuntimePayload must exist");

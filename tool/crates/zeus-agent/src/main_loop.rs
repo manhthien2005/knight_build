@@ -141,6 +141,8 @@ struct AccountState {
     reconnect_observer: crate::reconnect_observer::ReconnectObserver,
     /// Bounded external game-loop freeze watchdog (AUTO-RECONNECT-R3B).
     game_loop_watchdog: crate::game_loop_watchdog::GameLoopWatchdog,
+    /// Bounded logical reconnect stall watchdog (AUTO-RECONNECT-R3C).
+    logical_watchdog: crate::logical_reconnect_watchdog::LogicalReconnectWatchdog,
 }
 
 /// Cấu hình môi trường agent. Đọc từ biến môi trường lúc boot.
@@ -445,7 +447,7 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
                 if acc.process.as_ref().map(|p| p.alive()).unwrap_or(false) {
                     let paths = AccountPaths::for_slot(acc.slot_index);
                     let health_event = acc.health_observer.observe_account_home(&paths.home, &acc.id, now);
-                    acc.reconnect_observer.observe_account_home(&paths.home, &acc.id, now);
+                    let reconnect_event = acc.reconnect_observer.observe_account_home(&paths.home, &acc.id, now);
 
                     let has_baseline = acc.health_observer.last_sequence().is_some();
                     let duration_since_progress = acc.health_observer.duration_since_last_progress(now);
@@ -509,6 +511,99 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
                             );
                             if recovered {
                                 watchdog_recovered_ids.insert(acc.id.clone());
+                            }
+                        }
+                    }
+
+                    // ── logical reconnect stall watchdog (AUTO-RECONNECT-R3C) ──────
+                    if !watchdog_recovered_ids.contains(&acc.id)
+                        && acc.process.as_ref().map(|p| p.alive()).unwrap_or(false)
+                    {
+                        let rec_obs = &acc.reconnect_observer;
+                        let has_reconnect_baseline = rec_obs.last_sequence().is_some();
+                        let rec_read_cond = rec_obs.last_read_condition();
+                        let rec_progress_duration = rec_obs.duration_since_last_progress(now);
+                        let rec_duration = rec_obs.duration_in_current_state(now);
+                        let last_rec_snap = rec_obs.last_valid_snapshot();
+                        let current_rec_ep = rec_obs.current_episode_id();
+                        let shared_epoch = acc.game_loop_watchdog.long_backoff_epoch();
+
+                        let logical_eval = acc.logical_watchdog.evaluate(
+                            acc.retiring,
+                            retired_tombstones.contains(&acc.id),
+                            &acc.desired_state,
+                            acc.game_loop_watchdog.replacement_pending(),
+                            acc.process.is_some(),
+                            acc.process.as_ref().map(|p| p.alive()).unwrap_or(false),
+                            process_gen,
+                            acc.health_observer.current_process_generation(),
+                            acc.reconnect_observer.current_process_generation(),
+                            has_baseline,
+                            read_cond,
+                            duration_since_progress,
+                            &health_event,
+                            has_reconnect_baseline,
+                            rec_read_cond,
+                            rec_progress_duration,
+                            &reconnect_event,
+                            last_rec_snap,
+                            current_rec_ep,
+                            rec_duration,
+                            shared_epoch,
+                            now,
+                        );
+
+                        match logical_eval {
+                            crate::logical_reconnect_watchdog::LogicalWatchdogEvaluation::NoAction => {}
+                            crate::logical_reconnect_watchdog::LogicalWatchdogEvaluation::ArmingLoadingConfirmation { count } => {
+                                if count == 1 {
+                                    eprintln!(
+                                        "[watchdog] account={} gen={} logical loading stall for >= 180s ({:?}), arming loading confirmation (poll 1/2)",
+                                        acc.id, process_gen, rec_duration
+                                    );
+                                }
+                            }
+                            crate::logical_reconnect_watchdog::LogicalWatchdogEvaluation::ArmingWorldSettleConfirmation { count } => {
+                                if count == 1 {
+                                    eprintln!(
+                                        "[watchdog] account={} gen={} logical world-settle stall for >= 120s ({:?}), arming world-settle confirmation (poll 1/2)",
+                                        acc.id, process_gen, rec_duration
+                                    );
+                                }
+                            }
+                            crate::logical_reconnect_watchdog::LogicalWatchdogEvaluation::RecoveryRequested { reason } => {
+                                match acc.game_loop_watchdog.check_budget(now) {
+                                    Ok(()) => {
+                                        let ep_id = last_rec_snap.map(|s| s.episode_id);
+                                        let rec_state = last_rec_snap.map(|s| s.state);
+                                        let recovered = recover_logical_reconnect_watchdog(
+                                            acc,
+                                            &rest,
+                                            &identity,
+                                            &retired_tombstones,
+                                            reason,
+                                            process_gen,
+                                            pid,
+                                            acc.health_observer.last_sequence(),
+                                            acc.reconnect_observer.last_sequence(),
+                                            ep_id,
+                                            rec_state,
+                                            rec_duration,
+                                            now,
+                                        );
+                                        if recovered {
+                                            watchdog_recovered_ids.insert(acc.id.clone());
+                                        }
+                                    }
+                                    Err(rate_limit_reason) => {
+                                        if acc.game_loop_watchdog.should_log_rate_limit_transition(&rate_limit_reason) {
+                                            eprintln!(
+                                                "[watchdog] account={} gen={} logical recovery suppressed: {:?}",
+                                                acc.id, process_gen, rate_limit_reason
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1094,6 +1189,106 @@ fn recover_game_loop_watchdog(
     }
 }
 
+/// Bounded logical reconnect stall watchdog recovery helper (AUTO-RECONNECT-R3C).
+///
+/// Executes the exact same safe process-group recovery, budget arming, stop evaluation,
+/// and replacement-pending lifecycle for logical Loading and WorldSettle reconnect stalls.
+#[cfg(unix)]
+fn recover_logical_reconnect_watchdog(
+    acc: &mut AccountState,
+    rest: &SupabaseRest,
+    identity: &crate::crypto::DeviceIdentity,
+    retired_tombstones: &std::collections::HashSet<String>,
+    reason: crate::logical_reconnect_watchdog::LogicalStallRecoveryReason,
+    decision_generation: u64,
+    decision_pid: Option<i32>,
+    health_seq: Option<u64>,
+    reconnect_seq: Option<u64>,
+    episode_id: Option<u32>,
+    reconnect_state: Option<zeus_core::wire::ReconnectState>,
+    state_duration: Option<Duration>,
+    now: Instant,
+) -> bool {
+    // 1. Revalidate account is not retiring/tombstoned and desired_state is still running
+    if acc.retiring || retired_tombstones.contains(&acc.id) || acc.desired_state != "running" {
+        return false;
+    }
+
+    // 2. Revalidate exact current process generation and PID still match the recovery decision
+    let child = match acc.process.as_ref() {
+        Some(c) => c,
+        None => return false,
+    };
+    if acc.process_generation != decision_generation {
+        return false;
+    }
+    if let Some(expected_pid) = decision_pid {
+        if child.pid != expected_pid {
+            return false;
+        }
+    }
+
+    // 3. Revalidate process group is still alive
+    if !child.pgid_alive() {
+        return false;
+    }
+
+    // 4. Arm watchdog recovery budget state BEFORE calling process_unix::stop()
+    acc.game_loop_watchdog.arm_recovery_attempt(now);
+    let duration_secs = state_duration.map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    eprintln!(
+        "[watchdog] account={} gen={} pid={} episode_id={:?} state={:?} state_duration={:.1}s health_seq={:?} reconnect_seq={:?} reason={}: executing recovery",
+        acc.id, acc.process_generation, child.pid, episode_id, reconnect_state, duration_secs, health_seq, reconnect_seq, reason.as_str()
+    );
+
+    // 5. Call existing process_unix::stop(child, Duration::from_secs(5))
+    let (has_process, is_alive) = (true, child.pgid_alive());
+    let res = process_unix::stop(child, Duration::from_secs(5));
+    match res {
+        StopOutcome::AlreadyGone | StopOutcome::Terminated => {
+            eprintln!("[watchdog] account={}: stopped cleanly", acc.id);
+        }
+        StopOutcome::Killed => {
+            eprintln!("[watchdog] account={}: killed", acc.id);
+        }
+        StopOutcome::Failed => {
+            eprintln!(
+                "[watchdog] account={}: stop failed, process group still alive",
+                acc.id
+            );
+        }
+    }
+
+    // 6. Evaluate stop transition using existing evaluate_stop_transition
+    match evaluate_stop_transition(has_process, is_alive, Some(res)) {
+        StopTransition::ConfirmedStopped => {
+            eprintln!(
+                "[watchdog] account={}: stop confirmed, handing off to reconcile_desired_state",
+                acc.id
+            );
+            acc.process = None;
+            acc.health_observer.reset_stopped();
+            acc.reconnect_observer.reset_stopped();
+            acc.restarts += 1;
+            acc.game_loop_watchdog.mark_replacement_pending();
+            reconcile_desired_state_with_cause(
+                acc,
+                rest,
+                identity,
+                ReconcileCause::WatchdogReplacement,
+            );
+            true
+        }
+        StopTransition::FailedStillAlive => {
+            eprintln!(
+                "[watchdog] account={}: process still alive after stop; retaining process handle and live observer state",
+                acc.id
+            );
+            false
+        }
+    }
+}
+
 // ── reconcile desired state (B7.3) ────────────────────────────────────────────
 
 /// Reconcile trigger cause distinguishing ordinary reconciliation from watchdog replacement.
@@ -1205,6 +1400,7 @@ fn reconcile_desired_state_with_cause(
                     acc.health_observer.reset_for_new_generation(acc.process_generation, Some(child.pid as u32));
                     acc.reconnect_observer.reset_for_new_generation(acc.process_generation, Some(child.pid as u32));
                     acc.game_loop_watchdog.on_successful_spawn(acc.process_generation, Instant::now());
+                    acc.logical_watchdog.on_successful_spawn(acc.process_generation, acc.game_loop_watchdog.long_backoff_epoch());
                     // Báo cáo process_state ngay — Issue #39
                     let now_str = crate::supabase_rest::now_rfc3339();
                     if let Err(e) = rest.push_runtime(
@@ -1268,6 +1464,7 @@ fn reconcile_desired_state_with_cause(
                     acc.health_observer.reset_stopped();
                     acc.reconnect_observer.reset_stopped();
                     acc.game_loop_watchdog.on_explicit_user_stop_or_retirement();
+                    acc.logical_watchdog.on_explicit_user_stop_or_retirement();
                     // Xóa credentials và snapshot — Issues #32, #89
                     let paths = AccountPaths::for_slot(acc.slot_index);
                     if let Err(e) = clear_credentials(&paths.home) {
@@ -2374,6 +2571,7 @@ fn retire_account_safely(
             acc.health_observer.reset_stopped();
             acc.reconnect_observer.reset_stopped();
             acc.game_loop_watchdog.on_explicit_user_stop_or_retirement();
+            acc.logical_watchdog.on_explicit_user_stop_or_retirement();
             acc.process = None;
             accounts.remove(account_id);
         }
@@ -2478,6 +2676,7 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
                 health_observer: crate::health_observer::HealthObserver::new(),
                 reconnect_observer: crate::reconnect_observer::ReconnectObserver::new(),
                 game_loop_watchdog: crate::game_loop_watchdog::GameLoopWatchdog::default(),
+                logical_watchdog: crate::logical_reconnect_watchdog::LogicalReconnectWatchdog::default(),
             };
             (id, state)
         })
@@ -2521,6 +2720,7 @@ fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountS
         health_observer: crate::health_observer::HealthObserver::new(),
         reconnect_observer: crate::reconnect_observer::ReconnectObserver::new(),
         game_loop_watchdog: crate::game_loop_watchdog::GameLoopWatchdog::default(),
+        logical_watchdog: crate::logical_reconnect_watchdog::LogicalReconnectWatchdog::default(),
     })
 }
 
