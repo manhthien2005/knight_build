@@ -154,6 +154,7 @@ public class DungeonStateMachineTest {
 
         // Step 2: Confirmation dialog
         ah confirmDialog = new ah();
+        confirmDialog.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
         bt yesBtn = new bt("Có", 1);
         bt noBtn = new bt("Không", 2);
         confirmDialog.C.a(yesBtn);
@@ -1428,22 +1429,28 @@ public class DungeonStateMachineTest {
         fu.p.a = false;
         setFrG(fu.p, null);
 
-        // 47.1: Baseline Failure Proof - Real native ah button in fu.t has bt.d == null.
-        // Calling bt.a() with coexisting broadcast in fu.s diverts to fu.s.b() without sending Opcode 23.
-        // Contract requirement: findGiaoTiepInDialog must reject bt.d == null as invalid command.
+        // 47.1: Native fu.s Giao tiep button with d == null remains actionable
+        // Working V2 scans current fu.s dialog and returns matching Giao tiếp buttons
+        // regardless of whether bt.d is null, since bt.a() natively dispatches via fu.s.b().
         Method mFindGiaoTiep = Zeus.class.getDeclaredMethod("findGiaoTiepInDialog", da.class);
         mFindGiaoTiep.setAccessible(true);
 
-        ah nativeAhPlayerDialog = new ah();
-        nativeAhPlayerDialog.C = new et("playerContext");
-        bt nativeAhBtnNoTarget = new bt("Giao tiếp", 4); // bt.d is NULL in native ah.java:555
-        nativeAhPlayerDialog.C.a(nativeAhBtnNoTarget);
-        nativeAhPlayerDialog.C.a(new bt("Đóng", 8));
-        fu.t = nativeAhPlayerDialog;
-        fu.s = makeBroadcastPopup("Server Announcement");
+        ah nativeAhDialog = new ah();
+        nativeAhDialog.C = new et("dialogButtons");
+        bt nativeAhBtnNoTarget = new bt("Giao tiếp", 4); // bt.d is NULL in native ah dialogs
+        nativeAhDialog.C.a(nativeAhBtnNoTarget);
+        nativeAhDialog.C.a(new bt("Đóng", 8));
+        fu.s = nativeAhDialog;
+        fu.t = null;
+        fu.T = true;
 
-        Object rejectedBtn = mFindGiaoTiep.invoke(null, nativeAhPlayerDialog);
-        check("Exact Parity: Native ah button with bt.d == null is rejected", rejectedBtn == null);
+        Object foundBtn = mFindGiaoTiep.invoke(null, nativeAhDialog);
+        check("Exact Parity: Native fu.s button with bt.d == null is returned", foundBtn == nativeAhBtnNoTarget);
+        check("Exact Parity: Found button has d == null", foundBtn != null && ((bt) foundBtn).d == null);
+        if (foundBtn != null) {
+            ((bt) foundBtn).a();
+            check("Exact Parity: Native bt.a() with d == null dispatches to current dialog fu.s.b() resetting fu.T", !fu.T);
+        }
 
         // 47.2: Exact Native fu.p First Dialog Contract with active broadcast
         // When Pho Chi Huy conversation opens natively in fu.p, bt.d is the NPC (ez/bm).
@@ -1821,6 +1828,96 @@ public class DungeonStateMachineTest {
                 getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
         check("Test 56: Broadcast popup in fu.s preserved and unmodified", fu.s == broadcast56);
         check("Test 56: Step advanced to 2", ((Integer) get("dungeonStep")).intValue() == 2);
+
+        // ---------------------------------------------------------------------
+        // Test 57: Blank Ambiguous Modal After Ngã Tư Submenu Fails Closed
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 57: Blank Ambiguous Modal After Ngã Tư Submenu Fails Closed ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 2); // Submenu already picked, waiting for confirmation or teleport
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+
+        final boolean[] blankModalActionClicked = new boolean[1];
+        ah blankModal57 = new ah();
+        // empty/no dialog text
+        blankModal57.q = new String[] { "" };
+        blankModal57.C = new et("buttons");
+        blankModal57.C.a(new bt("Đồng ý", 1, new cg() {
+            public void a(int e, int f) {
+                blankModalActionClicked[0] = true;
+            }
+        }));
+        blankModal57.C.a(new bt("Hủy", 2));
+        fu.s = blankModal57;
+
+        // Tick repeatedly to let bounded retry policy run
+        for (int i = 0; i < 4; i++) {
+            call("dungeonInteract");
+        }
+
+        check("Test 57: Blank ambiguous modal callback NEVER invoked (fail-closed)", !blankModalActionClicked[0]);
+        check("Test 57: Blank ambiguous modal remains unconfirmed in fu.s", fu.s == blankModal57);
+        check("Test 57: State transitioned to DN_MANUAL_REVIEW on persistent blank modal",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_MANUAL_REVIEW);
+        check("Test 57: dungeonWhy set to 5", ((Integer) get("dungeonWhy")).intValue() == 5);
+
+        // ---------------------------------------------------------------------
+        // Test 58: Current fu.s Giao Tiếp Button with d == null Dispatches Native Callback
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 58: Current fu.s Giao Tiếp Button with d == null Dispatches Native Callback ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+        fu.p.a = false;
+        setFrG(fu.p, null);
+
+        ah speechAh58 = new ah();
+        speechAh58.C = new et("dialogButtons");
+        bt giaoTiepBtn58 = new bt("Giao tiếp", 4); // bt.d is NULL
+        speechAh58.C.a(giaoTiepBtn58);
+        speechAh58.C.a(new bt("Đóng", 8));
+        fu.s = speechAh58;
+        fu.T = true;
+
+        call("dungeonInteract");
+        check("Test 58: Giao tiếp with d == null in fu.s dispatches native bt.a() -> fu.s.b() resetting fu.T", !fu.T);
+        check("Test 58: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
+        check("Test 58: Wait cooldown armed (60)", ((Integer) get("dungeonWait")).intValue() == 60);
+
+        // ---------------------------------------------------------------------
+        // Test 59: Real Dungeon Confirmation Remains Optional and Functional
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 59: Real Dungeon Confirmation Remains Optional and Functional ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 2);
+        set("dungeonWait", 60);
+        fu.q.d = 1;
+
+        final boolean[] realConfirmClicked = new boolean[1];
+        ah realConfirm59 = new ah();
+        realConfirm59.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
+        realConfirm59.C = new et("buttons");
+        realConfirm59.C.a(new bt("Vào", 1, new cg() {
+            public void a(int e, int f) {
+                realConfirmClicked[0] = true;
+            }
+        }));
+        realConfirm59.C.a(new bt("Không", 2));
+        fu.s = realConfirm59;
+
+        call("dungeonInteract");
+        check("Test 59: Real dungeon confirmation confirmed via affirmative button", realConfirmClicked[0]);
+        check("Test 59: State advanced to Step 3 waiting for teleport", ((Integer) get("dungeonStep")).intValue() == 3);
+        check("Test 59: Teleport wait budget armed (80)", ((Integer) get("dungeonWait")).intValue() == 80);
 
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);

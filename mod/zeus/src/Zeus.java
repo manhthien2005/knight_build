@@ -6902,9 +6902,7 @@ public final class Zeus {
                         Object entry = buttons.a(i);
                         if (entry instanceof bt) {
                             bt btn = (bt) entry;
-                            // Critical: Reject buttons where btn.d == null because native bt.a()
-                            // diverts to fu.s.b() when fu.s != null! Only genuine buttons with a callback target are actionable.
-                            if (btn.a != null && btn.d != null) {
+                            if (btn.a != null) {
                                 String s = norm(btn.a);
                                 if (s.indexOf("giao tiep") >= 0 && s.indexOf("giao dich") < 0) {
                                     return btn;
@@ -7746,9 +7744,7 @@ public final class Zeus {
         }
 
         // 1. Reactive check: Valid confirmation dialog in fu.s (optional; direct teleport also succeeds)
-        boolean isExpectedConfirm = isDungeonConfirmDialog(fu.s);
-        boolean isTestConfirmWithoutText = (dungeonStep >= 2 && fu.s instanceof ah && norm(dialogText(fu.s)).length() == 0 && fu.s != null && ((ah) fu.s).C != null && ((ah) fu.s).C.c() > 0);
-        if (isExpectedConfirm || isTestConfirmWithoutText) {
+        if (isDungeonConfirmDialog(fu.s)) {
             if (!dungeonConfirmDialog(fu.s)) {
                 if (++dungeonTried >= DN_MAX_TRIES) {
                     dungeonStop(2, "could not confirm dungeon entry dialog");
