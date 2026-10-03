@@ -83,11 +83,14 @@ public final class Zeus {
 
     /** Called at the end of fu.b() every tick. */
     public static void tick() {
+        healthSidecarTick();
+        reconnectStatusSidecarTick();
         if (fu.a == null) {
             sessionReset();
             return;
         }
         sessionTick();
+        reconnectSupervisorTick();
         auth();
         control();
         dialogRecovery();
@@ -251,6 +254,8 @@ public final class Zeus {
     private static final String ENH_REQ_FILE = "zeus-enhance.req";
     private static final String ENH_STATUS_FILE = "zeus-enhance-status.json";
     private static final String ENH_CANCEL_FILE = "zeus-enhance.cancel";
+    private static final String HEALTH_FILE = "zeus-health.txt";
+    private static final String RECONNECT_STATUS_FILE = "zeus-reconnect.txt";
 
     /**
      * Derived paths for the two above, declared here for a sharper reason: a static field with an
@@ -269,6 +274,12 @@ public final class Zeus {
     private static String enhReqPath;
     private static String enhStatusPath;
     private static String enhCancelPath;
+    private static String healthPath;
+    private static long lastHealthPublishedAt = 0L;
+    private static long healthSeq = 0L;
+    private static String reconnectStatusPath;
+    private static long lastReconnectStatusPublishedAt = 0L;
+    private static long reconnectStatusSeq = 0L;
     private static long lastInventoryHash = Long.MIN_VALUE;
     private static boolean inventoryWritten = false;
 
@@ -1048,6 +1059,12 @@ public final class Zeus {
             enhReqPath = home + ENH_REQ_FILE;
             enhStatusPath = home + ENH_STATUS_FILE;
             enhCancelPath = home + ENH_CANCEL_FILE;
+            healthPath = home + HEALTH_FILE;
+            reconnectStatusPath = home + RECONNECT_STATUS_FILE;
+        }
+        String explicitHealth = System.getProperty("zeus.health.out");
+        if (explicitHealth != null && explicitHealth.trim().length() > 0) {
+            healthPath = explicitHealth.trim();
         }
         writeEveryMs = (long) intProp("zeus.player.writeMs", 1000);
         if (writeEveryMs < 200L) {
@@ -3265,6 +3282,175 @@ public final class Zeus {
         }
     }
 
+    // ---- HEALTH SIDECAR (R1A) ------------------------------------------------
+    /**
+     * Observational runtime health sidecar (zeus-health.txt, contract v1).
+     * Proves game-loop progress across login/reconnect states even when fu.a == null or cn.g == null.
+     * Publishes ~1000ms cadence against dx.a() to zeus-health.txt via temp file and atomic replace.
+     */
+    private static void healthSidecarTick() {
+        try {
+            if (healthPath == null) {
+                return;
+            }
+            long now = dx.a();
+            if (now < lastHealthPublishedAt) {
+                // Defensive wall-clock rollback handling
+                lastHealthPublishedAt = now;
+            }
+            if (now - lastHealthPublishedAt < 1000L) {
+                return;
+            }
+            lastHealthPublishedAt = now;
+            healthSeq++;
+
+            String screen;
+            if (fu.a == null) {
+                screen = "none";
+            } else if (fu.a == fu.b && fu.t == fu.g) {
+                screen = "server";
+            } else if (fu.a == fu.b) {
+                screen = "login";
+            } else if (fu.a == fu.i) {
+                screen = "character";
+            } else if (fu.a == fu.c) {
+                screen = "world";
+            } else {
+                screen = "other";
+            }
+
+            int dialog = fu.s != null ? 1 : 0;
+            int disconnect = bv.a ? 1 : 0;
+
+            StringBuffer sb = new StringBuffer(128);
+            sb.append("v=1\n");
+            sb.append("t=").append(now).append('\n');
+            sb.append("seq=").append(healthSeq).append('\n');
+            sb.append("screen=").append(screen).append('\n');
+            sb.append("dialog=").append(dialog).append('\n');
+            sb.append("disconnect=").append(disconnect).append('\n');
+
+            writeHealth(sb.toString());
+        } catch (Throwable t) {
+            // Fail silent: health publishing must never stall the client tick.
+        }
+    }
+
+    private static void writeHealth(String body) {
+        if (healthPath == null) {
+            return;
+        }
+        java.io.OutputStream stream = null;
+        try {
+            java.io.File target = new java.io.File(healthPath);
+            java.io.File temp = new java.io.File(healthPath + ".tmp");
+            stream = new java.io.FileOutputStream(temp);
+            stream.write(body.getBytes("UTF-8"));
+            stream.close();
+            stream = null;
+            if (target.exists() && !target.delete()) {
+                return;
+            }
+            temp.renameTo(target);
+        } catch (Throwable t) {
+            // Fail silent
+        } finally {
+            if (stream != null) {
+                try {
+                    stream.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    /**
+     * Observational reconnect status sidecar (zeus-reconnect.txt, contract v1).
+     * Publishes ~1000ms cadence against dx.a() to zeus-reconnect.txt via temp file and atomic replace.
+     * Strictly observe-only: zero mutations to reconnect state machine or game loop.
+     */
+    private static void reconnectStatusSidecarTick() {
+        try {
+            if (reconnectStatusPath == null) {
+                return;
+            }
+            long now = dx.a();
+            if (now < lastReconnectStatusPublishedAt) {
+                // Defensive wall-clock rollback handling
+                lastReconnectStatusPublishedAt = now;
+            }
+            if (now - lastReconnectStatusPublishedAt < 1000L) {
+                return;
+            }
+            lastReconnectStatusPublishedAt = now;
+            reconnectStatusSeq++;
+
+            int active;
+            String stateStr;
+            int worldBefore;
+            if (!reconnectEpisodeActive) {
+                active = 0;
+                stateStr = "idle";
+                worldBefore = 0;
+            } else {
+                active = 1;
+                switch (reconnectState) {
+                    case RC_NATIVE_WAIT: stateStr = "native_wait"; break;
+                    case RC_LOGIN: stateStr = "login"; break;
+                    case RC_SERVER: stateStr = "server"; break;
+                    case RC_CHARACTER: stateStr = "character"; break;
+                    case RC_LOADING: stateStr = "loading"; break;
+                    case RC_WORLD_SETTLE: stateStr = "world_settle"; break;
+                    case RC_OTHER: stateStr = "other"; break;
+                    default: stateStr = "other"; break;
+                }
+                worldBefore = reconnectWorldSeenBeforeEpisode ? 1 : 0;
+            }
+
+            StringBuffer sb = new StringBuffer(128);
+            sb.append("v=1\n");
+            sb.append("t=").append(now).append('\n');
+            sb.append("seq=").append(reconnectStatusSeq).append('\n');
+            sb.append("episode=").append(reconnectEpisodeId).append('\n');
+            sb.append("active=").append(active).append('\n');
+            sb.append("state=").append(stateStr).append('\n');
+            sb.append("transitions=").append(reconnectTransitions).append('\n');
+            sb.append("world_before=").append(worldBefore).append('\n');
+
+            writeReconnectStatus(sb.toString());
+        } catch (Throwable t) {
+            // Fail silent: status publishing must never stall the client tick.
+        }
+    }
+
+    private static void writeReconnectStatus(String body) {
+        if (reconnectStatusPath == null) {
+            return;
+        }
+        java.io.OutputStream stream = null;
+        try {
+            java.io.File target = new java.io.File(reconnectStatusPath);
+            java.io.File temp = new java.io.File(reconnectStatusPath + ".tmp");
+            stream = new java.io.FileOutputStream(temp);
+            stream.write(body.getBytes("UTF-8"));
+            stream.close();
+            stream = null;
+            if (target.exists() && !target.delete()) {
+                return;
+            }
+            temp.renameTo(target);
+        } catch (Throwable t) {
+            // Fail silent
+        } finally {
+            if (stream != null) {
+                try {
+                    stream.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
     // ---- INVENTORY TELEMETRY (ENHANCE-01) -------------------------------------
     /**
      * Serializes the current bag inventory (bw.V) in stable slot order.
@@ -3538,6 +3724,550 @@ public final class Zeus {
             mapStableReset();
         }
     }
+
+    // ---- RECONNECT (R2A OBSERVE-ONLY SUPERVISOR) ------------------------------
+    // Models reconnect episodes and native lifecycle transitions before recovery actions are authorized.
+    // R2A strictly observes and traces: no dialog dismissal, no login packets, no field mutations.
+
+    public static final int RC_IDLE = 0;
+    public static final int RC_NATIVE_WAIT = 1;
+    public static final int RC_LOGIN = 2;
+    public static final int RC_SERVER = 3;
+    public static final int RC_CHARACTER = 4;
+    public static final int RC_WORLD_SETTLE = 5;
+    public static final int RC_OTHER = 6;
+    public static final int RC_LOADING = 7;
+
+    private static boolean reconnectEpisodeActive = false;
+    private static int reconnectState = RC_IDLE;
+    private static long reconnectStartedAt = 0L;
+    private static long reconnectStateSince = 0L;
+    private static int reconnectEpisodeId = 0;
+    private static int reconnectTransitions = 0;
+    private static boolean reconnectEverStableWorldSeen = false;
+    private static boolean reconnectWorldSeenBeforeEpisode = false;
+    private static String reconnectLastReason = "";
+
+    // R2B1: Bounded Native Dialog Fallback Recovery Policy
+    private static final long RC_RECOVERY_COOLDOWN_MS = 5000L;
+    private static final int RC_RECOVERY_MAX_ACTIONS = 4;
+    private static final long RC_RECOVERY_BACKOFF_MS = 600000L;
+    private static final long RC_NATIVE_GRACE_MS = 5000L;
+    private static final long RC_STATE_DWELL_MS = 5000L;
+
+    private static int reconnectRecoveryAttempts = 0;
+    private static long reconnectRecoveryLastActionAt = 0L;
+    private static long reconnectRecoveryBackoffUntil = 0L;
+    private static String reconnectRecoveryLastFingerprint = "";
+
+    // R2B2: Bounded Native Login Recovery Policy
+    public static final long RC_LOGIN_DWELL_MS = 5000L;
+    public static final long RC_LOGIN_RETRY_INTERVAL_MS = 30000L;
+    public static final int RC_LOGIN_MAX_ACTIONS = 3;
+    public static final long RC_LOGIN_BACKOFF_MS = 600000L;
+
+    private static int reconnectLoginAttempts = 0;
+    private static long reconnectLoginLastActionAt = 0L;
+    private static long reconnectLoginBackoffUntil = 0L;
+    private static String reconnectLoginLastFingerprint = "";
+
+    public static boolean isReconnectEpisodeActive() {
+        return reconnectEpisodeActive;
+    }
+
+    public static int getReconnectState() {
+        return reconnectState;
+    }
+
+    public static int getReconnectEpisodeId() {
+        return reconnectEpisodeId;
+    }
+
+    public static int getReconnectTransitions() {
+        return reconnectTransitions;
+    }
+
+    public static boolean isReconnectEverStableWorldSeen() {
+        return reconnectEverStableWorldSeen;
+    }
+
+    public static boolean isReconnectWorldSeenBeforeEpisode() {
+        return reconnectWorldSeenBeforeEpisode;
+    }
+
+    public static String getReconnectLastReason() {
+        return reconnectLastReason;
+    }
+
+    public static int getReconnectRecoveryAttempts() {
+        return reconnectRecoveryAttempts;
+    }
+
+    public static long getReconnectRecoveryLastActionAt() {
+        return reconnectRecoveryLastActionAt;
+    }
+
+    public static long getReconnectRecoveryBackoffUntil() {
+        return reconnectRecoveryBackoffUntil;
+    }
+
+    public static String getReconnectRecoveryLastFingerprint() {
+        return reconnectRecoveryLastFingerprint;
+    }
+
+    public static int getReconnectLoginAttempts() {
+        return reconnectLoginAttempts;
+    }
+
+    public static long getReconnectLoginLastActionAt() {
+        return reconnectLoginLastActionAt;
+    }
+
+    public static long getReconnectLoginBackoffUntil() {
+        return reconnectLoginBackoffUntil;
+    }
+
+    public static String getReconnectLoginLastFingerprint() {
+        return reconnectLoginLastFingerprint;
+    }
+
+    private static String stateName(int state) {
+        switch (state) {
+            case RC_IDLE: return "RC_IDLE";
+            case RC_NATIVE_WAIT: return "RC_NATIVE_WAIT";
+            case RC_LOGIN: return "RC_LOGIN";
+            case RC_SERVER: return "RC_SERVER";
+            case RC_CHARACTER: return "RC_CHARACTER";
+            case RC_WORLD_SETTLE: return "RC_WORLD_SETTLE";
+            case RC_OTHER: return "RC_OTHER";
+            case RC_LOADING: return "RC_LOADING";
+            default: return "RC_UNKNOWN(" + state + ")";
+        }
+    }
+
+    /**
+     * Conservative observer-only classifier for strong transport/disconnect evidence.
+     * Evaluates bv.a and strongly recognized disconnect phrases in modal dialogs.
+     */
+    private static String detectStrongDisconnectReason() {
+        if (bv.a) {
+            return "NATIVE_BV_A";
+        }
+        if (fu.s != null && (fu.s instanceof ah)) {
+            String text = norm(dialogText(fu.s));
+            if (text.indexOf("mat ket noi") >= 0) {
+                return "MODAL_DISCONNECT_MAT_KET_NOI";
+            }
+            if (text.indexOf("ket noi that bai") >= 0) {
+                return "MODAL_DISCONNECT_KET_NOI_THAT_BAI";
+            }
+            if (text.indexOf("vui long dang nhap lai") >= 0) {
+                return "MODAL_DISCONNECT_VUI_LONG_DANG_NHAP_LAI";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Inspects a live ah modal dialog and finds the exact reconnect OK button.
+     * Candidate must be a bt object, candidate command id bt.e must equal 0,
+     * and candidate caption must normalize to an explicitly OK-like caption ("ok" or "o k").
+     * Returns null if no exact command can be proven.
+     */
+    private static bt findReconnectOkButton(ah dialog) {
+        if (dialog == null) {
+            return null;
+        }
+        et buttons = dialog.C;
+        if (buttons == null) {
+            return null;
+        }
+        for (int i = 0; i < buttons.c(); i++) {
+            Object obj = buttons.a(i);
+            if (obj instanceof bt) {
+                bt btn = (bt) obj;
+                if (btn.e == 0) {
+                    String cap = norm(btn.a).trim();
+                    if (cap.equals("ok") || cap.equals("o k")) {
+                        return btn;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Evaluates and executes the bounded native reconnect fallback action.
+     * Guaranteed to only be called when reconnectEpisodeActive == true,
+     * reconnectState == RC_NATIVE_WAIT, and reconnectWorldSeenBeforeEpisode == true.
+     */
+    private static void evaluateReconnectRecoveryAction(long now) {
+        if (fu.s == null || !(fu.s instanceof ah)) {
+            return;
+        }
+        ah dialog = (ah) fu.s;
+        String rawText = dialogText(dialog);
+        String text = norm(rawText);
+
+        // Fail closed unless proven disconnect modal
+        boolean isProvenDisconnect = (text.indexOf("mat ket noi") >= 0
+                || text.indexOf("ket noi that bai") >= 0
+                || text.indexOf("vui long dang nhap lai") >= 0);
+        if (!isProvenDisconnect) {
+            return;
+        }
+        // In-progress connecting or wait dialogs must fail closed
+        if (text.indexOf("dang ket noi") >= 0 || text.indexOf("vui long cho") >= 0
+                || text.indexOf("cho ket noi") >= 0) {
+            return;
+        }
+
+        bt okBtn = findReconnectOkButton(dialog);
+        if (okBtn == null) {
+            return;
+        }
+
+        // Native deadline & grace policy: wait for native bv.b deadline + 5000 ms grace
+        if (bv.a && bv.b > 0L) {
+            if (now < bv.b + RC_NATIVE_GRACE_MS) {
+                return;
+            }
+        }
+
+        // Require current RC_NATIVE_WAIT state to have dwelled for at least RC_STATE_DWELL_MS (5000 ms)
+        long dwell = (now >= reconnectStateSince) ? (now - reconnectStateSince) : 0L;
+        if (dwell < RC_STATE_DWELL_MS) {
+            return;
+        }
+
+        // Cooldown check (5000 ms)
+        if (reconnectRecoveryLastActionAt > 0L) {
+            long elapsed = (now >= reconnectRecoveryLastActionAt) ? (now - reconnectRecoveryLastActionAt) : -1L;
+            if (elapsed < RC_RECOVERY_COOLDOWN_MS) {
+                return;
+            }
+        }
+
+        // Backoff check (600000 ms after 4 actions)
+        if (reconnectRecoveryBackoffUntil > 0L) {
+            if (now < reconnectRecoveryBackoffUntil) {
+                return;
+            } else {
+                // Backoff expired; reset attempts for another bounded cycle
+                reconnectRecoveryBackoffUntil = 0L;
+                reconnectRecoveryAttempts = 0;
+            }
+        }
+
+        // Final live dialog and button revalidation before accounting and dispatch
+        if (fu.s != dialog || !(fu.s instanceof ah)) {
+            return;
+        }
+        ah liveDialog = (ah) fu.s;
+        String liveRawText = dialogText(liveDialog);
+        String liveText = norm(liveRawText);
+        boolean liveProvenDisconnect = (liveText.indexOf("mat ket noi") >= 0
+                || liveText.indexOf("ket noi that bai") >= 0
+                || liveText.indexOf("vui long dang nhap lai") >= 0);
+        if (!liveProvenDisconnect) {
+            return;
+        }
+        if (liveText.indexOf("dang ket noi") >= 0 || liveText.indexOf("vui long cho") >= 0
+                || liveText.indexOf("cho ket noi") >= 0) {
+            return;
+        }
+        bt liveOkBtn = findReconnectOkButton(liveDialog);
+        if (liveOkBtn == null || liveOkBtn != okBtn) {
+            return;
+        }
+
+        // Diagnostics fingerprint (deduplicated tracing)
+        et btns = liveDialog.C;
+        int btnCount = (btns != null) ? btns.c() : 0;
+        reconnectRecoveryLastFingerprint = liveText + "|" + btnCount + "|" + okBtn.e + ":" + norm(okBtn.a).trim();
+
+        // Increment and arm action accounting BEFORE dispatch (mandatory ordering)
+        reconnectRecoveryAttempts++;
+        reconnectRecoveryLastActionAt = now;
+        if (reconnectRecoveryAttempts >= RC_RECOVERY_MAX_ACTIONS) {
+            reconnectRecoveryBackoffUntil = now + RC_RECOVERY_BACKOFF_MS;
+        }
+
+        trace("RECONNECT recovery action try=" + reconnectRecoveryAttempts
+                + " max=" + RC_RECOVERY_MAX_ACTIONS
+                + " btn=" + clean(okBtn.a)
+                + " cmd=" + okBtn.e
+                + (reconnectRecoveryBackoffUntil > 0L ? " backoffMs=" + RC_RECOVERY_BACKOFF_MS : ""));
+
+        // Dispatch exact live native OK command
+        okBtn.a();
+    }
+
+    /**
+     * Evaluates and executes the bounded native LoginScreen recovery action.
+     * Guaranteed to only be called when reconnectEpisodeActive == true,
+     * reconnectWorldSeenBeforeEpisode == true, and reconnectState == RC_LOGIN.
+     */
+    private static void evaluateReconnectLoginAction(long now) {
+        if (!reconnectEpisodeActive || !reconnectWorldSeenBeforeEpisode || reconnectState != RC_LOGIN) {
+            return;
+        }
+        if (detectStrongDisconnectReason() != null) {
+            return;
+        }
+
+        // Clean UI routing checks
+        if (fu.a == null || fu.a != fu.b || fu.b == null) {
+            return;
+        }
+        if (fu.s != null || fu.t != null) {
+            return;
+        }
+        if (fu.p == null || fu.p.a) {
+            return;
+        }
+        if (d.b) {
+            return;
+        }
+
+        // Live center command slot check
+        bt loginBtn = fu.b.ab;
+        if (loginBtn == null || loginBtn.e != 0 || loginBtn.a == null) {
+            return;
+        }
+        String caption = norm(loginBtn.a).trim();
+        if (!caption.equals("choi tiep")) {
+            return;
+        }
+
+        // Normal textbox credentials check (bs.g is username, bs.h is password)
+        if (bs.g == null || bs.h == null) {
+            return;
+        }
+        String user = bs.g.j();
+        String pass = bs.h.j();
+        if (user == null || user.trim().length() == 0 || pass == null || pass.trim().length() == 0) {
+            // Special credential mode or empty normal fields: FAIL_CLOSED
+            return;
+        }
+
+        // Dwell time: RC_LOGIN must have dwelled for at least RC_LOGIN_DWELL_MS (5000 ms)
+        long dwell = (now >= reconnectStateSince) ? (now - reconnectStateSince) : 0L;
+        if (dwell < RC_LOGIN_DWELL_MS) {
+            return;
+        }
+
+        // Backoff check: 10 minutes (600000 ms) after 3 actions
+        if (reconnectLoginBackoffUntil > 0L) {
+            if (now < reconnectLoginBackoffUntil) {
+                return;
+            } else {
+                // Backoff expired; reset attempts for another bounded cycle
+                reconnectLoginBackoffUntil = 0L;
+                reconnectLoginAttempts = 0;
+            }
+        }
+
+        // Cooldown / retry interval check: at least 30000 ms between actions
+        if (reconnectLoginLastActionAt > 0L) {
+            long elapsed = (now >= reconnectLoginLastActionAt) ? (now - reconnectLoginLastActionAt) : -1L;
+            if (elapsed < RC_LOGIN_RETRY_INTERVAL_MS) {
+                return;
+            }
+        }
+
+        // Final complete live LoginScreen routing and credential revalidation before accounting and dispatch
+        if (fu.a != fu.b || fu.b == null || fu.s != null || fu.t != null
+                || fu.p == null || fu.p.a || d.b
+                || fu.b.ab != loginBtn || loginBtn.e != 0 || loginBtn.a == null
+                || !norm(loginBtn.a).trim().equals("choi tiep")
+                || bs.g == null || bs.h == null) {
+            return;
+        }
+        String liveUser = bs.g.j();
+        String livePass = bs.h.j();
+        if (liveUser == null || liveUser.trim().length() == 0
+                || livePass == null || livePass.trim().length() == 0) {
+            return;
+        }
+
+        // Deduplicated diagnostics fingerprint (non-sensitive action identity only: no username/password)
+        reconnectLoginLastFingerprint = caption + "|" + loginBtn.e;
+
+        // Action accounting MUST be armed before loginBtn.a() dispatch
+        reconnectLoginAttempts++;
+        reconnectLoginLastActionAt = now;
+        if (reconnectLoginAttempts >= RC_LOGIN_MAX_ACTIONS) {
+            reconnectLoginBackoffUntil = now + RC_LOGIN_BACKOFF_MS;
+        }
+
+        trace("RECONNECT login action try=" + reconnectLoginAttempts
+                + " max=" + RC_LOGIN_MAX_ACTIONS
+                + " btn=" + clean(loginBtn.a)
+                + " cmd=" + loginBtn.e
+                + (reconnectLoginBackoffUntil > 0L ? " backoffMs=" + RC_LOGIN_BACKOFF_MS : ""));
+
+        loginBtn.a();
+    }
+
+    /**
+     * Authoritative world readiness predicate for reconnect lifecycle.
+     * Evaluates map stability and existence of authoritative player object.
+     * Does NOT require alive(), absence of captcha, or absence of non-disconnect dialog.
+     */
+    private static boolean reconnectWorldReady() {
+        return fu.a == fu.c && cn.g != null && mapStable();
+    }
+
+    /**
+     * Ticked from tick() after sessionTick() and before auth().
+     * A transient fu.a == null pauses observation without resetting the active episode.
+     */
+    private static void reconnectSupervisorTick() {
+        try {
+            long now = dx.a();
+
+            // Clock rollback defensive re-anchor
+            if (now < reconnectStartedAt) {
+                reconnectStartedAt = now;
+            }
+            if (now < reconnectStateSince) {
+                reconnectStateSince = now;
+            }
+            if (now < reconnectRecoveryLastActionAt) {
+                if (reconnectRecoveryBackoffUntil > reconnectRecoveryLastActionAt) {
+                    reconnectRecoveryBackoffUntil = now + RC_RECOVERY_BACKOFF_MS;
+                }
+                reconnectRecoveryLastActionAt = now;
+            }
+            if (now < reconnectLoginLastActionAt) {
+                if (reconnectLoginBackoffUntil > reconnectLoginLastActionAt) {
+                    reconnectLoginBackoffUntil = now + RC_LOGIN_BACKOFF_MS;
+                }
+                reconnectLoginLastActionAt = now;
+            }
+
+            // Normal prior stable gameplay sets reconnectEverStableWorldSeen when no episode is active
+            if (!reconnectEpisodeActive && reconnectWorldReady()) {
+                reconnectEverStableWorldSeen = true;
+            }
+
+            String reason = detectStrongDisconnectReason();
+            boolean strongDisconnect = (reason != null);
+
+            // EPISODE OPENING RULE
+            if (!reconnectEpisodeActive) {
+                if (strongDisconnect) {
+                    reconnectEpisodeActive = true;
+                    reconnectEpisodeId++;
+                    reconnectStartedAt = now;
+                    reconnectStateSince = now;
+                    reconnectState = RC_NATIVE_WAIT;
+                    reconnectTransitions = 0;
+                    // R2A-S2: snapshot immutable copy from reconnectEverStableWorldSeen exactly once at open
+                    reconnectWorldSeenBeforeEpisode = reconnectEverStableWorldSeen;
+                    reconnectLastReason = reason;
+
+                    // R2B1: reset per-episode recovery state
+                    reconnectRecoveryAttempts = 0;
+                    reconnectRecoveryBackoffUntil = 0L;
+                    reconnectRecoveryLastFingerprint = "";
+
+                    // R2B2: reset per-episode login state
+                    reconnectLoginAttempts = 0;
+                    reconnectLoginLastActionAt = 0L;
+                    reconnectLoginBackoffUntil = 0L;
+                    reconnectLoginLastFingerprint = "";
+
+                    trace("RECONNECT episode open id=" + reconnectEpisodeId
+                            + " reason=" + reason
+                            + " worldSeenBefore=" + reconnectWorldSeenBeforeEpisode);
+                }
+                return;
+            }
+
+            // ACTIVE EPISODE HANDLING
+            if (fu.a == null) {
+                // Transient null-screen pauses observation; does NOT reset episode
+                return;
+            }
+
+            // SUCCESSFUL CLOSE RULE (R2A-S1 & R2A-S3 & R2C):
+            // An active episode is successful only when strongDisconnect is false AND reconnectWorldReady().
+            // strongDisconnect strictly outranks screen readiness and prevents successful close.
+            if (!strongDisconnect && reconnectWorldReady()) {
+                reconnectEverStableWorldSeen = true;
+                if (reconnectState != RC_IDLE) {
+                    reconnectTransitions++;
+                }
+                long duration = (now >= reconnectStartedAt) ? (now - reconnectStartedAt) : 0L;
+                trace("RECONNECT episode close id=" + reconnectEpisodeId
+                        + " status=SUCCESS durationMs=" + duration
+                        + " transitions=" + reconnectTransitions);
+                reconnectEpisodeActive = false;
+                reconnectState = RC_IDLE;
+                reconnectStateSince = now;
+                reconnectLastReason = "";
+
+                // R2B1: reset per-episode recovery state on successful close
+                reconnectRecoveryAttempts = 0;
+                reconnectRecoveryBackoffUntil = 0L;
+                reconnectRecoveryLastFingerprint = "";
+
+                // R2B2: reset per-episode login state on successful close
+                reconnectLoginAttempts = 0;
+                reconnectLoginLastActionAt = 0L;
+                reconnectLoginBackoffUntil = 0L;
+                reconnectLoginLastFingerprint = "";
+                return;
+            }
+
+            // DERIVE STATE FOR ACTIVE EPISODE
+            int targetState;
+            if (strongDisconnect) {
+                targetState = RC_NATIVE_WAIT;
+            } else if (fu.a == fu.d) {
+                targetState = RC_LOADING;
+            } else if (fu.a == fu.b && fu.t == fu.g) {
+                targetState = RC_SERVER;
+            } else if (fu.a == fu.b) {
+                targetState = RC_LOGIN;
+            } else if (fu.a == fu.i) {
+                targetState = RC_CHARACTER;
+            } else if (fu.a == fu.c) {
+                targetState = RC_WORLD_SETTLE;
+            } else {
+                targetState = RC_OTHER;
+            }
+
+            if (targetState != reconnectState) {
+                int oldState = reconnectState;
+                reconnectState = targetState;
+                reconnectStateSince = now;
+                reconnectTransitions++;
+                trace("RECONNECT transition id=" + reconnectEpisodeId
+                        + " from=" + stateName(oldState)
+                        + " to=" + stateName(targetState)
+                        + " count=" + reconnectTransitions);
+            }
+
+            // R2B1: BOUNDED NATIVE RECOVERY ACTION
+            // Action is only authorized when reconnectState == RC_NATIVE_WAIT and reconnectWorldSeenBeforeEpisode == true
+            if (reconnectState == RC_NATIVE_WAIT && reconnectWorldSeenBeforeEpisode) {
+                evaluateReconnectRecoveryAction(now);
+            }
+
+            // R2B2: BOUNDED NATIVE LOGIN RECOVERY ACTION
+            // Action is only authorized when reconnectState == RC_LOGIN and reconnectWorldSeenBeforeEpisode == true
+            if (reconnectState == RC_LOGIN && reconnectWorldSeenBeforeEpisode) {
+                evaluateReconnectLoginAction(now);
+            }
+        } catch (Throwable t) {
+            // Fail silent: supervisor observation must never stall client tick
+        }
+    }
+    // ---- end RECONNECT --------------------------------------------------------
 
     /**
      * Strict allowlist for harmless informational server notices and announcements.

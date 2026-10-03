@@ -30,6 +30,20 @@ pub use crate::control::{clear_settings, control_path, parse_settings, read_sett
 // disagree about the key set cannot quietly agree on a wrong value.
 pub use crate::player::{clear_snapshot, parse_snapshot, read_snapshot, snapshot_path};
 
+// ── health: jar → driver ──────────────────────────────────────────────────────────
+//
+// `zeus-health.txt`, 6 keys, `HEALTH_VERSION 1`. `read_health` returns `Ok(None)` when the mod
+// has not published yet. Anything present but malformed is an `Err`.
+pub use crate::health::{clear_health, health_path, parse_health, read_health};
+
+// ── reconnect status: jar → driver ──────────────────────────────────────────────
+//
+// `zeus-reconnect.txt`, 8 keys, `RECONNECT_STATUS_VERSION 1`. `read_reconnect_status` returns `Ok(None)`
+// when the mod has not published yet. Anything present but malformed is an `Err`.
+pub use crate::reconnect_status::{
+    clear_reconnect_status, parse_reconnect_status, read_reconnect_status, reconnect_status_path,
+};
+
 // ── record stores: seeded before the JVM starts ──────────────────────────────────
 //
 // `user_pass` and `isIndexServer`, written byte-for-byte in the client's own format: every
@@ -56,7 +70,9 @@ pub use crate::data_root::atomic_replace;
 // will use. They can never disagree, which is the point of the launch spec passing this same
 // constant through.
 pub use crate::control::CONTROL_FILE_NAME;
+pub use crate::health::HEALTH_FILE_NAME;
 pub use crate::player::SNAPSHOT_FILE_NAME;
+pub use crate::reconnect_status::RECONNECT_STATUS_FILE_NAME;
 
 // ── contract constants ───────────────────────────────────────────────────────────
 //
@@ -67,7 +83,9 @@ pub use crate::control::{
     CONTROL_VERSION, CONTROL_VERSION_V13, CTL_KEY_COUNT, CTL_KEY_COUNT_V13, CTL_KEY_NAMES,
     CTL_KEY_NAMES_V13, MAX_CONTROL_BYTES,
 };
+pub use crate::health::{HEALTH_VERSION, MAX_HEALTH_BYTES};
 pub use crate::player::{MAX_SNAPSHOT_BYTES, SUPPORTED_VERSION};
+pub use crate::reconnect_status::{MAX_RECONNECT_STATUS_BYTES, RECONNECT_STATUS_VERSION};
 
 // ── value ranges ─────────────────────────────────────────────────────────────────
 //
@@ -88,7 +106,9 @@ pub use crate::control::{
     ZoneMode,
 };
 pub use crate::error::{CoreError, CoreResult};
+pub use crate::health::{HealthError, HealthScreen, HealthSnapshot};
 pub use crate::player::PlayerSnapshot;
+pub use crate::reconnect_status::{ReconnectState, ReconnectStatusError, ReconnectStatusSnapshot};
 pub use crate::rms::SERVER_NAMES;
 pub use crate::control::{
     BUFF_SLOTS, ENHANCE_CHARM_MAX, ENHANCE_LEVEL_MAX, ENHANCE_LEVEL_MIN, MATERIAL_LABELS,
@@ -109,6 +129,8 @@ mod tests {
         // Paths are pure; calling them proves visibility without touching the filesystem.
         assert_eq!(control_path(home).file_name().unwrap(), CONTROL_FILE_NAME);
         assert_eq!(snapshot_path(home).file_name().unwrap(), SNAPSHOT_FILE_NAME);
+        assert_eq!(health_path(home).file_name().unwrap(), HEALTH_FILE_NAME);
+        assert_eq!(reconnect_status_path(home).file_name().unwrap(), RECONNECT_STATUS_FILE_NAME);
 
         // Functions are referenced, not called, so no I/O happens.
         let _: fn(&std::path::Path, &ControlSettings) -> CoreResult<()> = write_settings;
@@ -118,6 +140,14 @@ mod tests {
         let _: fn(&std::path::Path) -> CoreResult<Option<PlayerSnapshot>> = read_snapshot;
         let _: fn(&std::path::Path) -> CoreResult<()> = clear_snapshot;
         let _: fn(&str) -> CoreResult<PlayerSnapshot> = parse_snapshot;
+        let _: fn(&std::path::Path) -> Result<Option<HealthSnapshot>, HealthError> = read_health;
+        let _: fn(&std::path::Path) -> Result<(), HealthError> = clear_health;
+        let _: fn(&str) -> Result<HealthSnapshot, HealthError> = parse_health;
+        let _: fn(&std::path::Path) -> Result<Option<ReconnectStatusSnapshot>, ReconnectStatusError> =
+            read_reconnect_status;
+        let _: fn(&std::path::Path) -> Result<(), ReconnectStatusError> = clear_reconnect_status;
+        let _: fn(&str) -> Result<ReconnectStatusSnapshot, ReconnectStatusError> =
+            parse_reconnect_status;
         let _: fn(&std::path::Path, &str, &str, u8) -> CoreResult<()> = seed_credentials;
         let _: fn(&std::path::Path) -> CoreResult<()> = clear_credentials;
         let _: fn(&std::path::Path) -> std::path::PathBuf = suite_directory;
@@ -134,6 +164,12 @@ mod tests {
         assert_eq!(CONTROL_VERSION_V13, 13);
         assert_eq!(CTL_KEY_COUNT_V13, 35);
         assert_eq!(SUPPORTED_VERSION, 6);
+        assert_eq!(HEALTH_VERSION, 1);
+        assert_eq!(HEALTH_FILE_NAME, "zeus-health.txt");
+        assert_eq!(MAX_HEALTH_BYTES, 1024);
+        assert_eq!(RECONNECT_STATUS_VERSION, 1);
+        assert_eq!(RECONNECT_STATUS_FILE_NAME, "zeus-reconnect.txt");
+        assert_eq!(MAX_RECONNECT_STATUS_BYTES, 1024);
         assert_eq!(CTL_KEY_NAMES.len(), CTL_KEY_COUNT);
         assert_eq!(CTL_KEY_NAMES[0], "v");
         assert_eq!(CTL_KEY_NAMES[35], "ui.effects");

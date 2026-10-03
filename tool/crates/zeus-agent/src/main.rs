@@ -59,6 +59,22 @@ pub mod enhancement;
 #[allow(dead_code)]
 pub mod enhancement_queue;
 
+/// Strictly observe-only game-loop health progress sensor (AUTO-RECONNECT-R1B). Cross-platform.
+#[allow(dead_code)]
+pub mod health_observer;
+
+/// Strictly observe-only reconnect lifecycle duration observer (AUTO-RECONNECT-R3A). Cross-platform.
+#[allow(dead_code)]
+pub mod reconnect_observer;
+
+/// Bounded external game-loop freeze watchdog (AUTO-RECONNECT-R3B). Cross-platform.
+#[allow(dead_code)]
+pub mod game_loop_watchdog;
+
+/// Pure logical reconnect-stall authorization sensor (AUTO-RECONNECT-R3C). Cross-platform.
+#[allow(dead_code)]
+pub mod logical_reconnect_watchdog;
+
 /// Main loop — B5+B6+B7+B8 (AGENT-SPEC §4.2).
 /// unix-only: reads /proc, /sys/fs/cgroup, runs ss, calls waitpid.
 #[cfg(unix)]
