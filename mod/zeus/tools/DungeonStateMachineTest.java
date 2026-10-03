@@ -546,12 +546,7 @@ public class DungeonStateMachineTest {
         set("navTarget", -1);
         set("navDone", true);
         fu.q.d = 1;
-        fa phoChiHuy = new fa();
-        phoChiHuy.cv = 2; // NPC
-        phoChiHuy.cu = -37;
-        phoChiHuy.cC = "Pho Chi Huy";
-        phoChiHuy.aZ = 552;
-        phoChiHuy.ba = 504;
+        fa phoChiHuy = makePhoChiHuy(552, 504);
         cn.j = new et("entities");
         cn.j.a(phoChiHuy);
 
@@ -713,13 +708,7 @@ public class DungeonStateMachineTest {
         set("navTarget", -1);
         set("navDone", true);
         fu.q.d = 1;
-
-        fa npcTarget = new fa();
-        npcTarget.cv = 2; // NPC
-        npcTarget.cu = -37;
-        npcTarget.cC = "Pho Chi Huy";
-        npcTarget.aZ = 552;
-        npcTarget.ba = 504;
+        fa npcTarget = makePhoChiHuy(552, 504);
         cn.j = new et("entities");
         cn.j.a(npcTarget);
 
@@ -864,12 +853,7 @@ public class DungeonStateMachineTest {
         set("navDone", true);
         fu.q.d = 1;
 
-        fa phoChiHuy31 = new fa();
-        phoChiHuy31.cv = 2; // NPC
-        phoChiHuy31.cu = -37;
-        phoChiHuy31.cC = "Pho Chi Huy";
-        phoChiHuy31.aZ = 552;
-        phoChiHuy31.ba = 504;
+        fa phoChiHuy31 = makePhoChiHuy(552, 504);
         cn.j = new et("entities");
         cn.j.a(phoChiHuy31);
 
@@ -1197,12 +1181,7 @@ public class DungeonStateMachineTest {
         cn.g.cH = 0;
         cn.i = null;
 
-        fa pcf42 = new fa();
-        pcf42.cv = 2;
-        pcf42.cu = -37;
-        pcf42.cC = "Pho Chi Huy";
-        pcf42.aZ = 552;
-        pcf42.ba = 504;
+        fa pcf42 = makePhoChiHuy(552, 504);
         cn.j = new et("entities");
         cn.j.a(pcf42);
 
@@ -1544,8 +1523,323 @@ public class DungeonStateMachineTest {
         check("V2 Parity: Speech dialog advances via softkey/action", speechSoftkeyInvoked[0]);
         check("V2 Parity: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
 
+        // ---------------------------------------------------------------------
+        // Test 48: Native NPC Interaction Ownership & No Duplicate Opcode 23 (R2_A / R2_D)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 48: Native NPC Interaction Ownership & No Duplicate Opcode 23 ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        fu.q.d = 1;
+        cn.g.aZ = 552;
+        cn.g.ba = 504;
+        cn.g.cH = 0;
+        cn.i = null;
+
+        final int[] kCallCount48 = new int[1];
+        fa ezDouble48 = new fa() {
+            public void k() {
+                kCallCount48[0]++;
+                try {
+                    q.a().a((byte) this.cu);
+                } catch (Throwable t) {}
+            }
+        };
+        ezDouble48.cv = 2;
+        ezDouble48.cu = -37;
+        ezDouble48.cC = "Pho Chi Huy";
+        ezDouble48.aZ = 552;
+        ezDouble48.ba = 504;
+
+        getSentPackets().clear();
+        Method mClickNpc48 = Zeus.class.getDeclaredMethod("dungeonClickNpc", fa.class);
+        mClickNpc48.setAccessible(true);
+        boolean clicked48 = ((Boolean) mClickNpc48.invoke(null, ezDouble48)).booleanValue();
+
+        check("Test 48: dungeonClickNpc returned true", clicked48);
+        check("Test 48: npc.k() invoked exactly once", kCallCount48[0] == 1);
+        check("Test 48: Exactly one packet sent across wire", getSentPackets().size() == 1);
+        check("Test 48: Packet is opcode 23 with payload (byte)-37",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23
+                && ((ep) getSentPackets().get(0)).a()[0] == (byte) -37);
+        check("Test 48: dungeonWait armed to bounded cooldown (40)", ((Integer) get("dungeonWait")).intValue() == 40);
+        check("Test 48: dungeonState transitioned to DN_PREPARATION", ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
+
+        // ---------------------------------------------------------------------
+        // Test 49: Polymorphic NPC Opening Menu Without Sending Packets (R2_A / R2_D)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 49: Polymorphic NPC Opening Menu Without Raw Fallback ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_ROUTING);
+        fu.q.d = 1;
+        cn.g.aZ = 552;
+        cn.g.ba = 504;
+
+        final int[] kCallCount49 = new int[1];
+        fa menuNpcDouble49 = new fa() {
+            public void k() {
+                kCallCount49[0]++;
+                fu.p.a = true;
+                et localMenu = new et("localMenu");
+                localMenu.a(new bt("Giao tiếp", 4));
+                localMenu.a(new bt("Đóng", 1));
+                setFrG(fu.p, localMenu);
+            }
+        };
+        menuNpcDouble49.cv = 2;
+        menuNpcDouble49.cu = -37;
+        menuNpcDouble49.cC = "Pho Chi Huy";
+        menuNpcDouble49.aZ = 552;
+        menuNpcDouble49.ba = 504;
+
+        getSentPackets().clear();
+        boolean clicked49 = ((Boolean) mClickNpc48.invoke(null, menuNpcDouble49)).booleanValue();
+
+        check("Test 49: dungeonClickNpc returned true", clicked49);
+        check("Test 49: npc.k() invoked exactly once", kCallCount49[0] == 1);
+        check("Test 49: Zero packets sent across wire (no synthetic opcode 23 fallback)", getSentPackets().size() == 0);
+        check("Test 49: Native menu opened by npc.k() is active in fu.p", fu.p.a);
+        check("Test 49: dungeonWait armed to bounded cooldown (40)", ((Integer) get("dungeonWait")).intValue() == 40);
+
+        // ---------------------------------------------------------------------
+        // Test 50: Intermediate Speech Dialog While dungeonStep is 1 or 2 (R2_B / R2_D)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 50: Intermediate Speech Dialog While dungeonStep is 1 or 2 ---");
+        // Subtest 50A: dungeonStep == 1
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 1);
+        set("dungeonWait", 60);
+        fu.p.a = false;
+        setFrG(fu.p, null);
+
+        final boolean[] speech50AInvoked = new boolean[1];
+        ah speech50A = new ah();
+        speech50A.q = new String[] { "Phó chỉ huy: Ngươi đã sẵn sàng bước vào cõi chết chưa?" };
+        speech50A.ab = new bt("Tiếp tục", 1, new cg() {
+            public void a(int e, int f) {
+                speech50AInvoked[0] = true;
+            }
+        });
+        fu.s = speech50A;
+
+        call("dungeonInteract");
+        check("Test 50A: Intermediate speech at Step 1 advances via softkey ab", speech50AInvoked[0]);
+        check("Test 50A: dungeonWait refreshed after dialog advance", ((Integer) get("dungeonWait")).intValue() == 60);
+
+        // Subtest 50B: dungeonStep == 2
+        set("dungeonStep", 2);
+        set("dungeonWait", 60);
+        final boolean[] speech50BInvoked = new boolean[1];
+        ah speech50B = new ah();
+        speech50B.q = new String[] { "Nhiệm vụ: Hãy tiêu diệt toàn bộ quái vật trong Ngã tư tử thần!" };
+        speech50B.Z = new bt("Đồng ý", 2, new cg() {
+            public void a(int e, int f) {
+                speech50BInvoked[0] = true;
+            }
+        });
+        fu.s = speech50B;
+
+        call("dungeonInteract");
+        check("Test 50B: Intermediate speech at Step 2 advances via softkey Z", speech50BInvoked[0]);
+        check("Test 50B: dungeonWait refreshed after dialog advance", ((Integer) get("dungeonWait")).intValue() == 60);
+
+        // ---------------------------------------------------------------------
+        // Test 51: Ngã Tư Submenu Dispatch Through fu.p.a(2, 0) (R2_B / R2_D)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 51: Ngã Tư Submenu Dispatch Through fu.p.a(2, 0) ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 3);
+        setFrH(fu.p, -1);
+        et menu51 = new et("menu51");
+        menu51.a(new bt("Thông tin", 0));
+        menu51.a(new bt("Vào Ngã Tư Tử Thần", 1));
+        menu51.a(new bt("Đóng", 2));
+        setFrG(fu.p, menu51);
+        callServerMenu(-37, 3, "Nga Tu", menu51);
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+
+        check("Test 51: Submenu sets fu.p.h to matching 'Ngã Tư' index (1)", getFrH(fu.p) == 1);
+        check("Test 51: Native action dispatched server-menu q.b packet (opcode -30)",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+        check("Test 51: Submenu dispatch advanced dungeonStep to 2", ((Integer) get("dungeonStep")).intValue() == 2);
+        check("Test 51: Bounded wait cooldown armed (60)", ((Integer) get("dungeonWait")).intValue() == 60);
+
+        // ---------------------------------------------------------------------
+        // Test 52: Direct Transition to Map 48 Without Confirmation Dialog (R2_B / R2_D)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 52: Direct Transition to Map 48 Without Confirmation Dialog ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 2);
+        set("dungeonWait", 50);
+        fu.s = null;
+
+        fu.q.d = Zeus.DUNGEON_MAP;
+
+        call("dungeonInteract");
+        check("Test 52: Direct arrival at Map 48 transitions to DN_COMBAT without confirmation dialog",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_COMBAT);
+
+        // ---------------------------------------------------------------------
+        // Test 53: Optional Valid Confirmation Dialog Handling (R2_B / R2_D)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 53: Optional Valid Confirmation Dialog Handling ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 2);
+        set("dungeonWait", 60);
+        fu.q.d = 1;
+
+        final boolean[] confirm53Clicked = new boolean[1];
+        ah confirm53 = new ah();
+        confirm53.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
+        confirm53.C = new et("buttons");
+        confirm53.C.a(new bt("Có", 1, new cg() {
+            public void a(int e, int f) {
+                confirm53Clicked[0] = true;
+            }
+        }));
+        confirm53.C.a(new bt("Không", 2));
+        fu.s = confirm53;
+
+        call("dungeonInteract");
+        check("Test 53: Valid confirmation dialog confirmed via affirmative button", confirm53Clicked[0]);
+        check("Test 53: State advanced to Step 3 waiting for teleport", ((Integer) get("dungeonStep")).intValue() == 3);
+        check("Test 53: Teleport wait budget armed (80)", ((Integer) get("dungeonWait")).intValue() == 80);
+
+        // ---------------------------------------------------------------------
+        // Test 54: Unrelated Dialog Fail-Closed Behavior (R2_B / R2_D)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 54: Unrelated Dialog Fail-Closed Behavior ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+
+        final boolean[] unrelatedActionClicked = new boolean[1];
+        ah unrelated54 = new ah();
+        unrelated54.q = new String[] { "Giao dịch vật phẩm với người chơi khác?" };
+        unrelated54.C = new et("buttons");
+        unrelated54.C.a(new bt("Đồng ý", 1, new cg() {
+            public void a(int e, int f) {
+                unrelatedActionClicked[0] = true;
+            }
+        }));
+        unrelated54.C.a(new bt("Hủy", 2));
+        fu.s = unrelated54;
+
+        for (int i = 0; i < 4; i++) {
+            call("dungeonInteract");
+        }
+
+        check("Test 54: Unrelated modal callback NEVER invoked (fail-closed)", !unrelatedActionClicked[0]);
+        check("Test 54: Unrelated modal remains in fu.s untouched", fu.s == unrelated54);
+        check("Test 54: State transitioned to DN_MANUAL_REVIEW on persistent unrelated modal",
+                ((Integer) get("dungeonState")).intValue() == Zeus.DN_MANUAL_REVIEW);
+        check("Test 54: dungeonWhy set to 5", ((Integer) get("dungeonWhy")).intValue() == 5);
+
+        // ---------------------------------------------------------------------
+        // Test 55: Bounded Retry Does Not Spam Opcode 23 Every Tick (R2_C / R2_D)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 55: Bounded Retry Does Not Spam Opcode 23 Every Tick ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 40);
+        set("dungeonTried", 0);
+        fu.s = null;
+        fu.p.a = false;
+        setFrG(fu.p, null);
+
+        fa npc55 = makePhoChiHuy(552, 504);
+        cn.j = new et("entities");
+        cn.j.a(npc55);
+        set("dungeonNpcCu", -37);
+
+        getSentPackets().clear();
+        for (int tick = 0; tick < 39; tick++) {
+            call("dungeonInteract");
+        }
+        check("Test 55: Zero packets dispatched during wait cooldown (39 ticks)", getSentPackets().size() == 0);
+        check("Test 55: Wait decremented to 1", ((Integer) get("dungeonWait")).intValue() == 1);
+
+        call("dungeonInteract");
+        check("Test 55: Wait decremented to 0", ((Integer) get("dungeonWait")).intValue() == 0);
+        check("Test 55: Still zero packets sent while wait just hit 0", getSentPackets().size() == 0);
+
+        call("dungeonInteract");
+        check("Test 55: Exactly 1 retry packet sent after wait expired", getSentPackets().size() == 1);
+        check("Test 55: Retry reset dungeonWait to 40", ((Integer) get("dungeonWait")).intValue() == 40);
+        check("Test 55: dungeonTried incremented to 1", ((Integer) get("dungeonTried")).intValue() == 1);
+
+        // ---------------------------------------------------------------------
+        // Test 56: Broadcast Announcement Coexistence During Submenu Dispatch (R2_B / R2_D)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 56: Broadcast Coexistence During Submenu Dispatch ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+
+        ah broadcast56 = makeBroadcastPopup("Sự kiện nhân đôi kinh nghiệm đang diễn ra!");
+        fu.s = broadcast56;
+
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 3);
+        setFrH(fu.p, -1);
+        et menu56 = new et("menu56");
+        menu56.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        menu56.a(new bt("Đóng", 1));
+        setFrG(fu.p, menu56);
+        callServerMenu(-37, 3, "Nga Tu", menu56);
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+
+        check("Test 56: Submenu dispatched despite broadcast in fu.s",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+        check("Test 56: Broadcast popup in fu.s preserved and unmodified", fu.s == broadcast56);
+        check("Test 56: Step advanced to 2", ((Integer) get("dungeonStep")).intValue() == 2);
+
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
+    }
+
+    static fa makePhoChiHuy(int x, int y) {
+        fa pcf = new fa() {
+            public void k() {
+                try {
+                    q.a().a((byte) this.cu);
+                } catch (Throwable t) {}
+            }
+        };
+        pcf.cv = 2;
+        pcf.cu = -37;
+        pcf.cC = "Pho Chi Huy";
+        pcf.aZ = x;
+        pcf.ba = y;
+        return pcf;
     }
 
     static ah makeBroadcastPopup(String text) {

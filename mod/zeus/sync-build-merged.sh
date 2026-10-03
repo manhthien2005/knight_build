@@ -26,12 +26,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # -- Paths -------------------------------------------------------------------
-JARS=/work/jar
-BUILD=/work/merged/build
-ZEUS_SRC=/work/merged/zeus/src
-ZEUS_TOOLS=/work/merged/zeus/tools
-POTATO_SRC=/work/merged/potato/src
-POTATO_TOOLS=/work/merged/potato/tools
+WORK="${WORK:-/work}"
+if [ ! -d "$WORK" ] && ! mkdir -p "$WORK" 2>/dev/null; then
+    WORK="/tmp/work"
+fi
+JARS="$WORK/jar"
+BUILD="$WORK/merged/build"
+ZEUS_SRC="$WORK/merged/zeus/src"
+ZEUS_TOOLS="$WORK/merged/zeus/tools"
+POTATO_SRC="$WORK/merged/potato/src"
+POTATO_TOOLS="$WORK/merged/potato/tools"
 CP="$JARS/vanilla.jar:$JARS/microemulator.jar"
 RELEASE=6
 
@@ -122,7 +126,7 @@ done
 echo "== [6/6] repack → $OUT =="
 cd "$BUILD/stage"
 jar cfm "$JARS/$OUT" META-INF/MANIFEST.MF .
-cd /
+cd "$BUILD"
 ls -la "$JARS/$OUT"
 
 # -- Gate checks -------------------------------------------------------------
@@ -211,7 +215,7 @@ if [ "$rc" = 0 ]; then
     jar_sz=$(stat -c %s "$JAR_PATH")
     patcher_sha=$(sha256sum "$ZEUS_TOOLS/PatchZeus.java" | cut -d' ' -f1)
     built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    cat > /work/jar/zeus-jar.json <<EOF
+    cat > "$WORK/jar/zeus-jar.json" <<EOF
 {
   "jar_sha256":         "$jar_sha",
   "jar_size":           $jar_sz,
@@ -226,10 +230,10 @@ EOF
     echo "   zeus-jar.json written"
     if [ -d "$REPO_ROOT/vendor/game" ]; then
         cp "$JAR_PATH" "$REPO_ROOT/vendor/game/$OUT"
-        cp /work/jar/zeus-jar.json "$REPO_ROOT/vendor/game/zeus-jar.json"
+        cp "$WORK/jar/zeus-jar.json" "$REPO_ROOT/vendor/game/zeus-jar.json"
         echo "   copied $OUT and zeus-jar.json to $REPO_ROOT/vendor/game/"
     fi
 fi
 
-cd / && rm -rf "$TMP"
+cd "$REPO_ROOT" && rm -rf "$TMP"
 [ "$rc" = 0 ] && echo "== OK ==" || { echo "== FAILED — do not deploy =="; exit 1; }
