@@ -1919,6 +1919,98 @@ public class DungeonStateMachineTest {
         check("Test 59: State advanced to Step 3 waiting for teleport", ((Integer) get("dungeonStep")).intValue() == 3);
         check("Test 59: Teleport wait budget armed (80)", ((Integer) get("dungeonWait")).intValue() == 80);
 
+        // ---------------------------------------------------------------------
+        // Test 60: Runtime Loop Processes Intermediate Speech Before Wait Expires
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 60: Runtime Loop Processes Intermediate Speech Before Wait Expires ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 1);
+        set("dungeonWait", 60);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        set("dungeonMapSeen", 1);
+        fu.p.a = false;
+        setFrG(fu.p, null);
+
+        final boolean[] speechActionCalled60 = new boolean[1];
+        ah speechDialog60 = new ah();
+        speechDialog60.q = new String[] { "Phó chỉ huy: Ngươi đã sẵn sàng chưa?" };
+        speechDialog60.ab = new bt("Tiếp tục", 1, new cg() {
+            public void a(int e, int f) {
+                speechActionCalled60[0] = true;
+            }
+        });
+        fu.s = speechDialog60;
+
+        // Execute via the real runtime entrypoint dungeon(), NOT dungeonInteract() directly
+        call("dungeon");
+        check("Test 60: Speech native action executes on this tick via dungeon()", speechActionCalled60[0]);
+        check("Test 60: Call not blocked by outer dungeonWait gate, wait refreshed (60)", ((Integer) get("dungeonWait")).intValue() == 60);
+
+        // ---------------------------------------------------------------------
+        // Test 61: Runtime Loop Processes Ngã Tư Submenu Before Wait Expires
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 61: Runtime Loop Processes Ngã Tư Submenu Before Wait Expires ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 1);
+        set("dungeonWait", 50); // dungeonWait > 0
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        set("dungeonMapSeen", 1);
+        fu.s = null;
+
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 3);
+        setFrH(fu.p, -1);
+        et menu61 = new et("menu61");
+        menu61.a(new bt("Nhiệm vụ", 0));
+        menu61.a(new bt("Vào Ngã Tư Tử Thần", 1));
+        menu61.a(new bt("Đóng", 2));
+        setFrG(fu.p, menu61);
+        callServerMenu(-37, 3, "Nga Tu", menu61);
+
+        getSentPackets().clear();
+        // Execute via the real runtime entrypoint dungeon(), NOT dungeonInteract()
+        call("dungeon");
+        check("Test 61: Native fu.p.a(2,0) path dispatches opcode -30 on that tick via dungeon()",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+        check("Test 61: Only one action dispatched", getSentPackets().size() == 1);
+        check("Test 61: State advanced to Step 2", ((Integer) get("dungeonStep")).intValue() == 2);
+
+        // ---------------------------------------------------------------------
+        // Test 62: Runtime Loop Still Respects Cooldown When No Live UI Is Actionable
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 62: Runtime Loop Still Respects Cooldown When No Live UI Is Actionable ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 40);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        set("dungeonMapSeen", 1);
+        fu.s = null; // no confirmation dialog, no speech dialog
+        fu.p.a = false; // no active submenu
+        setFrG(fu.p, null);
+        set("dungeonMenu", null); // no legacy menu
+        set("dungeonMenuItems", null);
+
+        fa npc62 = makePhoChiHuy(552, 504);
+        cn.j = new et("entities");
+        cn.j.a(npc62);
+        set("dungeonNpcCu", -37);
+
+        getSentPackets().clear();
+        // Invoke dungeon() once
+        call("dungeon");
+        check("Test 62: No opcode 23 or -30 sent while cooldown active", getSentPackets().size() == 0);
+        check("Test 62: dungeonWait decremented from 40 to 39", ((Integer) get("dungeonWait")).intValue() == 39);
+
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
     }

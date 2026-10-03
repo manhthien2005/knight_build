@@ -7566,13 +7566,9 @@ public final class Zeus {
                 }
             }
 
-            if (dungeonWait > 0) {
-                if (dungeonState == DN_PREPARATION && (dungeonMenu != null || (dungeonStep == 2 && isDungeonConfirmDialog(fu.s)))) {
-                    dungeonWait = 0;
-                } else {
-                    --dungeonWait;
-                    return;
-                }
+            if (dungeonWait > 0 && dungeonState != DN_PREPARATION) {
+                --dungeonWait;
+                return;
             }
 
             switch (dungeonState) {
