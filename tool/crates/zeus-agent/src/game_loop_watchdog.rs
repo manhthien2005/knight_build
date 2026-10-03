@@ -112,6 +112,7 @@ pub struct GameLoopWatchdog {
     last_decision_or_condition: Option<String>,
     replacement_pending: bool,
     last_suppression_class: Option<RateLimitSuppressionClass>,
+    needs_post_backoff_reconfirmation: bool,
 }
 
 impl Default for GameLoopWatchdog {
@@ -135,6 +136,7 @@ impl GameLoopWatchdog {
             last_decision_or_condition: None,
             replacement_pending: false,
             last_suppression_class: None,
+            needs_post_backoff_reconfirmation: false,
         }
     }
 
@@ -180,6 +182,7 @@ impl GameLoopWatchdog {
         self.last_decision_or_condition = None;
         self.replacement_pending = false;
         self.last_suppression_class = None;
+        self.needs_post_backoff_reconfirmation = false;
     }
 
     /// Completely resets all detection and budget state on explicit user stop or retirement.
@@ -195,6 +198,7 @@ impl GameLoopWatchdog {
         self.last_decision_or_condition = None;
         self.replacement_pending = false;
         self.last_suppression_class = None;
+        self.needs_post_backoff_reconfirmation = false;
     }
 
     /// Evaluates whether a pending replacement retry is authorized under the watchdog budget.
@@ -253,6 +257,7 @@ impl GameLoopWatchdog {
         // Reset confirmation counts after arming
         self.freeze_confirmation_count = 0;
         self.startup_confirmation_count = 0;
+        self.needs_post_backoff_reconfirmation = false;
     }
 
     /// Returns the currently tracked process generation.
@@ -275,10 +280,11 @@ impl GameLoopWatchdog {
     fn maintain_budget_window(&mut self, now: Instant) {
         if let Some(backoff_deadline) = self.backoff_until {
             if now >= backoff_deadline {
-                // Backoff expired: clear budget cycle
+                // Backoff expired: clear budget cycle and arm post-backoff anomaly reconfirmation
                 self.backoff_until = None;
                 self.recoveries_in_window = 0;
                 self.window_started_at = None;
+                self.needs_post_backoff_reconfirmation = true;
             }
         } else if let Some(win_start) = self.window_started_at {
             if now.duration_since(win_start) >= Duration::from_millis(WATCHDOG_BUDGET_WINDOW_MS) {
@@ -337,6 +343,16 @@ impl GameLoopWatchdog {
         last_event: &HealthObservationEvent,
         now: Instant,
     ) -> WatchdogEvaluation {
+        self.maintain_budget_window(now);
+
+        // Discard any anomaly confirmation evidence accumulated before or during long backoff.
+        // For a live running JVM, long-backoff expiry requires two fresh consecutive eligible polls.
+        if self.needs_post_backoff_reconfirmation {
+            self.freeze_confirmation_count = 0;
+            self.startup_confirmation_count = 0;
+            self.needs_post_backoff_reconfirmation = false;
+        }
+
         // Explicit fail-closed prerequisites
         if account_retiring
             || account_tombstoned
@@ -390,6 +406,7 @@ impl GameLoopWatchdog {
                                 Err(reason) => WatchdogEvaluation::SuppressedByRateLimit { reason },
                             }
                         } else {
+                            self.last_suppression_class = None;
                             WatchdogEvaluation::ArmingFreezeConfirmation {
                                 count: self.freeze_confirmation_count,
                             }
@@ -431,6 +448,7 @@ impl GameLoopWatchdog {
                         Err(reason) => WatchdogEvaluation::SuppressedByRateLimit { reason },
                     }
                 } else {
+                    self.last_suppression_class = None;
                     WatchdogEvaluation::ArmingStartupConfirmation {
                         count: self.startup_confirmation_count,
                     }

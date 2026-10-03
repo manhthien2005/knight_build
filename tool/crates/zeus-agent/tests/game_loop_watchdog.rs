@@ -1075,3 +1075,306 @@ fn test_reconcile_spawn_guard_and_crash_loop_inspection() {
         "Cloud merge must not overwrite existing game_loop_watchdog"
     );
 }
+
+#[test]
+fn test_live_jvm_post_backoff_reconfirmation_freeze() {
+    let t0 = Instant::now();
+    let mut wd = GameLoopWatchdog::new(t0);
+    wd.on_successful_spawn(1, t0);
+
+    let unchanged = HealthObservationEvent::Unchanged {
+        sequence: 10,
+        condition_changed: false,
+    };
+
+    // Trigger and arm 3 recoveries to enter 30-minute backoff
+    wd.arm_recovery_attempt(t0);
+    wd.arm_recovery_attempt(t0 + Duration::from_secs(65));
+    let t_3rd = t0 + Duration::from_secs(130);
+    wd.arm_recovery_attempt(t_3rd);
+    assert_eq!(wd.recoveries_in_window(), 3);
+    assert!(wd.is_in_backoff(t_3rd + Duration::from_secs(1)));
+
+    // During backoff, poll 1 arms confirmation (count 1)
+    let eval_during_1 = wd.evaluate(
+        false,
+        false,
+        "running",
+        true,
+        true,
+        1,
+        Some(1),
+        true,
+        Some(Duration::from_secs(40)),
+        HealthReadCondition::Healthy,
+        &unchanged,
+        t_3rd + Duration::from_secs(900),
+    );
+    assert_eq!(
+        eval_during_1,
+        WatchdogEvaluation::ArmingFreezeConfirmation { count: 1 }
+    );
+
+    // Repeated subsequent polls during backoff are suppressed by rate limit
+    for i in 1..5 {
+        let t_during = t_3rd + Duration::from_secs(900 + i * 2);
+        let eval = wd.evaluate(
+            false,
+            false,
+            "running",
+            true,
+            true,
+            1,
+            Some(1),
+            true,
+            Some(Duration::from_secs(40 + i * 2)),
+            HealthReadCondition::Healthy,
+            &unchanged,
+            t_during,
+        );
+        assert!(matches!(
+            eval,
+            WatchdogEvaluation::SuppressedByRateLimit {
+                reason: RateLimitReason::BudgetExhaustedInBackoff { .. }
+            }
+        ));
+    }
+
+    // At exact/after backoff expiry:
+    let t_expiry = t_3rd + Duration::from_millis(WATCHDOG_BACKOFF_MS);
+
+    // FIRST post-expiry poll: MUST NOT return RecoveryRequested!
+    // Must establish fresh confirmation count 1:
+    let eval_first_post = wd.evaluate(
+        false,
+        false,
+        "running",
+        true,
+        true,
+        1,
+        Some(1),
+        true,
+        Some(Duration::from_secs(1840)),
+        HealthReadCondition::Healthy,
+        &unchanged,
+        t_expiry,
+    );
+    assert_eq!(
+        eval_first_post,
+        WatchdogEvaluation::ArmingFreezeConfirmation { count: 1 },
+        "First poll after backoff expiry must only arm confirmation (count 1)"
+    );
+
+    // SECOND consecutive eligible post-expiry poll: confirms RecoveryRequested
+    let t_second_post = t_expiry + Duration::from_secs(2);
+    let eval_second_post = wd.evaluate(
+        false,
+        false,
+        "running",
+        true,
+        true,
+        1,
+        Some(1),
+        true,
+        Some(Duration::from_secs(1842)),
+        HealthReadCondition::Healthy,
+        &unchanged,
+        t_second_post,
+    );
+    assert_eq!(
+        eval_second_post,
+        WatchdogEvaluation::RecoveryRequested {
+            reason: WatchdogRecoveryReason::GameLoopFreeze
+        },
+        "Second consecutive eligible poll after backoff expiry confirms recovery"
+    );
+}
+
+#[test]
+fn test_live_jvm_post_backoff_progress_cancels_reconfirmation() {
+    let t0 = Instant::now();
+    let mut wd = GameLoopWatchdog::new(t0);
+    wd.on_successful_spawn(1, t0);
+
+    let unchanged = HealthObservationEvent::Unchanged {
+        sequence: 10,
+        condition_changed: false,
+    };
+
+    // Arm 3 recoveries to enter 30-minute backoff
+    wd.arm_recovery_attempt(t0);
+    wd.arm_recovery_attempt(t0 + Duration::from_secs(65));
+    let t_3rd = t0 + Duration::from_secs(130);
+    wd.arm_recovery_attempt(t_3rd);
+
+    let t_expiry = t_3rd + Duration::from_millis(WATCHDOG_BACKOFF_MS);
+
+    // First post-expiry poll arms confirmation (count 1)
+    let eval1 = wd.evaluate(
+        false,
+        false,
+        "running",
+        true,
+        true,
+        1,
+        Some(1),
+        true,
+        Some(Duration::from_secs(1840)),
+        HealthReadCondition::Healthy,
+        &unchanged,
+        t_expiry,
+    );
+    assert_eq!(
+        eval1,
+        WatchdogEvaluation::ArmingFreezeConfirmation { count: 1 }
+    );
+
+    // Health progress occurs between confirmation polls
+    let progress = HealthObservationEvent::Progress {
+        sequence: 100,
+        screen_changed: None,
+        disconnect_changed: None,
+        dialog_changed: None,
+        condition_changed: false,
+    };
+    let eval_prog = wd.evaluate(
+        false,
+        false,
+        "running",
+        true,
+        true,
+        1,
+        Some(1),
+        true,
+        Some(Duration::ZERO),
+        HealthReadCondition::Healthy,
+        &progress,
+        t_expiry + Duration::from_secs(1),
+    );
+    assert_eq!(eval_prog, WatchdogEvaluation::NoAction);
+
+    // Next unchanged poll must restart confirmation from 1, not produce RecoveryRequested
+    let eval_next = wd.evaluate(
+        false,
+        false,
+        "running",
+        true,
+        true,
+        1,
+        Some(1),
+        true,
+        Some(Duration::from_secs(31)),
+        HealthReadCondition::Healthy,
+        &unchanged,
+        t_expiry + Duration::from_secs(3),
+    );
+    assert_eq!(
+        eval_next,
+        WatchdogEvaluation::ArmingFreezeConfirmation { count: 1 },
+        "Progress must cancel fresh post-backoff confirmation"
+    );
+}
+
+#[test]
+fn test_startup_no_health_post_backoff_reconfirmation() {
+    let t0 = Instant::now();
+    let mut wd = GameLoopWatchdog::new(t0);
+    wd.on_successful_spawn(1, t0);
+
+    // Arm 3 recoveries to enter 30-minute backoff
+    wd.arm_recovery_attempt(t0);
+    wd.arm_recovery_attempt(t0 + Duration::from_secs(65));
+    let t_3rd = t0 + Duration::from_secs(130);
+    wd.arm_recovery_attempt(t_3rd);
+
+    let awaiting = HealthObservationEvent::NotSupervised;
+    let t_during = t_3rd + Duration::from_secs(900);
+
+    // Poll 1 during backoff arms startup confirmation (count 1)
+    let eval_during_1 = wd.evaluate(
+        false,
+        false,
+        "running",
+        true,
+        true,
+        1,
+        Some(1),
+        false, // No baseline
+        None,
+        HealthReadCondition::AwaitingFirstSample,
+        &awaiting,
+        t_during,
+    );
+    assert_eq!(
+        eval_during_1,
+        WatchdogEvaluation::ArmingStartupConfirmation { count: 1 }
+    );
+
+    // Poll 2 during backoff confirms startup no-health but is suppressed by backoff
+    let eval_during_2 = wd.evaluate(
+        false,
+        false,
+        "running",
+        true,
+        true,
+        1,
+        Some(1),
+        false, // No baseline
+        None,
+        HealthReadCondition::AwaitingFirstSample,
+        &awaiting,
+        t_during + Duration::from_secs(2),
+    );
+    assert!(matches!(
+        eval_during_2,
+        WatchdogEvaluation::SuppressedByRateLimit {
+            reason: RateLimitReason::BudgetExhaustedInBackoff { .. }
+        }
+    ));
+
+    let t_expiry = t_3rd + Duration::from_millis(WATCHDOG_BACKOFF_MS);
+
+    // FIRST post-expiry poll for startup no-health: arms confirmation count 1, does NOT recover
+    let eval_first_post = wd.evaluate(
+        false,
+        false,
+        "running",
+        true,
+        true,
+        1,
+        Some(1),
+        false,
+        None,
+        HealthReadCondition::AwaitingFirstSample,
+        &awaiting,
+        t_expiry,
+    );
+    assert_eq!(
+        eval_first_post,
+        WatchdogEvaluation::ArmingStartupConfirmation { count: 1 },
+        "First post-backoff startup evaluation must only arm confirmation"
+    );
+
+    // SECOND consecutive eligible post-expiry poll: produces RecoveryRequested
+    let eval_second_post = wd.evaluate(
+        false,
+        false,
+        "running",
+        true,
+        true,
+        1,
+        Some(1),
+        false,
+        None,
+        HealthReadCondition::AwaitingFirstSample,
+        &awaiting,
+        t_expiry + Duration::from_secs(2),
+    );
+    assert_eq!(
+        eval_second_post,
+        WatchdogEvaluation::RecoveryRequested {
+            reason: WatchdogRecoveryReason::StartupNoHealth
+        },
+        "Second post-backoff startup poll produces RecoveryRequested"
+    );
+}
