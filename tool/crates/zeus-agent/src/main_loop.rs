@@ -487,10 +487,12 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
                             }
                         }
                         crate::game_loop_watchdog::WatchdogEvaluation::SuppressedByRateLimit { reason } => {
-                            eprintln!(
-                                "[watchdog] account={} gen={} recovery suppressed: {:?}",
-                                acc.id, process_gen, reason
-                            );
+                            if acc.game_loop_watchdog.should_log_rate_limit_transition(&reason) {
+                                eprintln!(
+                                    "[watchdog] account={} gen={} recovery suppressed: {:?}",
+                                    acc.id, process_gen, reason
+                                );
+                            }
                         }
                         crate::game_loop_watchdog::WatchdogEvaluation::RecoveryRequested { reason } => {
                             let recovered = recover_game_loop_watchdog(
@@ -508,6 +510,39 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
                             if recovered {
                                 watchdog_recovered_ids.insert(acc.id.clone());
                             }
+                        }
+                    }
+                } else if acc.game_loop_watchdog.replacement_pending() {
+                    let has_live_pgid = acc.process.as_ref().map(|p| p.pgid_alive()).unwrap_or(false);
+                    match acc.game_loop_watchdog.evaluate_replacement_retry(
+                        acc.retiring,
+                        retired_tombstones.contains(&acc.id),
+                        &acc.desired_state,
+                        has_live_pgid,
+                        now,
+                    ) {
+                        crate::game_loop_watchdog::ReplacementRetryEvaluation::NotEligible => {}
+                        crate::game_loop_watchdog::ReplacementRetryEvaluation::Suppressed(reason) => {
+                            if acc.game_loop_watchdog.should_log_rate_limit_transition(&reason) {
+                                eprintln!(
+                                    "[watchdog] account={} replacement retry suppressed: {:?}",
+                                    acc.id, reason
+                                );
+                            }
+                        }
+                        crate::game_loop_watchdog::ReplacementRetryEvaluation::Authorized => {
+                            acc.game_loop_watchdog.arm_recovery_attempt(now);
+                            eprintln!(
+                                "[watchdog] account={} executing replacement retry (attempt {} in window)",
+                                acc.id, acc.game_loop_watchdog.recoveries_in_window()
+                            );
+                            reconcile_desired_state_with_cause(
+                                acc,
+                                &rest,
+                                &identity,
+                                ReconcileCause::WatchdogReplacement,
+                            );
+                            watchdog_recovered_ids.insert(acc.id.clone());
                         }
                     }
                 }
@@ -531,9 +566,15 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
                 retire_account_safely(&mut accounts, &id, &mut retired_tombstones);
             }
 
-            // Auto-restart crashed JVMs — Issue #19 (chỉ autostart account không trong trạng thái retiring/tombstoned)
+            // Auto-restart crashed JVMs — Issue #19 (chỉ autostart account không trong trạng thái retiring/tombstoned và không pending replacement)
             for acc in accounts.values_mut() {
-                if !acc.retiring && !retired_tombstones.contains(&acc.id) && !watchdog_recovered_ids.contains(&acc.id) && acc.desired_state == "running" && acc.process.as_ref().map(|p| !p.alive()).unwrap_or(true) {
+                if !acc.retiring
+                    && !retired_tombstones.contains(&acc.id)
+                    && !watchdog_recovered_ids.contains(&acc.id)
+                    && !acc.game_loop_watchdog.replacement_pending()
+                    && acc.desired_state == "running"
+                    && acc.process.as_ref().map(|p| !p.alive()).unwrap_or(true)
+                {
                     eprintln!("[reconcile] account={} crash detected, restarting", acc.id);
                     acc.restarts += 1;
                     reconcile_desired_state(acc, &rest, &identity);
@@ -1034,7 +1075,13 @@ fn recover_game_loop_watchdog(
             acc.health_observer.reset_stopped();
             acc.reconnect_observer.reset_stopped();
             acc.restarts += 1;
-            reconcile_desired_state(acc, rest, identity);
+            acc.game_loop_watchdog.mark_replacement_pending();
+            reconcile_desired_state_with_cause(
+                acc,
+                rest,
+                identity,
+                ReconcileCause::WatchdogReplacement,
+            );
             true
         }
         StopTransition::FailedStillAlive => {
@@ -1049,11 +1096,28 @@ fn recover_game_loop_watchdog(
 
 // ── reconcile desired state (B7.3) ────────────────────────────────────────────
 
+/// Reconcile trigger cause distinguishing ordinary reconciliation from watchdog replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileCause {
+    Ordinary,
+    WatchdogReplacement,
+}
+
 #[cfg(unix)]
 fn reconcile_desired_state(
     acc: &mut AccountState,
     rest: &SupabaseRest,
     identity: &crate::crypto::DeviceIdentity,
+) {
+    reconcile_desired_state_with_cause(acc, rest, identity, ReconcileCause::Ordinary);
+}
+
+#[cfg(unix)]
+fn reconcile_desired_state_with_cause(
+    acc: &mut AccountState,
+    rest: &SupabaseRest,
+    identity: &crate::crypto::DeviceIdentity,
+    cause: ReconcileCause,
 ) {
     if acc.retiring {
         eprintln!("[reconcile] account={} is retiring, skipping desired state reconciliation", acc.id);
@@ -1062,6 +1126,14 @@ fn reconcile_desired_state(
     let running = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
     match acc.desired_state.as_str() {
         "running" if !running => {
+            // Guard: ordinary callers cannot spawn while watchdog replacement is pending
+            if acc.game_loop_watchdog.replacement_pending() && cause != ReconcileCause::WatchdogReplacement {
+                eprintln!(
+                    "[reconcile] account={} replacement is pending watchdog ownership, suppressing ordinary spawn",
+                    acc.id
+                );
+                return;
+            }
             acc.process = None;
             eprintln!("[reconcile] account={} slot={}: starting", acc.id, acc.slot_index);
             let paths = AccountPaths::for_slot(acc.slot_index);

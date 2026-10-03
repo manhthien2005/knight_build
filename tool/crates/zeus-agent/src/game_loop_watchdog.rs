@@ -50,6 +50,39 @@ pub enum RateLimitReason {
     WindowBudgetExhausted,
 }
 
+/// Classification of rate limit suppression for transition-only diagnostics and logging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitSuppressionClass {
+    MinimumInterval,
+    Backoff,
+    WindowBudgetExhausted,
+}
+
+impl RateLimitReason {
+    pub fn suppression_class(&self) -> RateLimitSuppressionClass {
+        match self {
+            RateLimitReason::MinimumIntervalActive { .. } => {
+                RateLimitSuppressionClass::MinimumInterval
+            }
+            RateLimitReason::BudgetExhaustedInBackoff { .. } => RateLimitSuppressionClass::Backoff,
+            RateLimitReason::WindowBudgetExhausted => {
+                RateLimitSuppressionClass::WindowBudgetExhausted
+            }
+        }
+    }
+}
+
+/// Evaluation of a pending replacement retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplacementRetryEvaluation {
+    /// Not eligible for replacement retry (e.g. not pending, not running, retiring, tombstoned, or live process exists).
+    NotEligible,
+    /// Bounded budget permits replacement retry attempt.
+    Authorized,
+    /// Replacement retry is pending and eligible, but suppressed by rate limit or backoff.
+    Suppressed(RateLimitReason),
+}
+
 /// Result of evaluating the watchdog on a 2-second supervision tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WatchdogEvaluation {
@@ -77,6 +110,8 @@ pub struct GameLoopWatchdog {
     last_recovery_attempt_at: Option<Instant>,
     backoff_until: Option<Instant>,
     last_decision_or_condition: Option<String>,
+    replacement_pending: bool,
+    last_suppression_class: Option<RateLimitSuppressionClass>,
 }
 
 impl Default for GameLoopWatchdog {
@@ -98,19 +133,53 @@ impl GameLoopWatchdog {
             last_recovery_attempt_at: None,
             backoff_until: None,
             last_decision_or_condition: None,
+            replacement_pending: false,
+            last_suppression_class: None,
         }
+    }
+
+    /// Marks that a watchdog-owned stop reached ConfirmedStopped and replacement is pending.
+    pub fn mark_replacement_pending(&mut self) {
+        self.replacement_pending = true;
+    }
+
+    /// Returns whether a watchdog replacement JVM is currently pending.
+    pub fn replacement_pending(&self) -> bool {
+        self.replacement_pending
+    }
+
+    /// Checks whether a rate-limit suppression transition should be logged.
+    ///
+    /// Returns true only on entering suppression or transitioning into a different suppression class,
+    /// suppressing repetitive logs on every 2-second tick while remaining-ms counts down.
+    pub fn should_log_rate_limit_transition(&mut self, reason: &RateLimitReason) -> bool {
+        let class = reason.suppression_class();
+        if self.last_suppression_class == Some(class) {
+            false
+        } else {
+            self.last_suppression_class = Some(class);
+            true
+        }
+    }
+
+    /// Clears rate-limit suppression transition tracking when exiting rate-limiting.
+    pub fn clear_rate_limit_transition(&mut self) {
+        self.last_suppression_class = None;
     }
 
     /// Resets per-generation detection state on a new successful process spawn.
     ///
-    /// CRITICAL: Preserves cross-generation restart budget (`recoveries_in_window`,
-    /// `window_started_at`, `last_recovery_attempt_at`, `backoff_until`).
+    /// CRITICAL: Clears `replacement_pending` and per-generation confirmation state, but
+    /// PRESERVES cross-generation restart budget (`recoveries_in_window`, `window_started_at`,
+    /// `last_recovery_attempt_at`, `backoff_until`).
     pub fn on_successful_spawn(&mut self, new_generation: u64, now: Instant) {
         self.current_process_generation = new_generation;
         self.generation_started_at = now;
         self.freeze_confirmation_count = 0;
         self.startup_confirmation_count = 0;
         self.last_decision_or_condition = None;
+        self.replacement_pending = false;
+        self.last_suppression_class = None;
     }
 
     /// Completely resets all detection and budget state on explicit user stop or retirement.
@@ -124,6 +193,35 @@ impl GameLoopWatchdog {
         self.last_recovery_attempt_at = None;
         self.backoff_until = None;
         self.last_decision_or_condition = None;
+        self.replacement_pending = false;
+        self.last_suppression_class = None;
+    }
+
+    /// Evaluates whether a pending replacement retry is authorized under the watchdog budget.
+    pub fn evaluate_replacement_retry(
+        &mut self,
+        account_retiring: bool,
+        account_tombstoned: bool,
+        desired_state: &str,
+        has_live_process: bool,
+        now: Instant,
+    ) -> ReplacementRetryEvaluation {
+        if !self.replacement_pending
+            || account_retiring
+            || account_tombstoned
+            || desired_state != "running"
+            || has_live_process
+        {
+            return ReplacementRetryEvaluation::NotEligible;
+        }
+
+        match self.check_budget(now) {
+            Ok(()) => {
+                self.last_suppression_class = None;
+                ReplacementRetryEvaluation::Authorized
+            }
+            Err(reason) => ReplacementRetryEvaluation::Suppressed(reason),
+        }
     }
 
     /// Arms watchdog recovery budget accounting immediately BEFORE calling `process_unix::stop()`.
@@ -283,9 +381,12 @@ impl GameLoopWatchdog {
                         if self.freeze_confirmation_count >= HEALTH_CONFIRMATION_POLLS {
                             // Confirmed freeze! Check budget
                             match self.check_budget(now) {
-                                Ok(()) => WatchdogEvaluation::RecoveryRequested {
-                                    reason: WatchdogRecoveryReason::GameLoopFreeze,
-                                },
+                                Ok(()) => {
+                                    self.last_suppression_class = None;
+                                    WatchdogEvaluation::RecoveryRequested {
+                                        reason: WatchdogRecoveryReason::GameLoopFreeze,
+                                    }
+                                }
                                 Err(reason) => WatchdogEvaluation::SuppressedByRateLimit { reason },
                             }
                         } else {
@@ -321,9 +422,12 @@ impl GameLoopWatchdog {
                 self.startup_confirmation_count += 1;
                 if self.startup_confirmation_count >= HEALTH_CONFIRMATION_POLLS {
                     match self.check_budget(now) {
-                        Ok(()) => WatchdogEvaluation::RecoveryRequested {
-                            reason: WatchdogRecoveryReason::StartupNoHealth,
-                        },
+                        Ok(()) => {
+                            self.last_suppression_class = None;
+                            WatchdogEvaluation::RecoveryRequested {
+                                reason: WatchdogRecoveryReason::StartupNoHealth,
+                            }
+                        }
                         Err(reason) => WatchdogEvaluation::SuppressedByRateLimit { reason },
                     }
                 } else {

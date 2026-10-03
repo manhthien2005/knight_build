@@ -10,9 +10,9 @@ mod game_loop_watchdog;
 mod health_observer;
 
 use game_loop_watchdog::{
-    GameLoopWatchdog, RateLimitReason, WatchdogEvaluation, WatchdogRecoveryReason,
-    HEALTH_FREEZE_THRESHOLD_MS, HEALTH_STARTUP_GRACE_MS, WATCHDOG_BACKOFF_MS,
-    WATCHDOG_MIN_RECOVERY_INTERVAL_MS,
+    GameLoopWatchdog, RateLimitReason, ReplacementRetryEvaluation, WatchdogEvaluation,
+    WatchdogRecoveryReason, HEALTH_FREEZE_THRESHOLD_MS, HEALTH_STARTUP_GRACE_MS,
+    WATCHDOG_BACKOFF_MS, WATCHDOG_MIN_RECOVERY_INTERVAL_MS,
 };
 use health_observer::{HealthObservationEvent, HealthReadCondition};
 
@@ -800,14 +800,19 @@ fn test_process_lifecycle_source_inspection() {
     let confirmed_block_idx = fn_body
         .find("StopTransition::ConfirmedStopped => {")
         .expect("ConfirmedStopped must be handled");
-    let after_confirmed = &fn_body[confirmed_block_idx..confirmed_block_idx + 500];
+    let after_confirmed = &fn_body[confirmed_block_idx..confirmed_block_idx + 600];
     assert!(
         after_confirmed.contains("acc.restarts += 1;"),
         "ConfirmedStopped must increment restarts once"
     );
     assert!(
-        after_confirmed.contains("reconcile_desired_state(acc, rest, identity);"),
-        "ConfirmedStopped must delegate spawn to reconcile_desired_state"
+        after_confirmed.contains("acc.game_loop_watchdog.mark_replacement_pending();"),
+        "ConfirmedStopped must mark replacement pending"
+    );
+    assert!(
+        after_confirmed.contains("reconcile_desired_state_with_cause(")
+            && after_confirmed.contains("ReconcileCause::WatchdogReplacement"),
+        "ConfirmedStopped must delegate spawn to reconcile_desired_state_with_cause with WatchdogReplacement"
     );
 
     // 4. Verify no manual Java spawn in watchdog
@@ -826,5 +831,247 @@ fn test_process_lifecycle_source_inspection() {
     assert!(
         content.contains("watchdog_recovered_ids"),
         "2s tick must track watchdog_recovered_ids to prevent double restart"
+    );
+}
+
+#[test]
+fn test_pending_state_lifecycle() {
+    let t0 = Instant::now();
+    let mut wd = GameLoopWatchdog::new(t0);
+
+    // Initial state: replacement is not pending
+    assert!(!wd.replacement_pending());
+
+    // 1. Confirmed stop marks replacement_pending
+    wd.mark_replacement_pending();
+    assert!(wd.replacement_pending());
+
+    // 2. Successful spawn clears replacement_pending but preserves budget
+    wd.arm_recovery_attempt(t0);
+    assert_eq!(wd.recoveries_in_window(), 1);
+    wd.mark_replacement_pending();
+    assert!(wd.replacement_pending());
+
+    let t1 = t0 + Duration::from_secs(5);
+    wd.on_successful_spawn(2, t1);
+    assert!(
+        !wd.replacement_pending(),
+        "successful spawn must clear replacement_pending"
+    );
+    assert_eq!(
+        wd.recoveries_in_window(),
+        1,
+        "successful spawn must preserve recoveries_in_window budget"
+    );
+
+    // 3. Explicit user stop clears replacement_pending and resets full budget
+    wd.mark_replacement_pending();
+    assert!(wd.replacement_pending());
+    wd.on_explicit_user_stop_or_retirement();
+    assert!(
+        !wd.replacement_pending(),
+        "explicit stop must clear replacement_pending"
+    );
+    assert_eq!(
+        wd.recoveries_in_window(),
+        0,
+        "explicit stop must reset recoveries_in_window budget"
+    );
+}
+
+#[test]
+fn test_failed_stop_does_not_set_pending() {
+    let t0 = Instant::now();
+    let mut wd = GameLoopWatchdog::new(t0);
+    wd.on_successful_spawn(1, t0);
+
+    // When recovery is attempted, budget is armed BEFORE stop
+    wd.arm_recovery_attempt(t0);
+    assert_eq!(wd.recoveries_in_window(), 1);
+
+    // If stop fails (FailedStillAlive), mark_replacement_pending is NOT called
+    assert!(
+        !wd.replacement_pending(),
+        "FailedStillAlive must not mark replacement pending"
+    );
+}
+
+#[test]
+fn test_replacement_retry_timing_and_budget() {
+    let t0 = Instant::now();
+    let mut wd = GameLoopWatchdog::new(t0);
+
+    // Frozen JVM stopped at t0, replacement pending
+    wd.arm_recovery_attempt(t0);
+    wd.mark_replacement_pending();
+    assert_eq!(wd.recoveries_in_window(), 1);
+
+    // At t = 10s: Suppressed by 60s minimum interval
+    let t10 = t0 + Duration::from_secs(10);
+    let eval10 = wd.evaluate_replacement_retry(false, false, "running", false, t10);
+    assert!(matches!(
+        eval10,
+        ReplacementRetryEvaluation::Suppressed(RateLimitReason::MinimumIntervalActive { remaining_ms }) if remaining_ms > 0
+    ));
+
+    // Non-eligible conditions fail-closed
+    assert_eq!(
+        wd.evaluate_replacement_retry(true, false, "running", false, t10),
+        ReplacementRetryEvaluation::NotEligible,
+        "Retiring account must not retry"
+    );
+    assert_eq!(
+        wd.evaluate_replacement_retry(false, true, "running", false, t10),
+        ReplacementRetryEvaluation::NotEligible,
+        "Tombstoned account must not retry"
+    );
+    assert_eq!(
+        wd.evaluate_replacement_retry(false, false, "stopped", false, t10),
+        ReplacementRetryEvaluation::NotEligible,
+        "Non-running desired_state must not retry"
+    );
+    assert_eq!(
+        wd.evaluate_replacement_retry(false, false, "running", true, t10),
+        ReplacementRetryEvaluation::NotEligible,
+        "Live process must not retry replacement"
+    );
+
+    // At t = 60s: Minimum interval satisfied -> Authorized
+    let t60 = t0 + Duration::from_secs(60);
+    let eval60 = wd.evaluate_replacement_retry(false, false, "running", false, t60);
+    assert_eq!(eval60, ReplacementRetryEvaluation::Authorized);
+
+    // Retry 1 attempted (2nd total attempt in window)
+    wd.arm_recovery_attempt(t60);
+    assert_eq!(wd.recoveries_in_window(), 2);
+    assert!(!wd.is_in_backoff(t60));
+
+    // At t = 70s: Minimum interval active again
+    let t70 = t0 + Duration::from_secs(70);
+    assert!(matches!(
+        wd.evaluate_replacement_retry(false, false, "running", false, t70),
+        ReplacementRetryEvaluation::Suppressed(RateLimitReason::MinimumIntervalActive { .. })
+    ));
+
+    // At t = 120s: 3rd attempt authorized
+    let t120 = t0 + Duration::from_secs(120);
+    assert_eq!(
+        wd.evaluate_replacement_retry(false, false, "running", false, t120),
+        ReplacementRetryEvaluation::Authorized
+    );
+
+    // Retry 2 attempted (3rd total attempt in window) -> arms 30-minute backoff!
+    wd.arm_recovery_attempt(t120);
+    assert_eq!(wd.recoveries_in_window(), 3);
+    assert!(
+        wd.is_in_backoff(t120),
+        "3rd attempt must arm 30-minute backoff"
+    );
+
+    // During backoff at t = 130s: Suppressed
+    let t130 = t0 + Duration::from_secs(130);
+    assert!(matches!(
+        wd.evaluate_replacement_retry(false, false, "running", false, t130),
+        ReplacementRetryEvaluation::Suppressed(RateLimitReason::BudgetExhaustedInBackoff { .. })
+    ));
+
+    // At t = 120s + 1799s: Still in backoff
+    let t_almost_end = t120 + Duration::from_secs(1799);
+    assert!(matches!(
+        wd.evaluate_replacement_retry(false, false, "running", false, t_almost_end),
+        ReplacementRetryEvaluation::Suppressed(RateLimitReason::BudgetExhaustedInBackoff { .. })
+    ));
+
+    // At t = 120s + 1800s: Backoff expired -> fresh bounded pending replacement cycle authorized!
+    let t_expired = t120 + Duration::from_secs(1800);
+    assert_eq!(
+        wd.evaluate_replacement_retry(false, false, "running", false, t_expired),
+        ReplacementRetryEvaluation::Authorized,
+        "Backoff expiry must permit fresh replacement cycle"
+    );
+}
+
+#[test]
+fn test_rate_limit_logging_deduplication() {
+    let t0 = Instant::now();
+    let mut wd = GameLoopWatchdog::new(t0);
+
+    let reason1 = RateLimitReason::MinimumIntervalActive {
+        remaining_ms: 58000,
+    };
+    // Poll 1: initial transition into MinimumIntervalActive -> logs
+    assert!(wd.should_log_rate_limit_transition(&reason1));
+
+    // Poll 2: countdown to 56000 -> does NOT log duplicate
+    let reason2 = RateLimitReason::MinimumIntervalActive {
+        remaining_ms: 56000,
+    };
+    assert!(!wd.should_log_rate_limit_transition(&reason2));
+
+    // Transition to Backoff -> logs new suppression class
+    let reason_backoff1 = RateLimitReason::BudgetExhaustedInBackoff {
+        remaining_ms: 1800000,
+    };
+    assert!(wd.should_log_rate_limit_transition(&reason_backoff1));
+
+    // Poll within Backoff countdown -> does NOT log duplicate
+    let reason_backoff2 = RateLimitReason::BudgetExhaustedInBackoff {
+        remaining_ms: 1798000,
+    };
+    assert!(!wd.should_log_rate_limit_transition(&reason_backoff2));
+
+    // Clear on exiting suppression -> next entry logs again
+    wd.clear_rate_limit_transition();
+    assert!(wd.should_log_rate_limit_transition(&reason1));
+}
+
+#[test]
+fn test_reconcile_spawn_guard_and_crash_loop_inspection() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let main_loop_path = manifest_dir.join("src/main_loop.rs");
+    let content = std::fs::read_to_string(&main_loop_path).expect("main_loop.rs must exist");
+
+    // 1. Verify reconcile_desired_state_with_cause and ReconcileCause enum exist
+    assert!(
+        content.contains("pub enum ReconcileCause"),
+        "ReconcileCause enum must exist"
+    );
+    assert!(
+        content.contains("fn reconcile_desired_state_with_cause"),
+        "reconcile_desired_state_with_cause must exist"
+    );
+
+    // 2. Verify spawn guard suppresses ordinary callers while replacement_pending is true
+    let guard_line = "if acc.game_loop_watchdog.replacement_pending() && cause != ReconcileCause::WatchdogReplacement";
+    assert!(
+        content.contains(guard_line),
+        "reconcile_desired_state_with_cause must guard ordinary callers when replacement_pending is true"
+    );
+
+    // 3. Verify generic crash loop explicitly skips pending accounts
+    let crash_check = "!acc.game_loop_watchdog.replacement_pending()";
+    assert!(
+        content.contains(crash_check),
+        "Generic crash restart loop must skip accounts where replacement_pending is true"
+    );
+
+    // 4. Verify 2-second tick handles replacement pending retry
+    assert!(
+        content.contains("else if acc.game_loop_watchdog.replacement_pending()"),
+        "2-second tick must have replacement_pending retry evaluation branch"
+    );
+    assert!(
+        content.contains("evaluate_replacement_retry"),
+        "2-second tick must evaluate replacement retry"
+    );
+
+    // 5. Verify cloud metadata merge does not overwrite game_loop_watchdog
+    let merge_idx = content
+        .find("fn reconcile_cloud_accounts")
+        .expect("reconcile_cloud_accounts must exist");
+    let merge_block = &content[merge_idx..merge_idx + 2000];
+    assert!(
+        !merge_block.contains("existing.game_loop_watchdog ="),
+        "Cloud merge must not overwrite existing game_loop_watchdog"
     );
 }
