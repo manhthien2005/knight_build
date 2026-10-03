@@ -67,6 +67,10 @@ pub mod health_observer;
 #[allow(dead_code)]
 pub mod reconnect_observer;
 
+/// Bounded external game-loop freeze watchdog (AUTO-RECONNECT-R3B). Cross-platform.
+#[allow(dead_code)]
+pub mod game_loop_watchdog;
+
 /// Main loop — B5+B6+B7+B8 (AGENT-SPEC §4.2).
 /// unix-only: reads /proc, /sys/fs/cgroup, runs ss, calls waitpid.
 #[cfg(unix)]
@@ -75,8 +79,8 @@ mod main_loop;
 
 #[allow(unused_imports)]
 use zeus_core::wire::{
-    CONTROL_FILE_NAME, CONTROL_VERSION, CTL_KEY_COUNT, SNAPSHOT_FILE_NAME, SUPPORTED_VERSION,
-    control_path, read_settings, snapshot_path, write_settings,
+    control_path, read_settings, snapshot_path, write_settings, CONTROL_FILE_NAME, CONTROL_VERSION,
+    CTL_KEY_COUNT, SNAPSHOT_FILE_NAME, SUPPORTED_VERSION,
 };
 
 fn main() {
