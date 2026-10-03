@@ -7165,6 +7165,9 @@ public final class Zeus {
     static int dungeonNoTargetTicks = 0;
     static int dungeonRunTicks = 0;
 
+    /** Latch: true once native Ngã Tư submenu dispatch occurs, awaiting entry result. */
+    static boolean dungeonAwaitingEntry = false;
+
     /** Labels and item collection of the server menu currently open, captured by {@link #serverMenu}. Its own trio: never TRAVEL's. */
     static String[] dungeonMenu = null;
     static et dungeonMenuItems = null;
@@ -7395,15 +7398,16 @@ public final class Zeus {
         dungeonNoTargetTicks = 0;
         dungeonRunTicks = 0;
         dungeonConsecutiveFails = 0;
+        dungeonAwaitingEntry = false;
         if (fu.s != null && isDungeonConfirmDialog(fu.s)) {
             dismissDungeonDialog(fu.s);
         }
         dungeonRestoreCombat();
     }
 
-    /** Stops and says why. If why == 5, transitions to DN_MANUAL_REVIEW. */
+    /** Stops and says why. If why == 5 or why == 6, transitions to DN_MANUAL_REVIEW. */
     public static void dungeonStop(int why, String reason) {
-        dungeonState = (why == 5) ? DN_MANUAL_REVIEW : DN_OFF;
+        dungeonState = (why == 5 || why == 6) ? DN_MANUAL_REVIEW : DN_OFF;
         dungeonWhy = why;
         dungeonTripActive = false;
         dungeonNavigating = false;
@@ -7414,6 +7418,7 @@ public final class Zeus {
         dungeonStep = 0;
         dungeonWait = 0;
         dungeonTried = 0;
+        dungeonAwaitingEntry = false;
         if (fu.s != null && isDungeonConfirmDialog(fu.s)) {
             dismissDungeonDialog(fu.s);
         }
@@ -7427,6 +7432,7 @@ public final class Zeus {
             ++dungeonFails;
         }
         ++dungeonConsecutiveFails;
+        dungeonAwaitingEntry = false;
         dungeonRestoreCombat();
         trace("DUNGEON run failed (" + why + "): " + reason + " (fails=" + dungeonFails
                 + " consec=" + dungeonConsecutiveFails + ")");
@@ -7503,6 +7509,7 @@ public final class Zeus {
                 dungeonWasIn = true;
                 dungeonTried = 0;
                 dungeonNavigating = false;
+                dungeonAwaitingEntry = false;
                 if (dungeonState != DN_COMBAT) {
                     dungeonState = DN_COMBAT;
                     dungeonWhy = 0;
@@ -7632,6 +7639,7 @@ public final class Zeus {
         dungeonStallTicks = 0;
         dungeonNpcCu = -1;
         dungeonWhy = 0;
+        dungeonAwaitingEntry = false;
         trace("DUNGEON starting a run (done=" + dungeonRuns + " max=" + dungeonMaxRuns + ")");
     }
 
@@ -7735,6 +7743,7 @@ public final class Zeus {
      */
     private static void dungeonInteract() {
         if (dungeonInDungeon()) {
+            dungeonAwaitingEntry = false;
             dungeonState = DN_COMBAT;
             return;
         }
@@ -7798,6 +7807,10 @@ public final class Zeus {
         }
 
         if (ngaTuRow >= 0) {
+            if (dungeonAwaitingEntry) {
+                dungeonStop(6, "server re-presented Ngã Tư submenu without entering dungeon (entry rejected or unmet requirement)");
+                return;
+            }
             int npc = dungeonMenuNpc;
             int menuId = dungeonMenuId;
             dungeonMenu = null;
@@ -7806,6 +7819,7 @@ public final class Zeus {
             dungeonStep = 2;
             dungeonTried = 0;
             dungeonWait = 60;
+            dungeonAwaitingEntry = true;
             trace("DUNGEON invoked native second-menu action for row " + ngaTuRow + ", waiting on confirmation dialog or teleport");
 
             if (fu.p != null && fu.p.a) {

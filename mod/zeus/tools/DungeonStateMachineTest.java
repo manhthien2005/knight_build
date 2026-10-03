@@ -2011,6 +2011,245 @@ public class DungeonStateMachineTest {
         check("Test 62: No opcode 23 or -30 sent while cooldown active", getSentPackets().size() == 0);
         check("Test 62: dungeonWait decremented from 40 to 39", ((Integer) get("dungeonWait")).intValue() == 39);
 
+        // ---------------------------------------------------------------------
+        // Test 63: Same Ngã Tư Submenu After Native Dispatch Is Not Resent
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 63: Same Ngã Tư Submenu After Native Dispatch Is Not Resent ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        set("dungeonMapSeen", 1);
+        fu.s = null;
+
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 0);
+        setFrH(fu.p, -1);
+        et menu63 = new et("menu63");
+        menu63.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        menu63.a(new bt("Hướng dẫn", 1));
+        setFrG(fu.p, menu63);
+        callServerMenu(-37, 0, "MENU", menu63);
+
+        getSentPackets().clear();
+        // Invoke real dungeon() runtime tick
+        call("dungeon");
+
+        // Verify exactly one opcode -30
+        check("Test 63: Exactly one packet sent on first submenu dispatch", getSentPackets().size() == 1);
+        check("Test 63: Dispatched packet is opcode -30", ((ep) getSentPackets().get(0)).a == -30);
+        check("Test 63: Native action closed menu", !fu.p.a);
+
+        // Simulate server re-presenting the same Ngã Tư submenu
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 0);
+        setFrH(fu.p, -1);
+        setFrG(fu.p, menu63);
+        callServerMenu(-37, 0, "MENU", menu63);
+
+        // Invoke dungeon() again
+        call("dungeon");
+
+        // Verify no second opcode -30 and no opcode 23
+        int op23Count = 0;
+        int op30Count = 0;
+        for (Object p63 : getSentPackets()) {
+            if (((ep) p63).a == 23) op23Count++;
+            if (((ep) p63).a == -30) op30Count++;
+        }
+        check("Test 63: No opcode 23 sent", op23Count == 0);
+        check("Test 63: Exactly one opcode -30 across both ticks", op30Count == 1);
+        check("Test 63: State fails closed to DN_MANUAL_REVIEW",
+                ((Integer) get("dungeonState")).intValue() == ((Integer) get("DN_MANUAL_REVIEW")).intValue());
+        check("Test 63: Distinct rejection why code set (why == 6)", ((Integer) get("dungeonWhy")).intValue() == 6);
+
+        // ---------------------------------------------------------------------
+        // Test 64: Direct Teleport After Ngã Tư Dispatch Still Succeeds
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 64: Direct Teleport After Ngã Tư Dispatch Still Succeeds ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        set("dungeonMapSeen", 1);
+        fu.s = null;
+
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 0);
+        setFrH(fu.p, -1);
+        et menu64 = new et("menu64");
+        menu64.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        setFrG(fu.p, menu64);
+        callServerMenu(-37, 0, "MENU", menu64);
+
+        getSentPackets().clear();
+        call("dungeon");
+        check("Test 64: First tick dispatches opcode -30",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+
+        // Change map to 48 before next tick (direct teleport)
+        fu.q.d = Zeus.DUNGEON_MAP;
+        call("dungeon");
+
+        check("Test 64: DN_COMBAT is reached on direct map 48 teleport",
+                ((Integer) get("dungeonState")).intValue() == ((Integer) get("DN_COMBAT")).intValue());
+        check("Test 64: No second opcode -30 sent", getSentPackets().size() == 1);
+
+        // ---------------------------------------------------------------------
+        // Test 65: Explicit Confirmation After Ngã Tư Dispatch Still Works
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 65: Explicit Confirmation After Ngã Tư Dispatch Still Works ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        set("dungeonMapSeen", 1);
+        fu.s = null;
+
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 0);
+        setFrH(fu.p, -1);
+        et menu65 = new et("menu65");
+        menu65.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        setFrG(fu.p, menu65);
+        callServerMenu(-37, 0, "MENU", menu65);
+
+        getSentPackets().clear();
+        call("dungeon");
+        check("Test 65: First tick dispatches opcode -30",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+
+        // Present explicit dungeon confirmation
+        final boolean[] confirm65Clicked = new boolean[1];
+        ah confirmDlg65 = new ah();
+        confirmDlg65.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
+        confirmDlg65.C = new et("btns");
+        confirmDlg65.C.a(new bt("Đồng ý", 1, new cg() {
+            public void a(int e, int f) {
+                confirm65Clicked[0] = true;
+            }
+        }));
+        confirmDlg65.C.a(new bt("Không", 2));
+        fu.s = confirmDlg65;
+
+        call("dungeon");
+        check("Test 65: Confirmation dialog is handled once", confirm65Clicked[0]);
+        check("Test 65: No second opcode -30 sent", getSentPackets().size() == 1);
+        check("Test 65: State advances to step 3 (waiting teleport)", ((Integer) get("dungeonStep")).intValue() == 3);
+
+        // ---------------------------------------------------------------------
+        // Test 66: Intermediate Meaningful Speech Remains Reactive
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 66: Intermediate Meaningful Speech Remains Reactive ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        set("dungeonMapSeen", 1);
+        fu.s = null;
+
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 0);
+        setFrH(fu.p, -1);
+        et menu66 = new et("menu66");
+        menu66.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        setFrG(fu.p, menu66);
+        callServerMenu(-37, 0, "MENU", menu66);
+
+        getSentPackets().clear();
+        call("dungeon");
+        check("Test 66: First tick dispatches opcode -30",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+
+        // Present a valid Phó Chỉ Huy / nhiệm vụ speech dialog
+        final boolean[] speech66Clicked = new boolean[1];
+        ah speech66 = new ah();
+        speech66.q = new String[] { "Phó chỉ huy: Ngã tư tử thần rất nguy hiểm!" };
+        speech66.ab = new bt("Tiếp tục", 1, new cg() {
+            public void a(int e, int f) {
+                speech66Clicked[0] = true;
+            }
+        });
+        fu.s = speech66;
+
+        call("dungeon");
+        check("Test 66: Speech dialog is handled reactively via softkey", speech66Clicked[0]);
+        check("Test 66: No duplicate opcode -30 sent", getSentPackets().size() == 1);
+
+        // ---------------------------------------------------------------------
+        // Test 67: New Run Clears Stale Entry Latch
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 67: New Run Clears Stale Entry Latch ---");
+        // Simulate previous run that stopped
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        set("dungeonMapSeen", 1);
+        fu.s = null;
+
+        // Dispatches first Ngã Tư submenu normally
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 0);
+        setFrH(fu.p, -1);
+        et menu67A = new et("menu67A");
+        menu67A.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        setFrG(fu.p, menu67A);
+        callServerMenu(-37, 0, "MENU", menu67A);
+
+        getSentPackets().clear();
+        call("dungeon");
+        check("Test 67: First run dispatches opcode -30 normally",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+
+        // Now reset / start a fresh run
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 0);
+        set("dungeonWait", 0);
+        set("dungeonTried", 0);
+        fu.q.d = 1;
+        set("dungeonMapSeen", 1);
+        fu.s = null;
+
+        // Fresh run presents Ngã Tư submenu
+        fu.p.a = true;
+        setFrC(fu.p, -37);
+        setFrB(fu.p, 0);
+        setFrH(fu.p, -1);
+        et menu67B = new et("menu67B");
+        menu67B.a(new bt("Vào Ngã Tư Tử Thần", 0));
+        setFrG(fu.p, menu67B);
+        callServerMenu(-37, 0, "MENU", menu67B);
+
+        getSentPackets().clear();
+        call("dungeon");
+        check("Test 67: Fresh run may dispatch its first Ngã Tư submenu normally",
+                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+        check("Test 67: Fresh run state is step 2", ((Integer) get("dungeonStep")).intValue() == 2);
+
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
     }
