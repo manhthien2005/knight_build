@@ -2315,13 +2315,23 @@ public class DungeonStateMachineTest {
         check("Test 70A: Step remains 2", ((Integer) get("dungeonStep")).intValue() == 2);
 
         // Part B: Confirmation dialog arriving in fu.t
+        final int[] test70BAction = new int[1];
         ah confirmDlgT = new ah();
         confirmDlgT.q = new String[] { "Ban co muon vao nga tu tu than mot minh" };
         confirmDlgT.C = new et("buttons");
-        confirmDlgT.C.a(new bt("Vào", 0));
+        confirmDlgT.C.a(new bt("Vào", 0, new cg() {
+            public void a(int e, int f) {
+                test70BAction[0]++;
+            }
+        }));
         confirmDlgT.C.a(new bt("Đóng", 1));
         fu.t = confirmDlgT;
         fu.s = null;
+
+        call("dungeonInteract");
+        check("Test 70B: Confirmation action executed exactly once", test70BAction[0] == 1);
+        check("Test 70B: Step advanced to 3 on fu.t confirmation dialog", ((Integer) get("dungeonStep")).intValue() == 3);
+        check("Test 70B: Wait budget armed for teleport", ((Integer) get("dungeonWait")).intValue() == 80);
 
         // ---------------------------------------------------------------------
         // Test 71: Observed Live Solo Entry Modal Remains Accepted
