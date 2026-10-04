@@ -7405,9 +7405,9 @@ public final class Zeus {
         dungeonRestoreCombat();
     }
 
-    /** Stops and says why. If why == 5 or why == 6, transitions to DN_MANUAL_REVIEW. */
+    /** Stops and says why. If why == 5, transitions to DN_MANUAL_REVIEW. */
     public static void dungeonStop(int why, String reason) {
-        dungeonState = (why == 5 || why == 6) ? DN_MANUAL_REVIEW : DN_OFF;
+        dungeonState = (why == 5) ? DN_MANUAL_REVIEW : DN_OFF;
         dungeonWhy = why;
         dungeonTripActive = false;
         dungeonNavigating = false;
@@ -7424,6 +7424,13 @@ public final class Zeus {
         }
         dungeonRestoreCombat();
         trace("DUNGEON stopped (" + why + "): " + reason);
+    }
+
+    /** Transitions to DN_MANUAL_REVIEW while publishing dungeonWhy=0 (state-only manual review). */
+    public static void dungeonManualReview(String reason) {
+        dungeonStop(0, reason);
+        dungeonState = DN_MANUAL_REVIEW;
+        trace("DUNGEON manual review: " + reason);
     }
 
     /** Handles run failure, bounds consecutive failures, and triggers manual review when cap reached. */
@@ -7808,7 +7815,7 @@ public final class Zeus {
 
         if (ngaTuRow >= 0) {
             if (dungeonAwaitingEntry) {
-                dungeonStop(6, "server re-presented Ngã Tư submenu without entering dungeon (entry rejected or unmet requirement)");
+                dungeonManualReview("server re-presented Ngã Tư submenu without entering dungeon (entry rejected or unmet requirement)");
                 return;
             }
             int npc = dungeonMenuNpc;

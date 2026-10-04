@@ -2066,7 +2066,7 @@ public class DungeonStateMachineTest {
         check("Test 63: Exactly one opcode -30 across both ticks", op30Count == 1);
         check("Test 63: State fails closed to DN_MANUAL_REVIEW",
                 ((Integer) get("dungeonState")).intValue() == ((Integer) get("DN_MANUAL_REVIEW")).intValue());
-        check("Test 63: Distinct rejection why code set (why == 6)", ((Integer) get("dungeonWhy")).intValue() == 6);
+        check("Test 63: State-only manual review leaves dungeonWhy == 0", ((Integer) get("dungeonWhy")).intValue() == 0);
 
         // ---------------------------------------------------------------------
         // Test 64: Direct Teleport After Ngã Tư Dispatch Still Succeeds
@@ -2249,6 +2249,25 @@ public class DungeonStateMachineTest {
         check("Test 67: Fresh run may dispatch its first Ngã Tư submenu normally",
                 getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
         check("Test 67: Fresh run state is step 2", ((Integer) get("dungeonStep")).intValue() == 2);
+
+        // ---------------------------------------------------------------------
+        // Test 68: Dungeon Run Timeout Reason 6 Semantics Preserved
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 68: Dungeon Run Timeout Reason 6 Semantics Preserved ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_COMBAT);
+        set("dungeonWhy", 0);
+        set("dungeonFails", 0);
+        fu.q.d = Zeus.DUNGEON_MAP;
+
+        // Trigger run timeout
+        Zeus.dungeonFailRun(6, "dungeon run timed out (>300s)");
+
+        check("Test 68: Dungeon run timeout sets dungeonWhy to 6", ((Integer) get("dungeonWhy")).intValue() == 6);
+        check("Test 68: Dungeon run timeout transitions to DN_FAILURE",
+                ((Integer) get("dungeonState")).intValue() == ((Integer) get("DN_FAILURE")).intValue());
+        check("Test 68: Dungeon run timeout increments fails count", ((Integer) get("dungeonFails")).intValue() == 1);
 
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
