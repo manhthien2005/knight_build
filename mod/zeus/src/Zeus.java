@@ -3012,7 +3012,8 @@ public final class Zeus {
                 traceTargetId = Integer.MIN_VALUE;
                 trace("TARGET none");
             }
-            String dialog = fu.s == null ? null : dialogText(fu.s);
+            da activeDialog = fu.s != null ? fu.s : (fu.t != null ? fu.t : null);
+            String dialog = activeDialog == null ? null : dialogText(activeDialog);
             if (dialog != null && !dialog.equals(traceDialog)) {
                 traceDialog = dialog;
                 trace("DIALOG " + clean(dialog));
@@ -7402,6 +7403,9 @@ public final class Zeus {
         if (fu.s != null && isDungeonConfirmDialog(fu.s)) {
             dismissDungeonDialog(fu.s);
         }
+        if (fu.t != null && isDungeonConfirmDialog(fu.t)) {
+            dismissDungeonDialog(fu.t);
+        }
         dungeonRestoreCombat();
     }
 
@@ -7421,6 +7425,9 @@ public final class Zeus {
         dungeonAwaitingEntry = false;
         if (fu.s != null && isDungeonConfirmDialog(fu.s)) {
             dismissDungeonDialog(fu.s);
+        }
+        if (fu.t != null && isDungeonConfirmDialog(fu.t)) {
+            dismissDungeonDialog(fu.t);
         }
         dungeonRestoreCombat();
         trace("DUNGEON stopped (" + why + "): " + reason);
@@ -7755,9 +7762,11 @@ public final class Zeus {
             return;
         }
 
-        // 1. Reactive check: Valid confirmation dialog in fu.s (optional; direct teleport also succeeds)
-        if (isDungeonConfirmDialog(fu.s)) {
-            if (!dungeonConfirmDialog(fu.s)) {
+        // 1. Reactive check: Valid confirmation dialog in fu.s or fu.t (optional; direct teleport also succeeds)
+        da confirmDlg = dungeonConfirmDialogTarget();
+        if (confirmDlg != null) {
+            trace("DUNGEON observed confirmation dialog: \"" + clean(dialogText(confirmDlg)) + "\"");
+            if (!dungeonConfirmDialog(confirmDlg)) {
                 if (++dungeonTried >= DN_MAX_TRIES) {
                     dungeonStop(2, "could not confirm dungeon entry dialog");
                     return;
@@ -7773,9 +7782,10 @@ public final class Zeus {
         }
 
         // Unrelated modal safety check: fail closed on genuine blocking modals
-        if (fu.s != null && isBlockingDialog(fu.s)) {
+        da blockingDlg = (fu.s != null && isBlockingDialog(fu.s)) ? fu.s : ((fu.t != null && isBlockingDialog(fu.t)) ? fu.t : null);
+        if (blockingDlg != null) {
             if (++dungeonTried >= DN_MAX_TRIES) {
-                dungeonStop(5, "unrelated dialog blocking dungeon: " + clean(dialogText(fu.s)));
+                dungeonStop(5, "unrelated dialog blocking dungeon: " + clean(dialogText(blockingDlg)));
                 return;
             }
             dungeonWait = 10;
@@ -7873,7 +7883,7 @@ public final class Zeus {
             legacyPick = dungeonMenuPick("giao tiep", "giao dich");
         }
 
-        if (giaoTiepCmd != null || legacyPick >= 0) {
+        if (dungeonStep == 0 && (giaoTiepCmd != null || legacyPick >= 0)) {
             if (fu.p != null && fu.p.a && giaoTiepIndex >= 0) {
                 setFrIndex(fu.p, giaoTiepIndex);
             }
@@ -7889,7 +7899,7 @@ public final class Zeus {
                 giaoTiepCmd.a();
             } else {
                 if (!dungeonSelect(legacyPick)) {
-                    dungeonStop(2, "selecting \"giao tiep\" failed");
+                    dungeonStop(2, "selecting \"giao tiếp\" failed");
                 }
             }
             return;
@@ -7922,6 +7932,15 @@ public final class Zeus {
         }
 
         // 6. Bounded Retry
+        if (dungeonAwaitingEntry) {
+            if (++dungeonTried >= DN_MAX_TRIES) {
+                dungeonStop(2, "dungeon interaction timed out waiting for confirmation or teleport after " + DN_MAX_TRIES + " tries");
+                return;
+            }
+            dungeonWait = 60;
+            return;
+        }
+
         if (++dungeonTried >= DN_MAX_TRIES) {
             dungeonStop(2, "dungeon interaction timed out after " + DN_MAX_TRIES + " tries");
             return;
@@ -7975,6 +7994,18 @@ public final class Zeus {
                             }
                         }
                     }
+                }
+            } else if (dialog instanceof dz) {
+                try {
+                    java.lang.reflect.Field fb = dz.class.getDeclaredField("b");
+                    fb.setAccessible(true);
+                    Object btn = fb.get(dialog);
+                    if (btn instanceof bt) {
+                        trace("DUNGEON dialog confirming via dz.b=\"" + clean(((bt) btn).a) + "\"");
+                        ((bt) btn).a();
+                        return true;
+                    }
+                } catch (Throwable t) {
                 }
             }
 
@@ -8051,10 +8082,20 @@ public final class Zeus {
                 return false;
             }
             String text = norm(dialogText(dialog));
-            return text.indexOf("nga tu") >= 0 || text.indexOf("tu than") >= 0;
+            return text.indexOf("nga tu") >= 0 || text.indexOf("tu than") >= 0 || text.indexOf("mot minh") >= 0;
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    private static da dungeonConfirmDialogTarget() {
+        if (isDungeonConfirmDialog(fu.s)) {
+            return fu.s;
+        }
+        if (isDungeonConfirmDialog(fu.t)) {
+            return fu.t;
+        }
+        return null;
     }
 
     private static boolean isDangerousAffirmativeCaption(String cap) {
@@ -8157,10 +8198,14 @@ public final class Zeus {
             }
             if (fu.s == dialog) {
                 fu.s = null;
+            } else if (fu.t == dialog) {
+                fu.t = null;
             }
         } catch (Throwable t) {
             if (fu.s == dialog) {
                 fu.s = null;
+            } else if (fu.t == dialog) {
+                fu.t = null;
             }
         }
     }
@@ -9095,6 +9140,34 @@ public final class Zeus {
                 Object vt = ft.get(dialog);
                 if (vt instanceof String && ((String) vt).length() > 0) {
                     out.append((String) vt).append(' ');
+                }
+            } catch (Throwable t) {
+            }
+        } else if (dialog instanceof dz) {
+            try {
+                java.lang.reflect.Field fh = dz.class.getDeclaredField("h");
+                fh.setAccessible(true);
+                Object vh = fh.get(dialog);
+                if (vh instanceof String && ((String) vh).length() > 0) {
+                    out.append((String) vh).append(' ');
+                }
+            } catch (Throwable t) {
+            }
+            try {
+                java.lang.reflect.Field fi = dz.class.getDeclaredField("i");
+                fi.setAccessible(true);
+                Object vi = fi.get(dialog);
+                if (vi instanceof String && ((String) vi).length() > 0) {
+                    out.append((String) vi).append(' ');
+                }
+            } catch (Throwable t) {
+            }
+            try {
+                java.lang.reflect.Field fj = dz.class.getDeclaredField("j");
+                fj.setAccessible(true);
+                Object vj = fj.get(dialog);
+                if (vj instanceof String && ((String) vj).length() > 0) {
+                    out.append((String) vj).append(' ');
                 }
             } catch (Throwable t) {
             }

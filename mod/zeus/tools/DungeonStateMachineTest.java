@@ -2269,6 +2269,64 @@ public class DungeonStateMachineTest {
                 ((Integer) get("dungeonState")).intValue() == ((Integer) get("DN_FAILURE")).intValue());
         check("Test 68: Dungeon run timeout increments fails count", ((Integer) get("dungeonFails")).intValue() == 1);
 
+        // ---------------------------------------------------------------------
+        // Test 69: Background Giao Tiếp Dialog Does Not Re-trigger at Step 2
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 69: Background Giao Tiếp Dialog Does Not Re-trigger at Step 2 ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonState", Zeus.DN_PREPARATION);
+        set("dungeonStep", 2);
+        set("dungeonWait", 60);
+        set("dungeonAwaitingEntry", true);
+        fu.q.d = 1;
+
+        // Background dialog with "Giao tiếp" still lingering in fu.s
+        ah bgDialog = new ah();
+        bgDialog.q = new String[] { "Pho Chi Huy: Can gi?" };
+        bgDialog.C = new et("buttons");
+        bgDialog.C.a(new bt("Giao tiếp", 0));
+        bgDialog.C.a(new bt("Đóng", 1));
+        fu.s = bgDialog;
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+
+        check("Test 69: Zero packets sent (no duplicate opcode 23)", getSentPackets().isEmpty());
+        check("Test 69: Step remains 2", ((Integer) get("dungeonStep")).intValue() == 2);
+        check("Test 69: Still awaiting entry", ((Boolean) get("dungeonAwaitingEntry")).booleanValue());
+
+        // --- Test 70: Confirmation Dialog in fu.t & Awaiting Entry No-Ask-NPC ---
+        System.out.println("--- Test 70: Confirmation Dialog in fu.t & Awaiting Entry No-Ask-NPC ---");
+        initWorld();
+        set("dungeonEnabled", true);
+        set("dungeonState", 2); // DN_INTERACT
+        set("dungeonStep", 2);
+        set("dungeonWait", 0);
+        set("dungeonAwaitingEntry", true);
+        fu.q.d = 1;
+        fu.s = null;
+
+        // Part A: When dungeonWait == 0 and dungeonAwaitingEntry == true, dungeonInteract must NOT ask NPC
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Test 70A: Zero packets sent when wait expires while awaiting entry (no NPC re-ask)", getSentPackets().isEmpty());
+        check("Test 70A: Still awaiting entry", ((Boolean) get("dungeonAwaitingEntry")).booleanValue());
+        check("Test 70A: Step remains 2", ((Integer) get("dungeonStep")).intValue() == 2);
+
+        // Part B: Confirmation dialog arriving in fu.t
+        ah confirmDlgT = new ah();
+        confirmDlgT.q = new String[] { "Ban co muon vao nga tu tu than mot minh" };
+        confirmDlgT.C = new et("buttons");
+        confirmDlgT.C.a(new bt("Vào", 0));
+        confirmDlgT.C.a(new bt("Đóng", 1));
+        fu.t = confirmDlgT;
+        fu.s = null;
+
+        call("dungeonInteract");
+        check("Test 70B: Step advanced to 3 on fu.t confirmation dialog", ((Integer) get("dungeonStep")).intValue() == 3);
+        check("Test 70B: Wait budget armed for teleport", ((Integer) get("dungeonWait")).intValue() == 80);
+
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
     }
