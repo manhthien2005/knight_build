@@ -8001,12 +8001,20 @@ public final class Zeus {
                     fb.setAccessible(true);
                     Object btn = fb.get(dialog);
                     if (btn instanceof bt) {
-                        trace("DUNGEON dialog confirming via dz.b=\"" + clean(((bt) btn).a) + "\"");
-                        ((bt) btn).a();
-                        return true;
+                        bt b = (bt) btn;
+                        String cap = (b.a == null) ? "" : norm(b.a).trim();
+                        if (cap.length() > 0 && isAffirmativeCaption(cap) && !isNegativeCaption(cap)) {
+                            trace("DUNGEON dialog confirming via dz.b=\"" + clean(b.a) + "\"");
+                            b.a();
+                            return true;
+                        } else {
+                            trace("DUNGEON dz.b caption blank, negative, or ambiguous: \"" + clean(b.a) + "\"");
+                            return false;
+                        }
                     }
                 } catch (Throwable t) {
                 }
+                return false;
             }
 
             // 2. Check softkeys Z (left) and ab (right)
@@ -8082,13 +8090,18 @@ public final class Zeus {
                 return false;
             }
             String text = norm(dialogText(dialog));
-            return text.indexOf("nga tu") >= 0 || text.indexOf("tu than") >= 0 || text.indexOf("mot minh") >= 0;
+            boolean hasDungeonId = text.indexOf("nga tu") >= 0 || text.indexOf("tu than") >= 0;
+            boolean hasEntryIntent = text.indexOf("vao") >= 0;
+            return hasDungeonId && hasEntryIntent;
         } catch (Throwable t) {
             return false;
         }
     }
 
     private static da dungeonConfirmDialogTarget() {
+        if (dungeonStep != 2) {
+            return null;
+        }
         if (isDungeonConfirmDialog(fu.s)) {
             return fu.s;
         }
@@ -8128,7 +8141,7 @@ public final class Zeus {
         if (dialog == null) {
             return false;
         }
-        if (isDungeonConfirmDialog(dialog)) {
+        if (dungeonStep == 2 && isDungeonConfirmDialog(dialog)) {
             return false;
         }
         if (isNpcSpeechDialog(dialog)) {

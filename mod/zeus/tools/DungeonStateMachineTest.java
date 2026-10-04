@@ -2323,9 +2323,168 @@ public class DungeonStateMachineTest {
         fu.t = confirmDlgT;
         fu.s = null;
 
+        // ---------------------------------------------------------------------
+        // Test 71: Observed Live Solo Entry Modal Remains Accepted
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 71: Observed Live Solo Entry Modal Remains Accepted ---");
+        initWorld();
+        set("dungeonEnabled", true);
+        set("dungeonState", 2); // DN_INTERACT / DN_PREPARATION
+        set("dungeonStep", 2);
+        set("dungeonWait", 60);
+        set("dungeonAwaitingEntry", true);
+        fu.q.d = 1;
+
+        final int[] test71Action = new int[1];
+        ah liveSoloDlg = new ah();
+        liveSoloDlg.q = new String[] { "Ban co muon vao nga tu tu than mot minh" };
+        liveSoloDlg.C = new et("buttons");
+        liveSoloDlg.C.a(new bt("Ok", 0, new cg() {
+            public void a(int e, int f) {
+                test71Action[0]++;
+            }
+        }));
+        liveSoloDlg.C.a(new bt("Đóng", 1));
+        fu.s = liveSoloDlg;
+        fu.t = null;
+
         call("dungeonInteract");
-        check("Test 70B: Step advanced to 3 on fu.t confirmation dialog", ((Integer) get("dungeonStep")).intValue() == 3);
-        check("Test 70B: Wait budget armed for teleport", ((Integer) get("dungeonWait")).intValue() == 80);
+        check("Test 71: Confirmation executes exactly once", test71Action[0] == 1);
+        check("Test 71: dungeonStep becomes 3", ((Integer) get("dungeonStep")).intValue() == 3);
+        check("Test 71: Teleport wait is armed (80)", ((Integer) get("dungeonWait")).intValue() == 80);
+
+        // ---------------------------------------------------------------------
+        // Test 72: Standalone 'mot minh' Unrelated Modal Is Never Auto-Confirmed
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 72: Standalone 'mot minh' Unrelated Modal Is Never Auto-Confirmed ---");
+        initWorld();
+        set("dungeonEnabled", true);
+        set("dungeonState", 2);
+        set("dungeonStep", 2);
+        set("dungeonWait", 60);
+        set("dungeonAwaitingEntry", true);
+        fu.q.d = 1;
+
+        final int[] test72Action = new int[1];
+        ah unrelatedMotMinh = new ah();
+        unrelatedMotMinh.q = new String[] { "Ban co muon tiep tuc mot minh khong?" };
+        unrelatedMotMinh.C = new et("buttons");
+        unrelatedMotMinh.C.a(new bt("Dong y", 0, new cg() {
+            public void a(int e, int f) {
+                test72Action[0]++;
+            }
+        }));
+        unrelatedMotMinh.C.a(new bt("Khong", 1));
+        fu.s = unrelatedMotMinh;
+        fu.t = null;
+
+        java.lang.reflect.Method mIsConfirm = Zeus.class.getDeclaredMethod("isDungeonConfirmDialog", da.class);
+        mIsConfirm.setAccessible(true);
+        boolean isConfirm = ((Boolean) mIsConfirm.invoke(null, unrelatedMotMinh)).booleanValue();
+        check("Test 72: isDungeonConfirmDialog rejects standalone mot minh", !isConfirm);
+
+        call("dungeonInteract");
+        check("Test 72: No affirmative callback executed on standalone mot minh", test72Action[0] == 0);
+        check("Test 72: Step does not advance to 3", ((Integer) get("dungeonStep")).intValue() != 3);
+        check("Test 72: isBlockingDialog marks unrelated modal as blocker", Zeus.isBlockingDialog(unrelatedMotMinh));
+
+        // ---------------------------------------------------------------------
+        // Test 73: Dungeon-Looking Modal Before Submenu Dispatch Is Not Auto-Confirmed
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 73: Dungeon-Looking Modal Before Submenu Dispatch Is Not Auto-Confirmed ---");
+        initWorld();
+        set("dungeonEnabled", true);
+        set("dungeonState", 2);
+        set("dungeonStep", 0);
+        set("dungeonWait", 60);
+        set("dungeonAwaitingEntry", false);
+        fu.q.d = 1;
+
+        final int[] test73Action = new int[1];
+        ah earlyConfirmDlg = new ah();
+        earlyConfirmDlg.q = new String[] { "Ban co muon vao nga tu tu than khong?" };
+        earlyConfirmDlg.C = new et("buttons");
+        earlyConfirmDlg.C.a(new bt("Vao", 0, new cg() {
+            public void a(int e, int f) {
+                test73Action[0]++;
+            }
+        }));
+        earlyConfirmDlg.C.a(new bt("Dong", 1));
+        fu.s = earlyConfirmDlg;
+        fu.t = null;
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Test 73: No confirmation callback before submenu dispatch", test73Action[0] == 0);
+        check("Test 73: Step remains 0 (not advanced to 3)", ((Integer) get("dungeonStep")).intValue() == 0);
+        check("Test 73: Zero packets sent (no premature -32)", getSentPackets().isEmpty());
+
+        // ---------------------------------------------------------------------
+        // Test 74: Negative dz.b Is Never Activated
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 74: Negative dz.b Is Never Activated ---");
+        initWorld();
+        set("dungeonEnabled", true);
+        set("dungeonState", 2);
+        set("dungeonStep", 2);
+        set("dungeonWait", 60);
+        set("dungeonAwaitingEntry", true);
+        fu.q.d = 1;
+
+        final int[] test74Action = new int[1];
+        dz negDzDlg = new dz();
+        java.lang.reflect.Field fH = dz.class.getDeclaredField("h");
+        fH.setAccessible(true);
+        fH.set(negDzDlg, "Ban co muon vao");
+        java.lang.reflect.Field fI = dz.class.getDeclaredField("i");
+        fI.setAccessible(true);
+        fI.set(negDzDlg, "nga tu tu than");
+        java.lang.reflect.Field fJ = dz.class.getDeclaredField("j");
+        fJ.setAccessible(true);
+        fJ.set(negDzDlg, "mot minh");
+        java.lang.reflect.Field fB = dz.class.getDeclaredField("b");
+        fB.setAccessible(true);
+        fB.set(negDzDlg, new bt("Không", 0, new cg() {
+            public void a(int e, int f) {
+                test74Action[0]++;
+            }
+        }));
+        fu.s = negDzDlg;
+        fu.t = null;
+
+        call("dungeonInteract");
+        check("Test 74: Negative dz.b callback is never invoked", test74Action[0] == 0);
+        check("Test 74: Step does not advance to 3", ((Integer) get("dungeonStep")).intValue() != 3);
+
+        // ---------------------------------------------------------------------
+        // Test 75: fu.t Giao Tiếp Rejection Contract Remains Intact
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 75: fu.t Giao Tiếp Rejection Contract Remains Intact ---");
+        initWorld();
+        set("dungeonEnabled", true);
+        set("dungeonState", 2);
+        set("dungeonStep", 0);
+        set("dungeonWait", 60);
+        set("dungeonAwaitingEntry", false);
+        fu.q.d = 1;
+
+        final int[] test75Action = new int[1];
+        ah fuTGiaoTiep = new ah();
+        fuTGiaoTiep.q = new String[] { "Pho Chi Huy: Can gi?" };
+        fuTGiaoTiep.C = new et("buttons");
+        fuTGiaoTiep.C.a(new bt("Giao tiếp", 0, new cg() {
+            public void a(int e, int f) {
+                test75Action[0]++;
+            }
+        }));
+        fu.s = null;
+        fu.t = fuTGiaoTiep;
+
+        getSentPackets().clear();
+        call("dungeonInteract");
+        check("Test 75: fu.t is not used as source for Giao tiếp", test75Action[0] == 0);
+        check("Test 75: Step remains 0", ((Integer) get("dungeonStep")).intValue() == 0);
+        check("Test 75: Zero packets sent from fu.t Giao tiếp", getSentPackets().isEmpty());
 
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
