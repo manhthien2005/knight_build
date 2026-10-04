@@ -1,35 +1,15 @@
 /*
- * PatchZeus — inject Zeus_Knight hooks into the vanilla jar.
+ * PatchZeus — inject Zeus_Knight hooks into the official v4.0.3 vanilla jar.
  *
- * Unlike the potato build (which rewrites com.silverknight/a, ey, br), the
- * Zeus round-1 patch is tiny and low-risk:
- *
- *   1. Hook end of fu.b(): inject `invokestatic Zeus.tick()V` at the RETURN.
- *      fu.b() is the main tick — every frame. Verified at orig_decomp/fu.java:261.
- *
- *   2. Widen x.k from private to public.
- *      x.k is the character-select cursor (orig_decomp/x.java:7). Zeus needs
- *      to set it. One access-modifier bit change; every other byte stays.
- *
- *   3. Widen bq.j(II)Z from private to public.
- *      The client's own "can this skill fire?" predicate (orig_decomp/bq.java:1147).
- *      Attack presses hotkeys through it instead of re-deriving the per-level MP
- *      table, which is the kind of duplicated rule that drifts.
- *
- *   4. Widen ah.C from private to public.
- *      The dialog's own button list (orig_decomp/ah.java:21). Dismissing a dialog
- *      means finding its OK button and calling bt.a() — the same call a tap makes.
- *      Pressing at a coordinate instead only works if the guess lands on the button.
- *
- *   5. Trace hooks in ef.b() and fr.a(...): call Zeus.sent/Zeus.menu. Diagnostic only;
- *      Zeus returns immediately unless the operator drops a marker file, so a shipped jar
- *      carries the two calls and no behaviour.
- *
- *   6. (Optional, off by default) Gate the 9 dialog constructors in fu with
- *      `if (Zeus.dialog(text)) return;`. Round 1 does NOT swallow dialogs —
- *      the vanilla reconnect loop lives inside ah.a(), which only runs while
- *      the dialog is alive, so swallowing would kill it. Kept here so a later
- *      round can flip it on per-module without touching this tool.
+ * Hooks:
+ *   1. Main/GameCanvas.update()V: inject `invokestatic Zeus.tick()V` at the RETURN.
+ *   2. GameScreen/SelectCharScreen.selectChar: widen private/package -> public.
+ *   3. InterfaceComponents/MsgDialog.cmdList: widen private/package -> public.
+ *   4. netcommand/Cmd_Message.send()V: inject `Zeus.sent(this.m)` at prologue.
+ *   5. Model/Menu2:
+ *      - startAt(mVector, int, String, boolean, mVector): inject local menu hook Zeus.menu(mVector, String).
+ *      - setinfoDynamic(mVector, int, int, int, String): inject server menu hook Zeus.serverMenu(mVector, idMenu, idNPC, String).
+ *   6. GameScreen/GameScreen.paint(mGraphics)V: inject `Zeus.paint(g)` before RETURN.
  *
  * usage: PatchZeus <in.jar> <out-class-dir>
  */
@@ -50,16 +30,6 @@ import org.objectweb.asm.Opcodes;
 
 public final class PatchZeus {
 
-    /** fu methods that build a dialog; third element = slot of the text arg. */
-    private static final String[][] DIALOG_METHODS = {
-        { "a", "(Ljava/lang/String;)V",                "0" },
-        { "a", "(Ljava/lang/String;B)V",               "0" },
-        { "a", "(Ljava/lang/String;Ljava/lang/String;)V", "0" },
-        { "a", "(Ljava/lang/String;Lbt;)V",            "0" },
-        { "a", "(Ljava/lang/String;Let;)V",            "0" },
-        { "a", "(Ljava/lang/String;Ljava/lang/String;IIB)V", "0" },
-    };
-
     public static void main(String[] args) throws Exception {
         if (args.length != 2) {
             System.out.println("usage: PatchZeus <in.jar> <out-class-dir>");
@@ -68,122 +38,81 @@ public final class PatchZeus {
         ZipFile zf = new ZipFile(args[0]);
         File outDir = new File(args[1]);
 
-        // ── 1. Hook fu.b() ──────────────────────────────────────────────
-        byte[] fu = readAll(zf.getInputStream(zf.getEntry("fu.class")));
-        ClassReader cr = new ClassReader(fu);
-        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-        TickHook tick = new TickHook(cw);
-        cr.accept(tick, 0);
+        // ── 1. Hook Main/GameCanvas.update()V ───────────────────────────
+        byte[] gcBytes = readAll(zf.getInputStream(zf.getEntry("Main/GameCanvas.class")));
+        ClassReader gcr = new ClassReader(gcBytes);
+        ClassWriter gcw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        TickHook tick = new TickHook(gcw);
+        gcr.accept(tick, 0);
         if (!tick.hooked) {
-            throw new IllegalStateException("fu.b()V: no RETURN found — refusing to write");
+            throw new IllegalStateException("Main/GameCanvas.update()V: no RETURN found — refusing to write");
         }
-        writeClass(outDir, "fu.class", cw.toByteArray());
+        writeClass(outDir, "Main/GameCanvas.class", gcw.toByteArray());
 
-        // ── 2. Widen x.k private -> public ──────────────────────────────
-        byte[] xc = readAll(zf.getInputStream(zf.getEntry("x.class")));
-        ClassReader xcr = new ClassReader(xc);
-        ClassWriter xcw = new ClassWriter(0);
-        FieldWidener widen = new FieldWidener(xcw, "k");
-        xcr.accept(widen, 0);
-        if (!widen.widened) {
-            throw new IllegalStateException("x.k field not found — refusing to write");
+        // ── 2. Widen GameScreen/SelectCharScreen.selectChar -> public ────
+        byte[] scBytes = readAll(zf.getInputStream(zf.getEntry("GameScreen/SelectCharScreen.class")));
+        ClassReader scr = new ClassReader(scBytes);
+        ClassWriter scw = new ClassWriter(0);
+        FieldWidener widenSelectChar = new FieldWidener(scw, "selectChar");
+        scr.accept(widenSelectChar, 0);
+        if (!widenSelectChar.widened) {
+            throw new IllegalStateException("GameScreen/SelectCharScreen.selectChar not found — refusing to write");
         }
-        writeClass(outDir, "x.class", xcw.toByteArray());
+        writeClass(outDir, "GameScreen/SelectCharScreen.class", scw.toByteArray());
 
-        // ── 3. Widen bq.j(II)Z private -> public ────────────────────────
-        // The client's own "can this skill fire?" predicate: learned, off cooldown, MP paid,
-        // not already casting (orig_decomp/bq.java:1147). Attack presses hotkeys through it
-        // rather than re-deriving the per-level MP table, which would mean re-implementing
-        // ct.c(id).k[I[id]+J[id]-1].a and getting to be wrong about it independently.
-        byte[] bqc = readAll(zf.getInputStream(zf.getEntry("bq.class")));
-        ClassReader bqcr = new ClassReader(bqc);
-        ClassWriter bqcw = new ClassWriter(0);
-        MethodWidener widenSkill = new MethodWidener(bqcw, "j", "(II)Z");
-        bqcr.accept(widenSkill, 0);
-        if (!widenSkill.widened) {
-            throw new IllegalStateException("bq.j(II)Z not found — refusing to write");
+        // ── 3. Widen InterfaceComponents/MsgDialog.cmdList -> public ────
+        byte[] mdBytes = readAll(zf.getInputStream(zf.getEntry("InterfaceComponents/MsgDialog.class")));
+        ClassReader mdr = new ClassReader(mdBytes);
+        ClassWriter mdw = new ClassWriter(0);
+        FieldWidener widenCmdList = new FieldWidener(mdw, "cmdList");
+        mdr.accept(widenCmdList, 0);
+        if (!widenCmdList.widened) {
+            throw new IllegalStateException("InterfaceComponents/MsgDialog.cmdList not found — refusing to write");
         }
-        writeClass(outDir, "bq.class", bqcw.toByteArray());
+        writeClass(outDir, "InterfaceComponents/MsgDialog.class", mdw.toByteArray());
 
-        // ── 4. Widen ah.C private -> public ─────────────────────────────
-        // The dialog's own button list (orig_decomp/ah.java:21, `private et C`). A dialog is
-        // dismissed by finding its OK button and invoking `bt.a()` — the same call the operator's
-        // tap makes — instead of synthesising a press at some coordinate and hoping it lands on
-        // the button. KnightMod reaches the same field the same way, which is what confirmed the
-        // approach; its build ships `ah.C` already widened, so it needed no patch of its own.
-        byte[] ahc = readAll(zf.getInputStream(zf.getEntry("ah.class")));
-        ClassReader ahcr = new ClassReader(ahc);
-        ClassWriter ahcw = new ClassWriter(0);
-        FieldWidener widenButtons = new FieldWidener(ahcw, "C");
-        ahcr.accept(widenButtons, 0);
-        if (!widenButtons.widened) {
-            throw new IllegalStateException("ah.C field not found — refusing to write");
-        }
-        writeClass(outDir, "ah.class", ahcw.toByteArray());
-
-        // ── 5. Trace hooks: ef.b() and fr.a(et,int,String,boolean,et) ────
-        // Both are diagnostic. They call into Zeus unconditionally, and Zeus returns on its first
-        // line unless the operator dropped the marker file, so a shipped jar carries the two calls
-        // and no behaviour. They exist because two questions cannot be answered by reading the
-        // client: what packet a native menu actually sends, and what a clickable board on the map
-        // really is. Recording the real flow beats guessing at it.
-        byte[] efc = readAll(zf.getInputStream(zf.getEntry("ef.class")));
-        ClassReader efcr = new ClassReader(efc);
-        ClassWriter efcw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-        SendHook sendHook = new SendHook(efcw);
-        efcr.accept(sendHook, 0);
+        // ── 4. Trace hook netcommand/Cmd_Message.send()V ─────────────────
+        byte[] cmdBytes = readAll(zf.getInputStream(zf.getEntry("netcommand/Cmd_Message.class")));
+        ClassReader cmdr = new ClassReader(cmdBytes);
+        ClassWriter cmdw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        SendHook sendHook = new SendHook(cmdw);
+        cmdr.accept(sendHook, 0);
         if (!sendHook.hooked) {
-            throw new IllegalStateException("ef.b()V not found — refusing to write");
+            throw new IllegalStateException("netcommand/Cmd_Message.send()V not found — refusing to write");
         }
-        writeClass(outDir, "ef.class", efcw.toByteArray());
+        writeClass(outDir, "netcommand/Cmd_Message.class", cmdw.toByteArray());
 
-        byte[] frc = readAll(zf.getInputStream(zf.getEntry("fr.class")));
-        ClassReader frcr = new ClassReader(frc);
-        ClassWriter frcw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-        MenuHook menuHook = new MenuHook(frcw);
-        frcr.accept(menuHook, 0);
+        // ── 5. Menu hooks Model/Menu2 ───────────────────────────────────
+        byte[] menuBytes = readAll(zf.getInputStream(zf.getEntry("Model/Menu2.class")));
+        ClassReader menur = new ClassReader(menuBytes);
+        ClassWriter menuw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        MenuHook menuHook = new MenuHook(menuw);
+        menur.accept(menuHook, 0);
         if (!menuHook.hooked) {
-            throw new IllegalStateException("fr.a menu builder not found — refusing to write");
+            throw new IllegalStateException("Model/Menu2.startAt menu builder not found — refusing to write");
         }
         if (!menuHook.hookedServer) {
-            throw new IllegalStateException("fr.a server menu builder not found — refusing to write");
+            throw new IllegalStateException("Model/Menu2.setinfoDynamic server menu builder not found — refusing to write");
         }
-        writeClass(outDir, "fr.class", frcw.toByteArray());
+        writeClass(outDir, "Model/Menu2.class", menuw.toByteArray());
 
-        // The range ring: a world-space overlay, so it has to be drawn from the world paint rather
-        // than from the tick. cn is the game screen, and `a(bx)` is where it paints itself.
-        byte[] cnc = readAll(zf.getInputStream(zf.getEntry("cn.class")));
-        ClassReader cncr = new ClassReader(cnc);
-        ClassWriter cncw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-        PaintHook paintHook = new PaintHook(cncw);
-        cncr.accept(paintHook, 0);
+        // ── 6. Paint hook GameScreen/GameScreen.paint(mGraphics)V ────────
+        byte[] gsBytes = readAll(zf.getInputStream(zf.getEntry("GameScreen/GameScreen.class")));
+        ClassReader gsr = new ClassReader(gsBytes);
+        ClassWriter gsw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        PaintHook paintHook = new PaintHook(gsw);
+        gsr.accept(paintHook, 0);
         if (!paintHook.hooked) {
-            throw new IllegalStateException("cn.a(Lbx;)V not found — refusing to write");
+            throw new IllegalStateException("GameScreen/GameScreen.paint(LCLib/mGraphics;)V not found — refusing to write");
         }
-        writeClass(outDir, "cn.class", cncw.toByteArray());
-
-        // ── 6. Dialog gates (off by default) ─────────────────────────────
-        // Round 1 ships without dialog swallowing. Flip GATE_DIALOGS to true
-        // when a module needs it; each gate is a two-instruction prologue:
-        //   aload_0
-        //   invokestatic Zeus.dialog(Ljava/lang/String;)Z
-        //   ifeq L  /  return
-        if (GATE_DIALOGS) {
-            ClassWriter dcw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-            DialogGates dg = new DialogGates(dcw);
-            cr.accept(dg, 0);
-            writeClass(outDir, "fu.class", dcw.toByteArray());
-        }
+        writeClass(outDir, "GameScreen/GameScreen.class", gsw.toByteArray());
 
         zf.close();
-        System.out.println("patched fu (tick hook), x (k public), bq (j public), ah (C public),"
-                + " ef (send trace), fr (menu trace)"
-                + (GATE_DIALOGS ? ", fu (dialog gates)" : ""));
+        System.out.println("PatchZeus complete: patched GameCanvas, SelectCharScreen, MsgDialog, Cmd_Message, Menu2, GameScreen");
     }
 
-    private static final boolean GATE_DIALOGS = false;
 
-    // ── fu.b() tick hook ────────────────────────────────────────────────
+    // ── GameCanvas.update() tick hook ───────────────────────────────────
     private static final class TickHook extends ClassAdapter {
         boolean hooked = false;
 
@@ -194,11 +123,10 @@ public final class PatchZeus {
         public MethodVisitor visitMethod(int access, String name, String desc,
                                          String signature, String[] exceptions) {
             MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
-            if (mv != null && "b".equals(name) && "()V".equals(desc)) {
+            if (mv != null && "update".equals(name) && "()V".equals(desc)) {
                 return new MethodAdapter(mv) {
                     public void visitInsn(int opcode) {
                         if (opcode == Opcodes.RETURN && !hooked) {
-                            // inject before the final return
                             visitMethodInsn(Opcodes.INVOKESTATIC,
                                     "Zeus", "tick", "()V");
                             hooked = true;
@@ -211,7 +139,7 @@ public final class PatchZeus {
         }
     }
 
-    // ── one named field private -> public ────────────────────────────────
+    // ── Field widener (private/package-private -> public) ───────────────
     private static final class FieldWidener extends ClassAdapter {
         private final String targetName;
         boolean widened = false;
@@ -223,42 +151,15 @@ public final class PatchZeus {
 
         public org.objectweb.asm.FieldVisitor visitField(int access, String name,
                 String desc, String signature, Object value) {
-            if (targetName.equals(name) && (access & Opcodes.ACC_PRIVATE) != 0) {
-                access = (access & ~Opcodes.ACC_PRIVATE) | Opcodes.ACC_PUBLIC;
+            if (targetName.equals(name)) {
+                access = (access & ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED)) | Opcodes.ACC_PUBLIC;
                 widened = true;
             }
             return super.visitField(access, name, desc, signature, value);
         }
     }
 
-    // ── one named method private -> public ───────────────────────────────
-    private static final class MethodWidener extends ClassAdapter {
-        private final String targetName;
-        private final String targetDesc;
-        boolean widened = false;
-
-        MethodWidener(ClassWriter cw, String name, String desc) {
-            super(cw);
-            this.targetName = name;
-            this.targetDesc = desc;
-        }
-
-        public MethodVisitor visitMethod(int access, String name, String desc,
-                                         String signature, String[] exceptions) {
-            if (targetName.equals(name) && targetDesc.equals(desc)
-                    && (access & Opcodes.ACC_PRIVATE) != 0) {
-                access = (access & ~Opcodes.ACC_PRIVATE) | Opcodes.ACC_PUBLIC;
-                widened = true;
-            }
-            return super.visitMethod(access, name, desc, signature, exceptions);
-        }
-    }
-
-    // ── prologue hook: record every outbound packet ──────────────────────
-    //
-    // `ef.b()` is the single choke point every sender funnels through: `q extends ef`, and
-    // every `q` method ends in `this.b()`. Injecting there means one hook instead of the
-    // eighty-odd senders in `q`, and the payload is already complete at that point.
+    // ── Send hook: Cmd_Message.send() ───────────────────────────────────
     private static final class SendHook extends ClassAdapter {
         boolean hooked = false;
 
@@ -269,32 +170,24 @@ public final class PatchZeus {
         public MethodVisitor visitMethod(int access, String name, String desc,
                                          String signature, String[] exceptions) {
             MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
-            if (mv == null || !"b".equals(name) || !"()V".equals(desc)) {
+            if (mv == null || !"send".equals(name) || !"()V".equals(desc)) {
                 return mv;
             }
             hooked = true;
             return new MethodAdapter(mv) {
                 public void visitCode() {
                     super.visitCode();
-                    // Zeus.sent(this.b)
                     visitVarInsn(Opcodes.ALOAD, 0);
-                    visitFieldInsn(Opcodes.GETFIELD, "ef", "b", "Lep;");
-                    visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "sent", "(Lep;)V");
+                    visitFieldInsn(Opcodes.GETFIELD, "netcommand/Cmd_Message", "m", "Lnet/Message;");
+                    visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "sent", "(Lnet/Message;)V");
                 }
             };
         }
     }
 
-    // ── PaintHook ────────────────────────────────────────────────────────
-    // `cn.a(bx)` is the world paint. The prologue runs while the graphics context is still
-    // translated into world space (`bx2.a(-p.d.a, -p.d.b)` is the second statement of the method),
-    // so a shape drawn from it lands on the map rather than on the screen — which is what an
-    // overlay tied to the character needs.
-    //
-    // Appended, not gated: it draws nothing unless a module asks, and the alternative — drawing
-    // from the client's own overlay list — would mean owning an entity the client also owns.
+    // ── Paint hook: GameScreen.paint(mGraphics) ─────────────────────────
     private static final class PaintHook extends ClassAdapter {
-        boolean hooked;
+        boolean hooked = false;
 
         PaintHook(ClassWriter cw) {
             super(cw);
@@ -303,19 +196,15 @@ public final class PatchZeus {
         public MethodVisitor visitMethod(int access, String name, String desc,
                                          String signature, String[] exceptions) {
             MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
-            if (mv == null || !"a".equals(name) || !"(Lbx;)V".equals(desc)) {
+            if (mv == null || !"paint".equals(name) || !"(LCLib/mGraphics;)V".equals(desc)) {
                 return mv;
             }
             hooked = true;
             return new MethodAdapter(mv) {
-                // Drawn on the way OUT, not on the way in. A prologue draws before `fu.q.a(bx2)` paints
-                // the map, so the map covered the ring completely — nothing appeared at all. At every
-                // return the map and its entities are already down, and the context is still translated
-                // into world space, so world coordinates land where they belong with no arithmetic.
                 public void visitInsn(int opcode) {
                     if (opcode == Opcodes.RETURN) {
                         visitVarInsn(Opcodes.ALOAD, 1);
-                        visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "paint", "(Lbx;)V");
+                        visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "paint", "(LCLib/mGraphics;)V");
                     }
                     super.visitInsn(opcode);
                 }
@@ -323,18 +212,10 @@ public final class PatchZeus {
         }
     }
 
-    // ── prologue hook: record every menu the client shows ────────────────
-    //
-    // `fr.a(et,int,String,boolean,et)` is the menu builder. The captions and their command ids
-    // are the only place a server-driven menu says what selecting an entry would send, so this
-    // is what makes a native GUI reproducible instead of guessed at.
+    // ── Menu hooks: Menu2.startAt and Menu2.setinfoDynamic ──────────────
     private static final class MenuHook extends ClassAdapter {
-        // Two overloads, two different menus. The first builds a locally-assembled menu, which is
-        // what the zone board arrives as; the second builds a server-driven one (er.v, opcode −30),
-        // which is what a teleport stone arrives as. Hooking only the first is why the stone's
-        // destination list never showed up in a trace.
-        private static final String LOCAL_DESC = "(Let;ILjava/lang/String;ZLet;)V";
-        private static final String SERVER_DESC = "(Let;IIILjava/lang/String;)V";
+        private static final String LOCAL_DESC = "(LCLib/mVector;ILjava/lang/String;ZLCLib/mVector;)V";
+        private static final String SERVER_DESC = "(LCLib/mVector;IIILjava/lang/String;)V";
         boolean hooked = false;
         boolean hookedServer = false;
 
@@ -345,22 +226,18 @@ public final class PatchZeus {
         public MethodVisitor visitMethod(int access, String name, String desc,
                                          String signature, String[] exceptions) {
             MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
-            if (mv == null || !"a".equals(name)) {
+            if (mv == null) {
                 return mv;
             }
-            if (LOCAL_DESC.equals(desc)) {
+            if ("startAt".equals(name) && LOCAL_DESC.equals(desc)) {
                 hooked = true;
                 return new MethodAdapter(mv) {
                     public void visitCode() {
                         super.visitCode();
-                        // Zeus.menu(items, title): slot 1 is the et, slot 3 the title (slot 2 is int).
-                        // It returns true when a module took the menu for itself, and the builder then
-                        // returns before assigning `this.a = true` — so the menu is never drawn at all.
-                        // Dismissing it afterwards was not enough: the frame in between still showed.
                         visitVarInsn(Opcodes.ALOAD, 1);
                         visitVarInsn(Opcodes.ALOAD, 3);
                         visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "menu",
-                                "(Let;Ljava/lang/String;)Z");
+                                "(LCLib/mVector;Ljava/lang/String;)Z");
                         Label body = new Label();
                         visitJumpInsn(Opcodes.IFEQ, body);
                         visitInsn(Opcodes.RETURN);
@@ -368,71 +245,23 @@ public final class PatchZeus {
                     }
                 };
             }
-            if (SERVER_DESC.equals(desc)) {
+            if ("setinfoDynamic".equals(name) && SERVER_DESC.equals(desc)) {
                 hookedServer = true;
                 return new MethodAdapter(mv) {
                     public void visitCode() {
                         super.visitCode();
-                        // fr.a(et, 2, idMenu, idNPC, title) stores idMenu in fr.B and idNPC in fr.C
-                        // (fr.java:277-278), and fr.a(2, _) sends q.a().b(C, B, fr.h) — so those two
-                        // numbers plus the entry index are the whole selection. Both are private, so
-                        // reading them off the builder call is the only way to see them.
-                        //
-                        // Same swallow as the local overload: a module that answers the menu itself
-                        // has no use for it on screen, and the operator did not ask to see it.
                         visitVarInsn(Opcodes.ALOAD, 1);
                         visitVarInsn(Opcodes.ILOAD, 3);
                         visitVarInsn(Opcodes.ILOAD, 4);
                         visitVarInsn(Opcodes.ALOAD, 5);
                         visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "serverMenu",
-                                "(Let;IILjava/lang/String;)Z");
+                                "(LCLib/mVector;IILjava/lang/String;)Z");
                         Label body = new Label();
                         visitJumpInsn(Opcodes.IFEQ, body);
                         visitInsn(Opcodes.RETURN);
                         visitLabel(body);
                     }
                 };
-            }
-            return mv;
-        }
-    }
-
-    // ── Dialog gates ─────────────────────────────────────────────────────
-    private static final class DialogGates extends ClassAdapter {
-        int gated = 0;
-
-        DialogGates(ClassWriter cw) {
-            super(cw);
-        }
-
-        public MethodVisitor visitMethod(int access, String name, String desc,
-                                         String signature, String[] exceptions) {
-            MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
-            if (mv == null) {
-                return mv;
-            }
-            for (int i = 0; i < DIALOG_METHODS.length; i++) {
-                if (DIALOG_METHODS[i][0].equals(name) && DIALOG_METHODS[i][1].equals(desc)) {
-                    final int textArg = Integer.parseInt(DIALOG_METHODS[i][2]);
-                    ++gated;
-                    return new MethodAdapter(mv) {
-                        public void visitCode() {
-                            super.visitCode();
-                            Label body = new Label();
-                            // load the text argument (all targets are static)
-                            switch (textArg) {
-                                case 0: visitVarInsn(Opcodes.ALOAD, 0); break;
-                                default:
-                                    throw new IllegalStateException("arg " + textArg + " unsupported");
-                            }
-                            visitMethodInsn(Opcodes.INVOKESTATIC,
-                                    "Zeus", "dialog", "(Ljava/lang/String;)Z");
-                            visitJumpInsn(Opcodes.IFEQ, body);
-                            visitInsn(Opcodes.RETURN);
-                            visitLabel(body);
-                        }
-                    };
-                }
             }
             return mv;
         }

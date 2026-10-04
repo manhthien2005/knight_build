@@ -1,7 +1,58 @@
+import Main.GameCanvas;
+import GameScreen.GameScreen;
+import GameScreen.SelectCharScreen;
+import GameScreen.LoginScreen;
+import GameScreen.LoadMapScreen;
+import GameScreen.MainScreen;
+import GameScreen.PaintInfoGameScreen;
+import GameScreen.TabScreenNew;
+import GameObjects.Player;
+import GameObjects.MainObject;
+import GameObjects.MainMonster;
+import GameObjects.Item;
+import GameObjects.MainItem;
+import GameObjects.AutoGetItem;
+import GameObjects.MainClan;
+import GameObjects.MainRMS;
+import GameObjects.DelaySkill;
+import GameObjects.Other_Players;
+import InterfaceComponents.MsgDialog;
+import InterfaceComponents.MainDialog;
+import InterfaceComponents.InputDialog;
+import InterfaceComponents.ChatTextField;
+import InterfaceComponents.iCommand;
+import InterfaceComponents.TabRebuildItem;
+import InterfaceComponents.DataRebuildItem;
+import InterfaceComponents.TabShopNew;
+import InterfaceComponents.MainTabNew;
+import CLib.TField;
+import Model.Menu2;
+import Model.Point;
+import Model.T;
+import Model.mCamera;
+import Model.AvMain;
+import Thread_More.LoadMap;
+import Skill.HotKey;
+import CLib.mGraphics;
+import CLib.mVector;
+import CLib.mSystem;
+import CLib.Session_ME;
+import net.Message;
+import netcommand.Cmd_Message;
+import netcommand.global.GlobalService;
+import netcommand.global.GlobalLogicHandler;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 public class DungeonStateMachineTest {
+
+    static void setDialogText(MainDialog d, String text) {
+        try {
+            Field f = MainDialog.class.getDeclaredField("strinfo");
+            f.setAccessible(true);
+            f.set(d, new String[] { text });
+        } catch (Throwable t) {}
+    }
 
     static int failures = 0;
 
@@ -45,62 +96,69 @@ public class DungeonStateMachineTest {
     }
 
     static void initWorld() throws Exception {
-        if (fu.c == null) {
-            fu.c = new cn();
+        if (GameCanvas.game == null) {
+            GameCanvas.game = new GameScreen();
         }
-        fu.a = fu.c;
-        eh.h = true;
-        if (fu.q == null) {
+        GameCanvas.currentScreen = GameCanvas.game;
+        LoadMapScreen.isNextMap = true;
+        if (GameCanvas.loadmap == null) {
             try {
                 Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
                 uf.setAccessible(true);
                 sun.misc.Unsafe unsafe = (sun.misc.Unsafe) uf.get(null);
-                fu.q = (cs) unsafe.allocateInstance(cs.class);
+                GameCanvas.loadmap = (LoadMap) unsafe.allocateInstance(LoadMap.class);
             } catch (Throwable t) {
             }
         }
-        if (fu.q != null) {
-            fu.q.d = 1;
+        if (GameCanvas.loadmap != null) {
+            GameCanvas.loadmap.idMap = 1;
         }
-        cs.i = 10;
-        cs.j = 20;
-        if (cn.g == null) {
-            cn.g = new bq(100, (byte) 0, "hero", 0, 0);
+        LoadMap.isShowEffAuto = 10;
+        LoadMap.EFF_PHOBANG_END = 20;
+        if (GameScreen.player == null) {
+            GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
         }
-        cn.g.cG = (byte) 0; // alive
-        cn.g.bt = 1000;
-        cn.g.bs = 1000;
-        cn.g.bv = 1000;
-        cn.g.bu = 1000;
-        cn.g.cx = 100;
-        cn.g.cy = 100;
-        cn.g.aZ = 100;
-        cn.g.ba = 100;
-        cn.i = null;
-        fu.s = null;
-        fu.t = null;
-        if (fu.p != null) {
-            fu.p.a = false;
+        GameScreen.player.Action = (byte) 0; // alive
+        GameScreen.player.hp = 1000;
+        GameScreen.player.maxHp = 1000;
+        GameScreen.player.mp = 1000;
+        GameScreen.player.maxMp = 1000;
+        GameScreen.player.typePk = 100;
+        GameScreen.player.typeBoss = 100;
+        GameScreen.player.x = 100;
+        GameScreen.player.y = 100;
+        GameScreen.ObjFocus = null;
+        GameCanvas.currentDialog = null;
+        GameCanvas.subDialog = null;
+        if (GameCanvas.menu2 != null) {
+            GameCanvas.menu2.isShowMenu = false;
         }
-        cn.j = new et("entities");
+        GameScreen.Vecplayers = new mVector("entities");
         try {
-            Field fNet = ef.class.getDeclaredField("a");
+            if (Session_ME.gI() == null) {
+                new Session_ME();
+            }
+            Field fNet = Cmd_Message.class.getDeclaredField("session");
             fNet.setAccessible(true);
-            if (fNet.get(q.a()) == null) {
-                fNet.set(q.a(), new l());
+            if (fNet.get(GlobalService.gI()) == null) {
+                fNet.set(GlobalService.gI(), Session_ME.gI());
             }
         } catch (Throwable t) {
         }
     }
 
     static java.util.Vector getSentPackets() throws Exception {
-        Field fNet = ef.class.getDeclaredField("a");
-        fNet.setAccessible(true);
-        l netL = (l) fNet.get(q.a());
-        Field fAx = l.class.getDeclaredField("o");
-        fAx.setAccessible(true);
-        ax axObj = (ax) fAx.get(netL);
-        return axObj.a;
+        Object link = Session_ME.gI();
+        if (link == null) {
+            new Session_ME();
+            link = Session_ME.gI();
+        }
+        Field fSender = Session_ME.class.getDeclaredField("sender");
+        fSender.setAccessible(true);
+        Object sender = fSender.get(link);
+        Field fMsg = sender.getClass().getDeclaredField("sendingMessage");
+        fMsg.setAccessible(true);
+        return (java.util.Vector) fMsg.get(sender);
     }
 
     public static void main(String[] args) throws Exception {
@@ -114,7 +172,7 @@ public class DungeonStateMachineTest {
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_ROUTING);
-        fu.q.d = 44; // Standing on Map 44
+        GameCanvas.loadmap.idMap = 44; // Standing on Map 44
         set("navTarget", -1);
         set("navDone", false);
 
@@ -123,9 +181,9 @@ public class DungeonStateMachineTest {
         check("goal() returns Map 1 when dungeonNavigating", getGoal() == Zeus.DUNGEON_NPC_MAP);
 
         // Arrival on Map 1
-        fu.q.d = 1;
-        cn.g.aZ = Zeus.DUNGEON_NPC_X;
-        cn.g.ba = Zeus.DUNGEON_NPC_Y;
+        GameCanvas.loadmap.idMap = 1;
+        GameScreen.player.x = Zeus.DUNGEON_NPC_X;
+        GameScreen.player.y = Zeus.DUNGEON_NPC_Y;
         callInt("dungeonGotoNpc", 1);
         check("dungeonNavigating cleared upon arrival on Map 1", !((Boolean) get("dungeonNavigating")).booleanValue());
 
@@ -153,13 +211,13 @@ public class DungeonStateMachineTest {
         check("Wait budget armed after step 1 pick", ((Integer) get("dungeonWait")).intValue() == 60);
 
         // Step 2: Confirmation dialog
-        ah confirmDialog = new ah();
-        confirmDialog.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
-        bt yesBtn = new bt("Có", 1);
-        bt noBtn = new bt("Không", 2);
-        confirmDialog.C.a(yesBtn);
-        confirmDialog.C.a(noBtn);
-        fu.s = confirmDialog;
+        MsgDialog confirmDialog = new MsgDialog();
+        setDialogText(confirmDialog, "Bạn có muốn vào Ngã tư tử thần không?" );
+        iCommand yesBtn = new iCommand("Có", 1);
+        iCommand noBtn = new iCommand("Không", 2);
+        confirmDialog.cmdList.addElement(yesBtn);
+        confirmDialog.cmdList.addElement(noBtn);
+        GameCanvas.currentDialog = confirmDialog;
         call("dungeonInteract");
         check("Confirms dialog and advances to step 3", ((Integer) get("dungeonStep")).intValue() == 3);
         check("Wait budget armed after confirmation", ((Integer) get("dungeonWait")).intValue() == 80);
@@ -170,7 +228,7 @@ public class DungeonStateMachineTest {
         System.out.println("--- Test 3: Map 48 Entry ---");
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
-        fu.q.d = Zeus.DUNGEON_MAP;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
         call("dungeon");
         check("dungeonWasIn set upon Map 48 entry", ((Boolean) get("dungeonWasIn")).booleanValue());
         check("dungeonState transitions to DN_COMBAT", ((Integer) get("dungeonState")).intValue() == Zeus.DN_COMBAT);
@@ -192,8 +250,8 @@ public class DungeonStateMachineTest {
         check("dungeonCombatBackedUp is true", ((Boolean) get("dungeonCombatBackedUp")).booleanValue());
 
         // Mutate combat fields inside dungeon
-        cn.g.bi = Zeus.DUNGEON_SCAN_RADIUS;
-        check("Scan radius expanded to 600", cn.g.bi == 600);
+        GameScreen.player.wFocus = Zeus.DUNGEON_SCAN_RADIUS;
+        check("Scan radius expanded to 600", GameScreen.player.wFocus == 600);
 
         // Restore combat
         Zeus.dungeonRestoreCombat();
@@ -203,25 +261,27 @@ public class DungeonStateMachineTest {
         check("atkX restored to 100", ((Integer) get("atkX")).intValue() == 100);
         check("atkY restored to 200", ((Integer) get("atkY")).intValue() == 200);
         check("atkRadius restored to 120", ((Integer) get("atkRadius")).intValue() == 120);
-        check("Native scan radius restored to 140", cn.g.bi == 140);
+        check("Native scan radius restored to 140", GameScreen.player.wFocus == 140);
 
         // ---------------------------------------------------------------------
         // Test 5: Meteor Exclusion
         // ---------------------------------------------------------------------
         System.out.println("--- Test 5: Meteor Exclusion ---");
-        fa meteor = new fa();
-        meteor.cv = 1;
-        meteor.bs = 1000;
-        meteor.cC = "Thiên thạch lửa";
-        meteor.aZ = 672;
-        meteor.ba = 600;
+        MainObject meteor = new MainObject();
+        meteor.typeObject = 1;
+        meteor.maxHp = 1000;
+        meteor.hp = 1000;
+        meteor.name = "Thiên thạch lửa";
+        meteor.x = 672;
+        meteor.y = 600;
 
-        fa normal = new fa();
-        normal.cv = 1;
-        normal.bs = 1000;
-        normal.cC = "Bọ cạp độc";
-        normal.aZ = 675;
-        normal.ba = 605;
+        MainObject normal = new MainObject();
+        normal.typeObject = 1;
+        normal.maxHp = 1000;
+        normal.hp = 1000;
+        normal.name = "Bọ cạp độc";
+        normal.x = 675;
+        normal.y = 605;
 
         check("isMeteorTarget detects 'thien thach'", Zeus.isMeteorTarget(meteor));
         check("isMeteorTarget ignores normal monster", !Zeus.isMeteorTarget(normal));
@@ -229,13 +289,13 @@ public class DungeonStateMachineTest {
         check("isValidDungeonTarget accepts normal monster", Zeus.isValidDungeonTarget(normal));
 
         // Held meteor target dropped immediately
-        cn.i = meteor;
-        cn.j = new et("entities");
-        cn.j.a(meteor);
-        cn.j.a(normal);
+        GameScreen.ObjFocus = meteor;
+        GameScreen.Vecplayers = new mVector("entities");
+        GameScreen.Vecplayers.addElement(meteor);
+        GameScreen.Vecplayers.addElement(normal);
         Zeus.dungeonCombat();
-        check("Held meteor target released", cn.i != meteor);
-        check("Target switched to valid normal monster", cn.i == normal);
+        check("Held meteor target released", GameScreen.ObjFocus != meteor);
+        check("Target switched to valid normal monster", GameScreen.ObjFocus == normal);
 
         // ---------------------------------------------------------------------
         // Test 6: Center Leash
@@ -243,19 +303,19 @@ public class DungeonStateMachineTest {
         System.out.println("--- Test 6: Center Leash ---");
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
-        fu.q.d = Zeus.DUNGEON_MAP;
-        cn.g.aZ = 500; // Drifted from (672, 600) > 48 px
-        cn.g.ba = 500;
-        bq.m = false;
-        cn.g.cO = null;
-        cn.j = new et("empty"); // No monsters
-        cn.i = null;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
+        GameScreen.player.x = 500; // Drifted from (672, 600) > 48 px
+        GameScreen.player.y = 500;
+        Player.isLockKey = false;
+        GameScreen.player.posTransRoad = null;
+        GameScreen.Vecplayers = new mVector("empty"); // No monsters
+        GameScreen.ObjFocus = null;
         set("dungeonNoTargetTicks", 19);
 
         set("travelStallTicks", 0);
         Zeus.dungeonCombat();
         check("Idle leash tick counter incremented to 20", ((Integer) get("dungeonNoTargetTicks")).intValue() == 20);
-        check("Leash movement initiated toward (672, 600)", bq.m || cn.g.cO != null || ((Integer) get("travelStallTicks")).intValue() > 0);
+        check("Leash movement initiated toward (672, 600)", Player.isLockKey || GameScreen.player.posTransRoad != null || ((Integer) get("travelStallTicks")).intValue() > 0);
 
         // ---------------------------------------------------------------------
         // Test 7: Death Inside Dungeon + Map 1 Respawn != Success
@@ -267,19 +327,19 @@ public class DungeonStateMachineTest {
         set("dungeonFails", 0);
         set("dungeonConsecutiveFails", 0);
 
-        fu.q.d = Zeus.DUNGEON_MAP;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
         call("dungeon"); // Enter Map 48
         set("dungeonCombatEngaged", true);
 
         // Character dies inside Map 48
-        cn.g.cG = 4;
+        GameScreen.player.Action = 4;
         call("dungeon");
         check("dungeonDiedInRun is true after death", ((Boolean) get("dungeonDiedInRun")).booleanValue());
         check("dungeonState is DN_DEATH", ((Integer) get("dungeonState")).intValue() == Zeus.DN_DEATH);
 
         // Character wakes up in town (Map 1)
-        fu.q.d = 1;
-        cn.g.cG = 0; // alive in town
+        GameCanvas.loadmap.idMap = 1;
+        GameScreen.player.Action = 0; // alive in town
         call("dungeon");
 
         check("dungeonRuns was NOT incremented on town respawn", ((Integer) get("dungeonRuns")).intValue() == 0);
@@ -297,16 +357,16 @@ public class DungeonStateMachineTest {
         set("dungeonFails", 0);
         set("dungeonConsecutiveFails", 0);
 
-        fu.q.d = Zeus.DUNGEON_MAP;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
         call("dungeon"); // Enter Map 48
         set("dungeonCombatEngaged", true);
         set("dungeonClearCandidate", true); // Observed victory dialog
         set("dungeonDiedInRun", false);
         set("dungeonManualEscaped", false);
-        cn.g.cG = 0; // alive
+        GameScreen.player.Action = 0; // alive
 
         // Server teleports back to Map 1
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         call("dungeon");
 
         check("Clean exit increments dungeonRuns exactly once", ((Integer) get("dungeonRuns")).intValue() == 1);
@@ -322,13 +382,13 @@ public class DungeonStateMachineTest {
         set("dungeonRuns", 1);
         set("dungeonFails", 0);
 
-        fu.q.d = Zeus.DUNGEON_MAP;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
         call("dungeon"); // Enter Map 48
         // Exited immediately to Map 1 with NO combat and NO clear signal
         set("dungeonCombatEngaged", false);
         set("dungeonClearCandidate", false);
         set("dungeonMonstersCleared", false);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         call("dungeon");
 
         check("Ambiguous exit did NOT increment dungeonRuns", ((Integer) get("dungeonRuns")).intValue() == 1);
@@ -342,7 +402,7 @@ public class DungeonStateMachineTest {
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonRuns", 3);
-        fu.q.d = Zeus.DUNGEON_MAP;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
         call("dungeon");
 
         // Disconnect occurs, sessionReset invoked
@@ -365,7 +425,7 @@ public class DungeonStateMachineTest {
         set("dungeonWasIn", true);
 
         // Reconnect lands on Map 1 instead of Map 48
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         Zeus.sessionReset();
 
         check("Town reconnect aborted run (fails incremented)", ((Integer) get("dungeonFails")).intValue() == 1);
@@ -381,13 +441,13 @@ public class DungeonStateMachineTest {
         set("dungeonConsecutiveFails", 0);
 
         // Death 1
-        fu.q.d = Zeus.DUNGEON_MAP;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
         call("dungeon");
         set("dungeonCombatEngaged", true);
-        cn.g.cG = 4;
+        GameScreen.player.Action = 4;
         call("dungeon");
-        fu.q.d = 1; // Respawn town
-        cn.g.cG = 0;
+        GameCanvas.loadmap.idMap = 1; // Respawn town
+        GameScreen.player.Action = 0;
         call("dungeon");
         check("Consecutive fails = 1 after first death", ((Integer) get("dungeonConsecutiveFails")).intValue() == 1);
         check("Module still enabled after 1 failure", ((Boolean) get("dungeonEnabled")).booleanValue());
@@ -395,13 +455,13 @@ public class DungeonStateMachineTest {
         // Death 2
         set("dungeonState", Zeus.DN_IDLE);
         set("dungeonWait", 0);
-        fu.q.d = Zeus.DUNGEON_MAP;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
         call("dungeon");
         set("dungeonCombatEngaged", true);
-        cn.g.cG = 4;
+        GameScreen.player.Action = 4;
         call("dungeon");
-        fu.q.d = 1; // Respawn town
-        cn.g.cG = 0;
+        GameCanvas.loadmap.idMap = 1; // Respawn town
+        GameScreen.player.Action = 0;
         call("dungeon");
 
         check("Consecutive fails = 2 triggers safety stop", ((Integer) get("dungeonConsecutiveFails")).intValue() == 2);
@@ -432,7 +492,7 @@ public class DungeonStateMachineTest {
         set("dungeonNavigating", true);
         set("navTarget", 8); // Manual travel target
         set("navDone", false);
-        fu.q.d = 44;
+        GameCanvas.loadmap.idMap = 44;
 
         callInt("dungeonGotoNpc", 44);
         check("Dungeon yields when Manual Travel is active", !((Boolean) get("dungeonNavigating")).booleanValue());
@@ -455,7 +515,7 @@ public class DungeonStateMachineTest {
         Zeus.dungeonBackupCombat();
         // Mutate inside dungeon
         set("atkMap", 48);
-        cn.g.bi = 600;
+        GameScreen.player.wFocus = 600;
 
         // Restore
         Zeus.dungeonRestoreCombat();
@@ -523,11 +583,11 @@ public class DungeonStateMachineTest {
         set("dungeonMenu", new String[] { "Nhiệm vụ", "Vào Ngã Tư Tử Thần" });
         set("dungeonMenuNpc", 123);
         set("dungeonMenuId", 9999);
-        ah staleDialog = new ah();
-        staleDialog.C.a(new bt("Có", 1));
-        staleDialog.C.a(new bt("Không", 2));
-        staleDialog.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
-        fu.s = staleDialog;
+        MsgDialog staleDialog = new MsgDialog();
+        staleDialog.cmdList.addElement(new iCommand("Có", 1));
+        staleDialog.cmdList.addElement(new iCommand("Không", 2));
+        setDialogText(staleDialog, "Bạn có muốn vào Ngã tư tử thần không?" );
+        GameCanvas.currentDialog = staleDialog;
 
         Zeus.dungeonReset();
         check("dungeonStep reset to 0", ((Integer) get("dungeonStep")).intValue() == 0);
@@ -536,7 +596,7 @@ public class DungeonStateMachineTest {
         check("dungeonMenu reset to null", get("dungeonMenu") == null);
         check("dungeonMenuNpc reset to MIN_VALUE", ((Integer) get("dungeonMenuNpc")).intValue() == Integer.MIN_VALUE);
         check("dungeonMenuId reset to MIN_VALUE", ((Integer) get("dungeonMenuId")).intValue() == Integer.MIN_VALUE);
-        check("stale dungeon dialog dismissed on reset", fu.s == null);
+        check("stale dungeon dialog dismissed on reset", GameCanvas.currentDialog == null);
 
         // ---------------------------------------------------------------------
         // Test 20: Player Inside NPC Interaction Radius -> GOTO_NPC Dispatches Exactly One Opcode 23
@@ -547,13 +607,13 @@ public class DungeonStateMachineTest {
         set("dungeonState", Zeus.DN_ROUTING);
         set("navTarget", -1);
         set("navDone", true);
-        fu.q.d = 1;
-        fa phoChiHuy = makePhoChiHuy(552, 504);
-        cn.j = new et("entities");
-        cn.j.a(phoChiHuy);
+        GameCanvas.loadmap.idMap = 1;
+        MainObject phoChiHuy = makePhoChiHuy(552, 504);
+        GameScreen.Vecplayers = new mVector("entities");
+        GameScreen.Vecplayers.addElement(phoChiHuy);
 
-        cn.g.aZ = 552;
-        cn.g.ba = 504;
+        GameScreen.player.x = 552;
+        GameScreen.player.y = 504;
         getSentPackets().clear();
 
         callInt("dungeonGotoNpc", 1);
@@ -561,8 +621,8 @@ public class DungeonStateMachineTest {
         check("dungeonStep set to 0", ((Integer) get("dungeonStep")).intValue() == 0);
         check("dungeonWait armed to bounded period (>= 20)", ((Integer) get("dungeonWait")).intValue() >= 20);
         check("Exactly one packet sent", getSentPackets().size() == 1);
-        ep sentPkt = (ep) getSentPackets().get(0);
-        check("Dispatched packet is opcode 23", sentPkt.a == 23);
+        Message sentPkt = (Message) getSentPackets().get(0);
+        check("Dispatched packet is opcode 23", sentPkt.command == 23);
 
         // ---------------------------------------------------------------------
         // Test 21: Player Outside Interaction Radius -> Movement, No Opcode 23
@@ -571,9 +631,9 @@ public class DungeonStateMachineTest {
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_ROUTING);
-        fu.q.d = 1;
-        cn.g.aZ = 100; // Far outside 80-radius
-        cn.g.ba = 100;
+        GameCanvas.loadmap.idMap = 1;
+        GameScreen.player.x = 100; // Far outside 80-radius
+        GameScreen.player.y = 100;
         getSentPackets().clear();
 
         callInt("dungeonGotoNpc", 1);
@@ -587,22 +647,22 @@ public class DungeonStateMachineTest {
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_ROUTING);
-        fu.q.d = 1;
-        cn.g.aZ = 552;
-        cn.g.ba = 504;
-        ah leftoverDialog = new ah();
-        leftoverDialog.C.a(new bt("Có", 1));
-        leftoverDialog.C.a(new bt("Không", 2));
-        leftoverDialog.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
-        fu.s = leftoverDialog;
+        GameCanvas.loadmap.idMap = 1;
+        GameScreen.player.x = 552;
+        GameScreen.player.y = 504;
+        MsgDialog leftoverDialog = new MsgDialog();
+        leftoverDialog.cmdList.addElement(new iCommand("Có", 1));
+        leftoverDialog.cmdList.addElement(new iCommand("Không", 2));
+        setDialogText(leftoverDialog, "Bạn có muốn vào Ngã tư tử thần không?" );
+        GameCanvas.currentDialog = leftoverDialog;
         getSentPackets().clear();
 
         callInt("dungeonGotoNpc", 1);
-        check("Stale dialog dismissed during goto NPC", fu.s == null);
+        check("Stale dialog dismissed during goto NPC", GameCanvas.currentDialog == null);
         boolean hasOpcode23 = false;
         for (int i = 0; i < getSentPackets().size(); i++) {
-            ep pkt = (ep) getSentPackets().get(i);
-            if (pkt.a == 23) {
+            Message pkt = (Message) getSentPackets().get(i);
+            if (pkt.command == 23) {
                 hasOpcode23 = true;
             }
         }
@@ -615,21 +675,21 @@ public class DungeonStateMachineTest {
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_ROUTING);
-        fu.q.d = 1;
-        cn.g.aZ = 552;
-        cn.g.ba = 504;
-        ah unrelatedDialog = new ah();
-        unrelatedDialog.q = new String[] { "Thong bao: Bao tri may chu!" };
-        bt okBtn = new bt("Dong", 1);
-        unrelatedDialog.C.a(okBtn);
-        fu.s = unrelatedDialog;
+        GameCanvas.loadmap.idMap = 1;
+        GameScreen.player.x = 552;
+        GameScreen.player.y = 504;
+        MsgDialog unrelatedDialog = new MsgDialog();
+        setDialogText(unrelatedDialog, "Thong bao: Bao tri may chu!" );
+        iCommand okBtn = new iCommand("Dong", 1);
+        unrelatedDialog.cmdList.addElement(okBtn);
+        GameCanvas.currentDialog = unrelatedDialog;
         getSentPackets().clear();
 
         // 3 consecutive ticks with unrelated dialog
         for (int i = 0; i < 3; i++) {
             callInt("dungeonGotoNpc", 1);
         }
-        check("Unrelated dialog NOT auto-confirmed", fu.s == unrelatedDialog);
+        check("Unrelated dialog NOT auto-confirmed", GameCanvas.currentDialog == unrelatedDialog);
         check("No opcode 23 dispatched while unrelated dialog present", getSentPackets().size() == 0);
         check("State transitioned to DN_MANUAL_REVIEW on persistent dialog", ((Integer) get("dungeonState")).intValue() == Zeus.DN_MANUAL_REVIEW);
         check("Why code set to 5", ((Integer) get("dungeonWhy")).intValue() == 5);
@@ -640,7 +700,7 @@ public class DungeonStateMachineTest {
         System.out.println("--- Test 24: No Duplicate Opcode 23 or NPC Reopen While Waiting ---");
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
-        fu.s = null;
+        GameCanvas.currentDialog = null;
 
         // Subtest A: Waiting for first menu (Step 0)
         set("dungeonState", Zeus.DN_PREPARATION);
@@ -664,7 +724,7 @@ public class DungeonStateMachineTest {
         // Subtest C: Waiting for confirmation dialog (Step 2)
         set("dungeonStep", 2);
         set("dungeonWait", 15);
-        fu.s = null;
+        GameCanvas.currentDialog = null;
         getSentPackets().clear();
         call("dungeonInteract");
         check("Wait budget decrements at step 2", ((Integer) get("dungeonWait")).intValue() == 14);
@@ -709,17 +769,17 @@ public class DungeonStateMachineTest {
         set("dungeonState", Zeus.DN_ROUTING);
         set("navTarget", -1);
         set("navDone", true);
-        fu.q.d = 1;
-        fa npcTarget = makePhoChiHuy(552, 504);
-        cn.j = new et("entities");
-        cn.j.a(npcTarget);
+        GameCanvas.loadmap.idMap = 1;
+        MainObject npcTarget = makePhoChiHuy(552, 504);
+        GameScreen.Vecplayers = new mVector("entities");
+        GameScreen.Vecplayers.addElement(npcTarget);
 
         // Subtest A: Character outside native interaction range (e.g. distance 150px > 140px)
         // Must NOT trigger interaction or send opcode 23
-        cn.g.aZ = 552 + 150;
-        cn.g.ba = 504;
-        cn.g.cH = 0;
-        cn.i = null;
+        GameScreen.player.x = 552 + 150;
+        GameScreen.player.y = 504;
+        GameScreen.player.Direction = 0;
+        GameScreen.ObjFocus = null;
         getSentPackets().clear();
 
         callInt("dungeonGotoNpc", 1);
@@ -728,38 +788,38 @@ public class DungeonStateMachineTest {
         check("At distance 150px, no opcode 23 dispatched", getSentPackets().size() == 0);
 
         // Subtest B: Character at (576, 504) - adjacent tile (distance 24px <= 36px)
-        // Must arrive, set target focus cn.i, face NPC (cH=2), stop velocity, and dispatch opcode 23
-        cn.g.aZ = 576;
-        cn.g.ba = 504;
-        cn.g.cH = 0;
-        cn.i = null;
+        // Must arrive, set target focus GameScreen.ObjFocus, face NPC (cH=2), stop velocity, and dispatch opcode 23
+        GameScreen.player.x = 576;
+        GameScreen.player.y = 504;
+        GameScreen.player.Direction = 0;
+        GameScreen.ObjFocus = null;
         getSentPackets().clear();
 
         callInt("dungeonGotoNpc", 1);
         check("At distance 24px (<= 36px), dungeonState transitions to DN_PREPARATION",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
-        check("Target entity focus cn.i is set to NPC", cn.i == npcTarget);
-        check("Character facing cH is turned towards NPC (cH=2)", cn.g.cH == 2);
-        check("Character movement velocity is zeroed", cn.g.bc == 0 && cn.g.bd == 0);
+        check("Target entity focus GameScreen.ObjFocus is set to NPC", GameScreen.ObjFocus == npcTarget);
+        check("Character facing cH is turned towards NPC (cH=2)", GameScreen.player.Direction == 2);
+        check("Character movement velocity is zeroed", GameScreen.player.vx == 0 && GameScreen.player.vy == 0);
         check("Exactly one opcode 23 dispatched on arrival",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == 23);
 
-        // Subtest C: Retry via dungeonAskNpc() maintains cn.i and facing
-        cn.i = null;
-        cn.g.cH = 0;
+        // Subtest C: Retry via dungeonAskNpc() maintains GameScreen.ObjFocus and facing
+        GameScreen.ObjFocus = null;
+        GameScreen.player.Direction = 0;
         getSentPackets().clear();
         call("dungeonAskNpc");
-        check("dungeonAskNpc() re-establishes cn.i focus", cn.i == npcTarget);
-        check("dungeonAskNpc() re-establishes facing cH=2", cn.g.cH == 2);
+        check("dungeonAskNpc() re-establishes GameScreen.ObjFocus focus", GameScreen.ObjFocus == npcTarget);
+        check("dungeonAskNpc() re-establishes facing cH=2", GameScreen.player.Direction == 2);
         check("dungeonAskNpc() dispatches opcode 23",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == 23);
 
         // ---------------------------------------------------------------------
         // Test 27: travelArrive Semantics at Live Coordinates (596, 512)
         // ---------------------------------------------------------------------
         System.out.println("--- Test 27: travelArrive Semantics at Live Coordinates ---");
-        cn.g.aZ = 596;
-        cn.g.ba = 512;
+        GameScreen.player.x = 596;
+        GameScreen.player.y = 512;
         boolean arriveResult36 = callTravelArrive(552, 504, 36);
         check("travelArrive(552, 504, 36) returns false at live coordinates (596, 512) because Manhattan 52 > 36",
                 !arriveResult36);
@@ -774,13 +834,13 @@ public class DungeonStateMachineTest {
                 eligibleLive);
 
         // Boundary tests: exactly at 140px (inside) vs 141px (outside)
-        cn.g.aZ = 552 + 140; // dx = 140, dy = 0, Euclidean = 140
-        cn.g.ba = 504;
+        GameScreen.player.x = 552 + 140; // dx = 140, dy = 0, Euclidean = 140
+        GameScreen.player.y = 504;
         check("dungeonNpcEligible returns true immediately inside native range (distance 140px <= 140px)",
                 callDungeonNpcEligible(npcTarget));
 
-        cn.g.aZ = 552 + 141; // dx = 141, dy = 0, Euclidean = 141
-        cn.g.ba = 504;
+        GameScreen.player.x = 552 + 141; // dx = 141, dy = 0, Euclidean = 141
+        GameScreen.player.y = 504;
         check("dungeonNpcEligible returns false immediately outside native range (distance 141px > 140px)",
                 !callDungeonNpcEligible(npcTarget));
 
@@ -790,9 +850,9 @@ public class DungeonStateMachineTest {
         set("dungeonState", Zeus.DN_ROUTING);
         set("navTarget", -1);
         set("navDone", true);
-        cn.g.aZ = 552 + 141;
-        cn.g.ba = 504;
-        cn.i = null;
+        GameScreen.player.x = 552 + 141;
+        GameScreen.player.y = 504;
+        GameScreen.ObjFocus = null;
         getSentPackets().clear();
         callInt("dungeonGotoNpc", 1);
         check("Approach continues while native interaction condition is false (distance 141px)",
@@ -801,29 +861,29 @@ public class DungeonStateMachineTest {
                 getSentPackets().size() == 0);
 
         // Inside native condition at live coordinates (596, 512): arrives, halts, faces, dispatches opcode 23
-        cn.g.aZ = 596;
-        cn.g.ba = 512;
-        cn.g.cH = 0;
-        cn.g.bc = 5;
-        cn.g.bd = 3;
-        cn.i = null;
+        GameScreen.player.x = 596;
+        GameScreen.player.y = 512;
+        GameScreen.player.Direction = 0;
+        GameScreen.player.vx = 5;
+        GameScreen.player.vy = 3;
+        GameScreen.ObjFocus = null;
         getSentPackets().clear();
         callInt("dungeonGotoNpc", 1);
         check("At live coordinates (596, 512), dungeonState transitions to DN_PREPARATION",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
-        check("Target entity focus cn.i set to NPC at (596, 512)", cn.i == npcTarget);
-        check("Character facing cH is turned towards NPC (cH=2)", cn.g.cH == 2);
-        check("Movement velocity halted (bc=0, bd=0)", cn.g.bc == 0 && cn.g.bd == 0);
+        check("Target entity focus GameScreen.ObjFocus set to NPC at (596, 512)", GameScreen.ObjFocus == npcTarget);
+        check("Character facing cH is turned towards NPC (cH=2)", GameScreen.player.Direction == 2);
+        check("Movement velocity halted (bc=0, bd=0)", GameScreen.player.vx == 0 && GameScreen.player.vy == 0);
         check("Exactly one opcode 23 dispatched when native interaction condition becomes true",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == 23);
 
         // ---------------------------------------------------------------------
         // Test 29: Packet Serialization Parity & Wire Format
         // ---------------------------------------------------------------------
         System.out.println("--- Test 29: Packet Serialization Parity ---");
-        ep pkt = (ep) getSentPackets().get(0);
-        byte[] payload = pkt.a();
-        check("Opcode is 23", pkt.a == 23);
+        Message pkt = (Message) getSentPackets().get(0);
+        byte[] payload = pkt.getData();
+        check("Opcode is 23", pkt.command == 23);
         check("Payload length is 1", payload != null && payload.length == 1);
         check("Payload byte is (byte) -37 (0xDB)", payload != null && payload[0] == (byte) -37 && (payload[0] & 0xff) == 0xdb);
 
@@ -853,39 +913,39 @@ public class DungeonStateMachineTest {
         set("dungeonState", Zeus.DN_ROUTING);
         set("navTarget", -1);
         set("navDone", true);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
-        fa phoChiHuy31 = makePhoChiHuy(552, 504);
-        cn.j = new et("entities");
-        cn.j.a(phoChiHuy31);
+        MainObject phoChiHuy31 = makePhoChiHuy(552, 504);
+        GameScreen.Vecplayers = new mVector("entities");
+        GameScreen.Vecplayers.addElement(phoChiHuy31);
 
         // Position player at live coordinates (612, 392)
-        cn.g.aZ = 612;
-        cn.g.ba = 392;
-        cn.g.cH = 0;
-        cn.i = null;
+        GameScreen.player.x = 612;
+        GameScreen.player.y = 392;
+        GameScreen.player.Direction = 0;
+        GameScreen.ObjFocus = null;
 
         // Present broadcast popup
-        ah broadcastPopup = makeBroadcastPopup("Chúc mừng người chơi test đã vượt qua đợt thứ 10");
-        fu.s = broadcastPopup;
+        MsgDialog broadcastPopup = makeBroadcastPopup("Chúc mừng người chơi test đã vượt qua đợt thứ 10");
+        GameCanvas.currentDialog = broadcastPopup;
         getSentPackets().clear();
 
         callInt("dungeonGotoNpc", 1);
         check("Dungeon does not treat broadcast popup as blocking modal",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
         check("Native interaction opcode 23 dispatched while broadcast popup present",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == 23);
         check("Broadcast popup remains present and unmodified after interaction dispatch",
-                fu.s == broadcastPopup);
+                GameCanvas.currentDialog == broadcastPopup);
 
         // ---------------------------------------------------------------------
         // Test 32: Menu Processing with Broadcast Popup Present
         // ---------------------------------------------------------------------
         System.out.println("--- Test 32: Menu Processing with Broadcast Popup Present ---");
         // Step 0: First menu arrives while broadcast popup is still on screen
-        et firstMenuItems = new et("firstMenu");
-        firstMenuItems.a(new bt("Giao tiếp", 0));
-        firstMenuItems.a(new bt("Đóng", 1));
+        mVector firstMenuItems = new mVector("firstMenu");
+        firstMenuItems.addElement(new iCommand("Giao tiếp", 0));
+        firstMenuItems.addElement(new iCommand("Đóng", 1));
         callServerMenu(-37, 1, "Pho Chi Huy", firstMenuItems);
 
         check("dungeonMenu captured first menu while broadcast popup present",
@@ -896,12 +956,12 @@ public class DungeonStateMachineTest {
         check("Step 0 selects 'Giao tiếp' and advances to step 1 under broadcast popup",
                 ((Integer) get("dungeonStep")).intValue() == 1);
         check("Broadcast popup still preserved and untouched after first menu selection",
-                fu.s == broadcastPopup);
+                GameCanvas.currentDialog == broadcastPopup);
 
         // Step 1: Second menu arrives while broadcast popup is still on screen
-        et secondMenuItems = new et("secondMenu");
-        secondMenuItems.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        secondMenuItems.a(new bt("Đóng", 1));
+        mVector secondMenuItems = new mVector("secondMenu");
+        secondMenuItems.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+        secondMenuItems.addElement(new iCommand("Đóng", 1));
         callServerMenu(-37, 2, "Menu", secondMenuItems);
 
         check("dungeonMenu captured second menu while broadcast popup present",
@@ -911,26 +971,26 @@ public class DungeonStateMachineTest {
         check("Step 1 selects 'Vào Ngã Tư Tử Thần' and advances to step 2 under broadcast popup",
                 ((Integer) get("dungeonStep")).intValue() == 2);
         check("Broadcast popup still preserved and untouched after second menu selection",
-                fu.s == broadcastPopup);
+                GameCanvas.currentDialog == broadcastPopup);
 
         // ---------------------------------------------------------------------
         // Test 33: Expected Dungeon Confirmation Dialog Handling with Broadcast Popup
         // ---------------------------------------------------------------------
         System.out.println("--- Test 33: Expected Dungeon Confirmation Handling ---");
-        // At step 2, while broadcast popup is still in fu.s, dungeonInteract must NOT auto-confirm it
+        // At step 2, while broadcast popup is still in GameCanvas.currentDialog, dungeonInteract must NOT auto-confirm it
         set("dungeonWait", 10);
         call("dungeonInteract");
         check("Dungeon does not confirm broadcast popup as dungeon confirmation",
                 ((Integer) get("dungeonStep")).intValue() == 2);
-        check("Broadcast popup remains unconfirmed in fu.s", fu.s == broadcastPopup);
+        check("Broadcast popup remains unconfirmed in GameCanvas.currentDialog", GameCanvas.currentDialog == broadcastPopup);
 
-        // Genuine confirmation dialog arrives (replaces fu.s on client UI)
-        ah confirmDialog33 = new ah();
-        confirmDialog33.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
-        confirmDialog33.C = new et("buttons");
-        confirmDialog33.C.a(new bt("Có", 1));
-        confirmDialog33.C.a(new bt("Không", 2));
-        fu.s = confirmDialog33;
+        // Genuine confirmation dialog arrives (replaces GameCanvas.currentDialog on client UI)
+        MsgDialog confirmDialog33 = new MsgDialog();
+        setDialogText(confirmDialog33, "Bạn có muốn vào Ngã tư tử thần không?" );
+        confirmDialog33.cmdList = new mVector("buttons");
+        confirmDialog33.cmdList.addElement(new iCommand("Có", 1));
+        confirmDialog33.cmdList.addElement(new iCommand("Không", 2));
+        GameCanvas.currentDialog = confirmDialog33;
 
         call("dungeonInteract");
         check("Genuine confirmation dialog confirmed and advances to step 3",
@@ -945,18 +1005,18 @@ public class DungeonStateMachineTest {
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_ROUTING);
-        fu.q.d = 1;
-        cn.g.aZ = 552;
-        cn.g.ba = 504;
+        GameCanvas.loadmap.idMap = 1;
+        GameScreen.player.x = 552;
+        GameScreen.player.y = 504;
 
-        ah blockingModal = makeBlockingModal("Bạn có chắc chắn muốn rời khỏi bang hội không?");
-        fu.s = blockingModal;
+        MsgDialog blockingModal = makeBlockingModal("Bạn có chắc chắn muốn rời khỏi bang hội không?");
+        GameCanvas.currentDialog = blockingModal;
         getSentPackets().clear();
 
         for (int i = 0; i < 3; i++) {
             callInt("dungeonGotoNpc", 1);
         }
-        check("Blocking modal NOT auto-confirmed", fu.s == blockingModal);
+        check("Blocking modal NOT auto-confirmed", GameCanvas.currentDialog == blockingModal);
         check("No opcode 23 dispatched while blocking modal present", getSentPackets().size() == 0);
         check("State transitioned to DN_MANUAL_REVIEW on persistent blocking modal",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_MANUAL_REVIEW);
@@ -971,23 +1031,23 @@ public class DungeonStateMachineTest {
         set("dungeonState", Zeus.DN_ROUTING);
         set("navTarget", -1);
         set("navDone", true);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
-        cn.g.aZ = 612;
-        cn.g.ba = 392;
-        cn.g.cH = 0;
-        cn.i = null;
+        GameScreen.player.x = 612;
+        GameScreen.player.y = 392;
+        GameScreen.player.Direction = 0;
+        GameScreen.ObjFocus = null;
 
-        ah liveBroadcast = makeBroadcastPopup("Chúc mừng ... đã vượt qua đợt thứ 10");
-        fu.s = liveBroadcast;
+        MsgDialog liveBroadcast = makeBroadcastPopup("Chúc mừng ... đã vượt qua đợt thứ 10");
+        GameCanvas.currentDialog = liveBroadcast;
         getSentPackets().clear();
 
         callInt("dungeonGotoNpc", 1);
         check("Player at (612, 392) interacts with NPC (552, 504) while broadcast visible",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
         check("Opcode 23 sent for CU -37",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
-        check("Live broadcast popup preserved and untouched", fu.s == liveBroadcast);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == 23);
+        check("Live broadcast popup preserved and untouched", GameCanvas.currentDialog == liveBroadcast);
 
         // ---------------------------------------------------------------------
         // Test 36: V2 Native Parity - First Menu Native Command Contract
@@ -1000,14 +1060,15 @@ public class DungeonStateMachineTest {
         set("dungeonWait", 0);
         set("dungeonTried", 0);
 
-        if (fu.p == null) {
-            fu.p = new fr();
+        if (GameCanvas.menu2 == null) {
+            GameCanvas.menu2 = new Menu2();
         }
-        fu.p.a = true;
-        setFrH(fu.p, -1);
-        et menuItems36 = new et("menu36");
+        GameCanvas.menu2.isShowMenu = true;
+        setFrH(GameCanvas.menu2, -1);
+        mVector menuItems36 = new mVector("menu36");
         final int[] callbacks36 = new int[2];
-        cg target36 = new cg() {
+        AvMain target36 = new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 if (e == 4) {
                     callbacks36[0]++;
@@ -1016,19 +1077,19 @@ public class DungeonStateMachineTest {
                 }
             }
         };
-        bt btnGiaoTiep36 = new bt("Giao tiếp", 4, target36);
-        bt btnDong36 = new bt("Đóng", 5, target36);
-        menuItems36.a(btnGiaoTiep36);
-        menuItems36.a(btnDong36);
-        setFrG(fu.p, menuItems36);
+        iCommand btnGiaoTiep36 = new iCommand("Giao tiếp", 4, target36);
+        iCommand btnDong36 = new iCommand("Đóng", 5, target36);
+        menuItems36.addElement(btnGiaoTiep36);
+        menuItems36.addElement(btnDong36);
+        setFrG(GameCanvas.menu2, menuItems36);
 
         callServerMenu(-37, 2, "Pho Chi Huy", menuItems36);
         getSentPackets().clear();
 
         call("dungeonInteract");
 
-        check("Step 0 sets fu.p.h to matching 'Giao tiếp' item index (0)", getFrH(fu.p) == 0);
-        check("Step 0 invokes native bt.a() command callback exactly once", callbacks36[0] == 1);
+        check("Step 0 sets GameCanvas.menu2.h to matching 'Giao tiếp' item index (0)", getFrH(GameCanvas.menu2) == 0);
+        check("Step 0 invokes native iCommand.a() command callback exactly once", callbacks36[0] == 1);
         check("Step 0 does NOT synthesize raw server-menu q.b packet", getSentPackets().size() == 0);
         check("Step 0 advances dungeonStep to 1", ((Integer) get("dungeonStep")).intValue() == 1);
         check("Step 0 arms wait budget (>= 40)", ((Integer) get("dungeonWait")).intValue() >= 40);
@@ -1044,8 +1105,8 @@ public class DungeonStateMachineTest {
         set("dungeonWait", 0);
         set("dungeonTried", 0);
 
-        // Menu was closed (fu.p.a = false)
-        fu.p.a = false;
+        // Menu was closed (GameCanvas.menu2.isShowMenu = false)
+        GameCanvas.menu2.isShowMenu = false;
         callbacks36[0] = 0;
         getSentPackets().clear();
 
@@ -1064,23 +1125,23 @@ public class DungeonStateMachineTest {
         set("dungeonWait", 0);
         set("dungeonTried", 0);
 
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 3);
-        setFrH(fu.p, -1);
-        et menuItems38 = new et("menu38");
-        menuItems38.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        menuItems38.a(new bt("Đóng", 1));
-        setFrG(fu.p, menuItems38);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 3);
+        setFrH(GameCanvas.menu2, -1);
+        mVector menuItems38 = new mVector("menu38");
+        menuItems38.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+        menuItems38.addElement(new iCommand("Đóng", 1));
+        setFrG(GameCanvas.menu2, menuItems38);
 
         callServerMenu(-37, 3, "Nga Tu", menuItems38);
         getSentPackets().clear();
 
         call("dungeonInteract");
-        check("Step 1 sets fu.p.h to matching 'Ngã Tư' index (0)", getFrH(fu.p) == 0);
-        check("Step 1 invokes native action which closes fu.p", !fu.p.a);
+        check("Step 1 sets GameCanvas.menu2.h to matching 'Ngã Tư' index (0)", getFrH(GameCanvas.menu2) == 0);
+        check("Step 1 invokes native action which closes GameCanvas.menu2", !GameCanvas.menu2.isShowMenu);
         check("Step 1 dispatches server-menu q.b packet via native handler",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == -30);
         check("Step 1 advances dungeonStep to 2", ((Integer) get("dungeonStep")).intValue() == 2);
 
         // ---------------------------------------------------------------------
@@ -1093,27 +1154,28 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 0);
 
-        fu.p.a = true;
-        setFrH(fu.p, -1);
-        et menuItems39 = new et("menu39");
-        cg fastReplyNpc = new cg() {
+        GameCanvas.menu2.isShowMenu = true;
+        setFrH(GameCanvas.menu2, -1);
+        mVector menuItems39 = new mVector("menu39");
+        AvMain fastReplyNpc = new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 // Immediate synchronous reply from server: second menu arrives DURING callback!
                 try {
-                    et fastSecond = new et("fastSecond");
-                    fastSecond.a(new bt("Vào Ngã Tư Tử Thần", 0));
-                    fastSecond.a(new bt("Đóng", 1));
-                    setFrG(fu.p, fastSecond);
-                    setFrB(fu.p, 4);
-                    setFrC(fu.p, -37);
-                    fu.p.a = true;
+                    mVector fastSecond = new mVector("fastSecond");
+                    fastSecond.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+                    fastSecond.addElement(new iCommand("Đóng", 1));
+                    setFrG(GameCanvas.menu2, fastSecond);
+                    setFrB(GameCanvas.menu2, 4);
+                    setFrC(GameCanvas.menu2, -37);
+                    GameCanvas.menu2.isShowMenu = true;
                     callServerMenu(-37, 4, "Nga Tu Fast", fastSecond);
                 } catch (Exception ex) {
                 }
             }
         };
-        menuItems39.a(new bt("Giao tiếp", 4, fastReplyNpc));
-        setFrG(fu.p, menuItems39);
+        menuItems39.addElement(new iCommand("Giao tiếp", 4, fastReplyNpc));
+        setFrG(GameCanvas.menu2, menuItems39);
         callServerMenu(-37, 2, "Pho Chi Huy", menuItems39);
 
         call("dungeonInteract");
@@ -1131,18 +1193,19 @@ public class DungeonStateMachineTest {
                 ((Integer) get("dungeonStep")).intValue() == 2);
 
         // Immediate confirmation arrives
-        ah fastConfirm = new ah();
-        fastConfirm.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
-        fastConfirm.C = new et("buttons");
+        MsgDialog fastConfirm = new MsgDialog();
+        setDialogText(fastConfirm, "Bạn có muốn vào Ngã tư tử thần không?" );
+        fastConfirm.cmdList = new mVector("buttons");
         final boolean[] confirmClicked = new boolean[1];
-        cg confirmTarget = new cg() {
+        AvMain confirmTarget = new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 confirmClicked[0] = true;
             }
         };
-        fastConfirm.C.a(new bt("Có", 1, confirmTarget));
-        fastConfirm.C.a(new bt("Không", 2));
-        fu.s = fastConfirm;
+        fastConfirm.cmdList.addElement(new iCommand("Có", 1, confirmTarget));
+        fastConfirm.cmdList.addElement(new iCommand("Không", 2));
+        GameCanvas.currentDialog = fastConfirm;
 
         call("dungeonInteract");
         check("Step 2 confirms fast confirmation dialog", confirmClicked[0]);
@@ -1157,17 +1220,17 @@ public class DungeonStateMachineTest {
         set("dungeonState", Zeus.DN_PREPARATION);
         set("dungeonStep", 0);
 
-        ah entryBroadcast = makeBroadcastPopup("Thông báo: Sự kiện đang diễn ra!");
-        fu.s = entryBroadcast;
+        MsgDialog entryBroadcast = makeBroadcastPopup("Thông báo: Sự kiện đang diễn ra!");
+        GameCanvas.currentDialog = entryBroadcast;
 
-        fu.p.a = true;
-        et bCastFirstMenu = new et("bCastFirstMenu");
-        bCastFirstMenu.a(new bt("Giao tiếp", 4, target36));
-        setFrG(fu.p, bCastFirstMenu);
+        GameCanvas.menu2.isShowMenu = true;
+        mVector bCastFirstMenu = new mVector("bCastFirstMenu");
+        bCastFirstMenu.addElement(new iCommand("Giao tiếp", 4, target36));
+        setFrG(GameCanvas.menu2, bCastFirstMenu);
         callServerMenu(-37, 2, "Pho Chi Huy", bCastFirstMenu);
 
         call("dungeonInteract");
-        check("Broadcast popup preserved during Step 0 Giao tiếp", fu.s == entryBroadcast);
+        check("Broadcast popup preserved during Step 0 Giao tiếp", GameCanvas.currentDialog == entryBroadcast);
         check("Step 0 advanced under broadcast popup", ((Integer) get("dungeonStep")).intValue() == 1);
 
         // ---------------------------------------------------------------------
@@ -1177,15 +1240,15 @@ public class DungeonStateMachineTest {
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_ROUTING);
-        fu.q.d = 1;
-        cn.g.aZ = 552;
-        cn.g.ba = 504;
-        cn.g.cH = 0;
-        cn.i = null;
+        GameCanvas.loadmap.idMap = 1;
+        GameScreen.player.x = 552;
+        GameScreen.player.y = 504;
+        GameScreen.player.Direction = 0;
+        GameScreen.ObjFocus = null;
 
-        fa pcf42 = makePhoChiHuy(552, 504);
-        cn.j = new et("entities");
-        cn.j.a(pcf42);
+        MainObject pcf42 = makePhoChiHuy(552, 504);
+        GameScreen.Vecplayers = new mVector("entities");
+        GameScreen.Vecplayers.addElement(pcf42);
 
         // Step A: approach and arrival
         getSentPackets().clear();
@@ -1193,21 +1256,22 @@ public class DungeonStateMachineTest {
         check("Full Chain: Arrival transitions to DN_PREPARATION",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
         check("Full Chain: Opcode 23 sent to NPC",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == 23);
 
         // Step B: First menu arrives
-        fu.p.a = true;
-        setFrH(fu.p, -1);
-        et chainFirst = new et("chainFirst");
+        GameCanvas.menu2.isShowMenu = true;
+        setFrH(GameCanvas.menu2, -1);
+        mVector chainFirst = new mVector("chainFirst");
         final boolean[] chainFirstClicked = new boolean[1];
-        cg chainTarget = new cg() {
+        AvMain chainTarget = new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 chainFirstClicked[0] = true;
             }
         };
-        chainFirst.a(new bt("Giao tiếp", 4, chainTarget));
-        chainFirst.a(new bt("Đóng", 5));
-        setFrG(fu.p, chainFirst);
+        chainFirst.addElement(new iCommand("Giao tiếp", 4, chainTarget));
+        chainFirst.addElement(new iCommand("Đóng", 5));
+        setFrG(GameCanvas.menu2, chainFirst);
         callServerMenu(-37, 2, "Pho Chi Huy", chainFirst);
 
         call("dungeonInteract");
@@ -1215,129 +1279,132 @@ public class DungeonStateMachineTest {
         check("Full Chain: State advanced to Step 1", ((Integer) get("dungeonStep")).intValue() == 1);
 
         // Step C: Second menu arrives
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 3);
-        setFrH(fu.p, -1);
-        et chainSecond = new et("chainSecond");
-        chainSecond.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        chainSecond.a(new bt("Đóng", 1));
-        setFrG(fu.p, chainSecond);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 3);
+        setFrH(GameCanvas.menu2, -1);
+        mVector chainSecond = new mVector("chainSecond");
+        chainSecond.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+        chainSecond.addElement(new iCommand("Đóng", 1));
+        setFrG(GameCanvas.menu2, chainSecond);
         callServerMenu(-37, 3, "Nga Tu", chainSecond);
 
         getSentPackets().clear();
         call("dungeonInteract");
         check("Full Chain: Step 1 native action sent q.b",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == -30);
         check("Full Chain: State advanced to Step 2", ((Integer) get("dungeonStep")).intValue() == 2);
 
         // Step D: Confirmation dialog arrives
-        ah chainConfirm = new ah();
-        chainConfirm.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
-        chainConfirm.C = new et("buttons");
+        MsgDialog chainConfirm = new MsgDialog();
+        setDialogText(chainConfirm, "Bạn có muốn vào Ngã tư tử thần không?" );
+        chainConfirm.cmdList = new mVector("buttons");
         final boolean[] chainConfirmClicked = new boolean[1];
-        cg chainConfirmTarget = new cg() {
+        AvMain chainConfirmTarget = new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 chainConfirmClicked[0] = true;
             }
         };
-        chainConfirm.C.a(new bt("Có", 1, chainConfirmTarget));
-        chainConfirm.C.a(new bt("Không", 2));
-        fu.s = chainConfirm;
+        chainConfirm.cmdList.addElement(new iCommand("Có", 1, chainConfirmTarget));
+        chainConfirm.cmdList.addElement(new iCommand("Không", 2));
+        GameCanvas.currentDialog = chainConfirm;
 
         call("dungeonInteract");
         check("Full Chain: Step 2 confirmation invoked", chainConfirmClicked[0]);
         check("Full Chain: State advanced to Step 3", ((Integer) get("dungeonStep")).intValue() == 3);
 
         // Step E: Server teleports player to Map 48
-        fu.q.d = Zeus.DUNGEON_MAP;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
         call("dungeon");
         check("Full Chain: Arrival in Map 48 enters DN_COMBAT",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_COMBAT);
 
         // ---------------------------------------------------------------------
-        // Test 43: fu.t Total Rejection Contract (DUNGEON-04I)
+        // Test 43: GameCanvas.subDialog Total Rejection Contract (DUNGEON-04I)
         // ---------------------------------------------------------------------
-        System.out.println("--- Test 43: fu.t Total Rejection Contract ---");
+        System.out.println("--- Test 43: GameCanvas.subDialog Total Rejection Contract ---");
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_PREPARATION);
         set("dungeonStep", 0);
         set("dungeonWait", 60);
         set("dungeonTried", 0);
-        fu.q.d = 1;
-        fu.s = null;
-        fu.p.a = false;
-        setFrG(fu.p, null);
+        GameCanvas.loadmap.idMap = 1;
+        GameCanvas.currentDialog = null;
+        GameCanvas.menu2.isShowMenu = false;
+        setFrG(GameCanvas.menu2, null);
 
-        // Even if fu.t contains a dialog with "Giao tiếp", it must NEVER be accepted as NPC dialog
-        ah futDialog = new ah();
-        futDialog.q = new String[] { "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!" };
-        futDialog.C = new et("buttons");
+        // Even if GameCanvas.subDialog contains a dialog with "Giao tiếp", it must NEVER be accepted as NPC dialog
+        MsgDialog futDialog = new MsgDialog();
+        setDialogText(futDialog, "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!" );
+        futDialog.cmdList = new mVector("buttons");
         final boolean[] futGiaoTiepClicked = new boolean[1];
-        cg futTarget = new cg() {
+        AvMain futTarget = new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 futGiaoTiepClicked[0] = true;
             }
         };
-        futDialog.C.a(new bt("Giao tiếp", 4, futTarget));
-        futDialog.C.a(new bt("Đóng", 5));
-        fu.t = futDialog;
+        futDialog.cmdList.addElement(new iCommand("Giao tiếp", 4, futTarget));
+        futDialog.cmdList.addElement(new iCommand("Đóng", 5));
+        GameCanvas.subDialog = futDialog;
 
         getSentPackets().clear();
         call("dungeonInteract");
-        check("fu.t Rejection: Step 0 does NOT execute bt.a() from fu.t", !futGiaoTiepClicked[0]);
-        check("fu.t Rejection: Step remains 0", ((Integer) get("dungeonStep")).intValue() == 0);
-        check("fu.t Rejection: Wait budget decrements", ((Integer) get("dungeonWait")).intValue() < 60);
-        fu.t = null;
+        check("GameCanvas.subDialog Rejection: Step 0 does NOT execute iCommand.a() from GameCanvas.subDialog", !futGiaoTiepClicked[0]);
+        check("GameCanvas.subDialog Rejection: Step remains 0", ((Integer) get("dungeonStep")).intValue() == 0);
+        check("GameCanvas.subDialog Rejection: Wait budget decrements", ((Integer) get("dungeonWait")).intValue() < 60);
+        GameCanvas.subDialog = null;
 
         // ---------------------------------------------------------------------
-        // Test 44: Exact Native fu.p NPC Dialog Contract (DUNGEON-04I)
+        // Test 44: Exact Native GameCanvas.menu2 NPC Dialog Contract (DUNGEON-04I)
         // ---------------------------------------------------------------------
-        System.out.println("--- Test 44: Exact Native fu.p NPC Dialog Contract ---");
+        System.out.println("--- Test 44: Exact Native GameCanvas.menu2 NPC Dialog Contract ---");
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_PREPARATION);
         set("dungeonStep", 0);
         set("dungeonWait", 60);
         set("dungeonTried", 0);
-        fu.q.d = 1;
-        fu.t = null;
+        GameCanvas.loadmap.idMap = 1;
+        GameCanvas.subDialog = null;
 
-        // Broadcast in fu.s coexisting
-        ah coexistBroadcast = makeBroadcastPopup("Chúc mừng người chơi x đã vượt qua đợt 5");
-        fu.s = coexistBroadcast;
+        // Broadcast in GameCanvas.currentDialog coexisting
+        MsgDialog coexistBroadcast = makeBroadcastPopup("Chúc mừng người chơi x đã vượt qua đợt 5");
+        GameCanvas.currentDialog = coexistBroadcast;
 
-        // Native NPC dialogue in fu.p
-        final fa livePhoChiHuy = new fa();
-        livePhoChiHuy.cv = 2;
-        livePhoChiHuy.cu = -37;
-        livePhoChiHuy.cC = "Pho Chi Huy";
+        // Native NPC dialogue in GameCanvas.menu2
+        final MainObject livePhoChiHuy = new MainObject();
+        livePhoChiHuy.typeObject = 2;
+        livePhoChiHuy.ID = -37;
+        livePhoChiHuy.name = "Pho Chi Huy";
 
-        fu.p.a = true;
-        setFrH(fu.p, -1);
-        et fupItems = new et("fupItems");
+        GameCanvas.menu2.isShowMenu = true;
+        setFrH(GameCanvas.menu2, -1);
+        mVector fupItems = new mVector("fupItems");
         final boolean[] fupGiaoTiepClicked = new boolean[1];
-        bt liveGiaoTiep = new bt("Giao tiếp", 4, new cg() {
+        iCommand liveGiaoTiep = new iCommand("Giao tiếp", 4, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 fupGiaoTiepClicked[0] = true;
                 try {
-                    q.a().a((byte) livePhoChiHuy.cu);
+                    GlobalService.gI().getlist_from_npc((byte) livePhoChiHuy.ID);
                 } catch (Throwable t) {}
             }
         });
-        fupItems.a(liveGiaoTiep);
-        fupItems.a(new bt("Đóng", 1));
-        setFrG(fu.p, fupItems);
+        fupItems.addElement(liveGiaoTiep);
+        fupItems.addElement(new iCommand("Đóng", 1));
+        setFrG(GameCanvas.menu2, fupItems);
 
         getSentPackets().clear();
         call("dungeonInteract");
-        check("fu.p Dialog: Step 0 executes native bt.a() from fu.p", fupGiaoTiepClicked[0]);
-        check("fu.p Dialog: fu.p.h cursor set to 0", getFrH(fu.p) == 0);
-        check("fu.p Dialog: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
-        check("fu.p Dialog: Exactly one Opcode 23 sent",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
-        check("fu.p Dialog: Broadcast in fu.s preserved", fu.s == coexistBroadcast);
+        check("GameCanvas.menu2 Dialog: Step 0 executes native iCommand.a() from GameCanvas.menu2", fupGiaoTiepClicked[0]);
+        check("GameCanvas.menu2 Dialog: GameCanvas.menu2.h cursor set to 0", getFrH(GameCanvas.menu2) == 0);
+        check("GameCanvas.menu2 Dialog: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
+        check("GameCanvas.menu2 Dialog: Exactly one Opcode 23 sent",
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == 23);
+        check("GameCanvas.menu2 Dialog: Broadcast in GameCanvas.currentDialog preserved", GameCanvas.currentDialog == coexistBroadcast);
 
         // ---------------------------------------------------------------------
         // Test 45: V2 Speech Dialog Recognition & Non-Blocking Safety (DUNGEON-04I)
@@ -1349,19 +1416,19 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 60);
         set("dungeonTried", 0);
-        fu.q.d = 1;
-        fu.t = null;
-        fu.p.a = false;
-        setFrG(fu.p, null);
+        GameCanvas.loadmap.idMap = 1;
+        GameCanvas.subDialog = null;
+        GameCanvas.menu2.isShowMenu = false;
+        setFrG(GameCanvas.menu2, null);
 
         // Speech dialog with live text: "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!"
-        ah v2SpeechDialog = new ah();
-        v2SpeechDialog.q = new String[] { "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!" };
-        v2SpeechDialog.C = new et("buttons");
-        v2SpeechDialog.C.a(new bt("Giao tiếp", 4));
-        v2SpeechDialog.C.a(new bt("Đóng", 1));
+        MsgDialog v2SpeechDialog = new MsgDialog();
+        setDialogText(v2SpeechDialog, "Ta có một nhiệm vụ rất quan trọng đang cần mi giúp đỡ!" );
+        v2SpeechDialog.cmdList = new mVector("buttons");
+        v2SpeechDialog.cmdList.addElement(new iCommand("Giao tiếp", 4));
+        v2SpeechDialog.cmdList.addElement(new iCommand("Đóng", 1));
 
-        Method mIsSpeech = Zeus.class.getDeclaredMethod("isNpcSpeechDialog", da.class);
+        Method mIsSpeech = Zeus.class.getDeclaredMethod("isNpcSpeechDialog", MainDialog.class);
         mIsSpeech.setAccessible(true);
         boolean recognized = ((Boolean) mIsSpeech.invoke(null, v2SpeechDialog)).booleanValue();
         check("V2 Speech: isNpcSpeechDialog recognizes live text without nga tu", recognized);
@@ -1371,50 +1438,51 @@ public class DungeonStateMachineTest {
 
         // Advance speech dialog via V2 softkey path
         final boolean[] v2SoftkeyInvoked = new boolean[1];
-        v2SpeechDialog.ab = new bt("Giao tiếp", 4, new cg() {
+        v2SpeechDialog.right = new iCommand("Giao tiếp", 4, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 v2SoftkeyInvoked[0] = true;
             }
         });
-        fu.s = v2SpeechDialog;
+        GameCanvas.currentDialog = v2SpeechDialog;
 
         call("dungeonInteract");
         check("V2 Speech: advances via softkey ab", v2SoftkeyInvoked[0]);
         check("V2 Speech: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
 
         // ---------------------------------------------------------------------
-        // Test 46: dialogText ah.r, ah.s, ah.t & Polymorphic Dispatch (DUNGEON-04I)
+        // Test 46: dialogText MsgDialog.r, MsgDialog.s, MsgDialog.t & Polymorphic Dispatch (DUNGEON-04I)
         // ---------------------------------------------------------------------
-        System.out.println("--- Test 46: dialogText ah.r, ah.s, ah.t & Polymorphic Dispatch ---");
-        ah titleAh = new ah();
-        Field fAhR = ah.class.getDeclaredField("r");
+        System.out.println("--- Test 46: dialogText MsgDialog.r, MsgDialog.s, MsgDialog.t & Polymorphic Dispatch ---");
+        MsgDialog titleAh = new MsgDialog();
+        Field fAhR = MsgDialog.class.getDeclaredField("nameShow");
         fAhR.setAccessible(true);
         fAhR.set(titleAh, "Pho Chi Huy");
 
-        Method mDt = Zeus.class.getDeclaredMethod("dialogText", da.class);
+        Method mDt = Zeus.class.getDeclaredMethod("dialogText", MainDialog.class);
         mDt.setAccessible(true);
         String extractedR = (String) mDt.invoke(null, titleAh);
-        check("dialogText: extracts text from ah.r", extractedR.indexOf("Pho Chi Huy") >= 0);
+        check("dialogText: extracts text from MsgDialog.r", extractedR.indexOf("Pho Chi Huy") >= 0);
 
         // Polymorphic NPC click dispatch
         final boolean[] polymorphicKCalled = new boolean[1];
-        fa mockNpc = new fa() {
-            public void k() {
+        MainObject mockNpc = new MainObject() {
+            public void GiaoTiep() {
                 polymorphicKCalled[0] = true;
             }
         };
-        mockNpc.cv = 2;
-        mockNpc.cu = -37;
-        mockNpc.cC = "Pho Chi Huy";
-        mockNpc.aZ = 552;
-        mockNpc.ba = 504;
-        cn.g.aZ = 552;
-        cn.g.ba = 504;
+        mockNpc.typeObject = 2;
+        mockNpc.ID = -37;
+        mockNpc.name = "Pho Chi Huy";
+        mockNpc.x = 552;
+        mockNpc.y = 504;
+        GameScreen.player.x = 552;
+        GameScreen.player.y = 504;
 
-        Method mClickNpc = Zeus.class.getDeclaredMethod("dungeonClickNpc", fa.class);
+        Method mClickNpc = Zeus.class.getDeclaredMethod("dungeonClickNpc", MainObject.class);
         mClickNpc.setAccessible(true);
         mClickNpc.invoke(null, mockNpc);
-        check("Polymorphic Dispatch: dungeonClickNpc calls k() on non-ez fa subclass", polymorphicKCalled[0]);
+        check("Polymorphic Dispatch: dungeonClickNpc calls GiaoTiep() on non-ez MainObject subclass", polymorphicKCalled[0]);
 
         // ---------------------------------------------------------------------
         // Test 47: Exact Native First Dialog Dispatch Parity & V2 Contract (DUNGEON-04H)
@@ -1426,106 +1494,108 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 60);
         set("dungeonTried", 0);
-        fu.q.d = 1;
-        fu.p.a = false;
-        setFrG(fu.p, null);
+        GameCanvas.loadmap.idMap = 1;
+        GameCanvas.menu2.isShowMenu = false;
+        setFrG(GameCanvas.menu2, null);
 
-        // 47.1: Native fu.s Giao tiep button with d == null remains actionable
-        // Working V2 scans current fu.s dialog and returns matching Giao tiếp buttons
-        // regardless of whether bt.d is null, since bt.a() natively dispatches via fu.s.b().
-        Method mFindGiaoTiep = Zeus.class.getDeclaredMethod("findGiaoTiepInDialog", da.class);
+        // 47.1: Native GameCanvas.currentDialog Giao tiep button with d == null remains actionable
+        // Working V2 scans current GameCanvas.currentDialog dialog and returns matching Giao tiếp buttons
+        // regardless of whether iCommand.d is null, since iCommand.a() natively dispatches via GameCanvas.currentDialog.b().
+        Method mFindGiaoTiep = Zeus.class.getDeclaredMethod("findGiaoTiepInDialog", MainDialog.class);
         mFindGiaoTiep.setAccessible(true);
 
-        ah nativeAhDialog = new ah();
-        nativeAhDialog.C = new et("dialogButtons");
-        bt nativeAhBtnNoTarget = new bt("Giao tiếp", 4); // bt.d is NULL in native ah dialogs
-        nativeAhDialog.C.a(nativeAhBtnNoTarget);
-        nativeAhDialog.C.a(new bt("Đóng", 8));
-        fu.s = nativeAhDialog;
-        fu.t = null;
-        fu.T = true;
+        MsgDialog nativeAhDialog = new MsgDialog();
+        nativeAhDialog.cmdList = new mVector("dialogButtons");
+        iCommand nativeAhBtnNoTarget = new iCommand("Giao tiếp", 4); // iCommand.d is NULL in native MsgDialog dialogs
+        nativeAhDialog.cmdList.addElement(nativeAhBtnNoTarget);
+        nativeAhDialog.cmdList.addElement(new iCommand("Đóng", 8));
+        GameCanvas.currentDialog = nativeAhDialog;
+        GameCanvas.subDialog = null;
+        GameCanvas.isPointerSelect = true;
 
         Object foundBtn = mFindGiaoTiep.invoke(null, nativeAhDialog);
-        check("Exact Parity: Native fu.s button with bt.d == null is returned", foundBtn == nativeAhBtnNoTarget);
-        check("Exact Parity: Found button has d == null", foundBtn != null && ((bt) foundBtn).d == null);
+        check("Exact Parity: Native GameCanvas.currentDialog button with iCommand.d == null is returned", foundBtn == nativeAhBtnNoTarget);
+        check("Exact Parity: Found button has Pointer == null", foundBtn != null && ((iCommand) foundBtn).Pointer == null);
         if (foundBtn != null) {
-            ((bt) foundBtn).a();
-            check("Exact Parity: Native bt.a() with d == null dispatches to current dialog fu.s.b() resetting fu.T", !fu.T);
+            ((iCommand) foundBtn).perform();
+            check("Exact Parity: Native iCommand.a() with d == null dispatches to current dialog GameCanvas.currentDialog.b() resetting GameCanvas.isPointerClick", !GameCanvas.isPointerSelect);
         }
 
-        // 47.2: Exact Native fu.p First Dialog Contract with active broadcast
-        // When Pho Chi Huy conversation opens natively in fu.p, bt.d is the NPC (ez/bm).
-        // Step 0 must select fu.p, set cursor index fu.p.h = 0, pre-arm Step 1, invoke bt.a(),
-        // dispatch Opcode 23 (payload 0xDB), and keep fu.s broadcast preserved.
-        fu.p.a = true;
-        fa liveNpc = new fa();
-        liveNpc.cv = 2;
-        liveNpc.cu = -37;
-        liveNpc.cC = "Pho Chi Huy";
-        cn.j = new et("entities");
-        cn.j.a(liveNpc);
+        // 47.2: Exact Native GameCanvas.menu2 First Dialog Contract with active broadcast
+        // When Pho Chi Huy conversation opens natively in GameCanvas.menu2, iCommand.d is the NPC (ez/bm).
+        // Step 0 must select GameCanvas.menu2, set cursor index GameCanvas.menu2.h = 0, pre-arm Step 1, invoke iCommand.a(),
+        // dispatch Opcode 23 (payload 0xDB), and keep GameCanvas.currentDialog broadcast preserved.
+        GameCanvas.menu2.isShowMenu = true;
+        MainObject liveNpc = new MainObject();
+        liveNpc.typeObject = 2;
+        liveNpc.ID = -37;
+        liveNpc.name = "Pho Chi Huy";
+        GameScreen.Vecplayers = new mVector("entities");
+        GameScreen.Vecplayers.addElement(liveNpc);
 
-        et nativeFrItems = new et("nativeNpcMenu");
+        mVector nativeFrItems = new mVector("nativeNpcMenu");
         final boolean[] liveNpcActionCalled = new boolean[1];
-        bt liveNpcGiaoTiep = new bt("Giao tiếp", 4, new cg() {
+        iCommand liveNpcGiaoTiep = new iCommand("Giao tiếp", 4, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 liveNpcActionCalled[0] = true;
                 try {
-                    q.a().a((byte) liveNpc.cu);
+                    GlobalService.gI().getlist_from_npc((byte) liveNpc.ID);
                 } catch (Throwable t) {}
             }
         });
-        nativeFrItems.a(liveNpcGiaoTiep);
-        setFrG(fu.p, nativeFrItems);
-        setFrH(fu.p, -1);
+        nativeFrItems.addElement(liveNpcGiaoTiep);
+        setFrG(GameCanvas.menu2, nativeFrItems);
+        setFrH(GameCanvas.menu2, -1);
 
         getSentPackets().clear();
         call("dungeonInteract");
-        check("Exact Parity: fu.p native command callback invoked", liveNpcActionCalled[0]);
-        check("Exact Parity: Step 0 sets fu.p.h cursor to 0", getFrH(fu.p) == 0);
+        check("Exact Parity: GameCanvas.menu2 native command callback invoked", liveNpcActionCalled[0]);
+        check("Exact Parity: Step 0 sets GameCanvas.menu2.h cursor to 0", getFrH(GameCanvas.menu2) == 0);
         check("Exact Parity: Step advanced to 1", ((Integer) get("dungeonStep")).intValue() == 1);
         check("Exact Parity: Exactly one packet sent", getSentPackets().size() == 1);
         check("Exact Parity: Packet is Opcode 23 for NPC -37",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23);
-        check("Exact Parity: Broadcast in fu.s preserved", fu.s != null);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == 23);
+        check("Exact Parity: Broadcast in GameCanvas.currentDialog preserved", GameCanvas.currentDialog != null);
 
         // 47.3: Fast Second-Menu Arrival Race Test (Step 0 -> Step 1 immediate arrival)
         // If Opcode -30 arrives immediately after Step 0 dispatch, Step 1 must process it without loss.
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 3);
-        setFrH(fu.p, -1);
-        et secondMenuItems47 = new et("secondMenu");
-        secondMenuItems47.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        secondMenuItems47.a(new bt("Đóng", 1));
-        setFrG(fu.p, secondMenuItems47);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 3);
+        setFrH(GameCanvas.menu2, -1);
+        mVector secondMenuItems47 = new mVector("secondMenu");
+        secondMenuItems47.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+        secondMenuItems47.addElement(new iCommand("Đóng", 1));
+        setFrG(GameCanvas.menu2, secondMenuItems47);
         callServerMenu(-37, 3, "Nga Tu", secondMenuItems47);
 
         getSentPackets().clear();
         call("dungeonInteract");
         check("Fast Response: Step 1 native action sent q.b (opcode -30)",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == -30);
         check("Fast Response: State advanced to Step 2", ((Integer) get("dungeonStep")).intValue() == 2);
 
-        // 47.4: V2 Native Speech Dialog Parity in fu.s
-        // When speech dialog containing "Phó chỉ huy" appears in fu.s, it advances via softkey/Key 5.
+        // 47.4: V2 Native Speech Dialog Parity in GameCanvas.currentDialog
+        // When speech dialog containing "Phó chỉ huy" appears in GameCanvas.currentDialog, it advances via softkey/Key 5.
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_PREPARATION);
         set("dungeonStep", 0);
         set("dungeonWait", 60);
-        fu.p.a = false;
-        setFrG(fu.p, null);
+        GameCanvas.menu2.isShowMenu = false;
+        setFrG(GameCanvas.menu2, null);
 
         final boolean[] speechSoftkeyInvoked = new boolean[1];
-        ah speechDialog = new ah();
-        speechDialog.q = new String[] { "Phó chỉ huy: Ta có nhiệm vụ vào Ngã tư tử thần cho ngươi!" };
-        speechDialog.ab = new bt("Giao tiếp", 4, new cg() {
+        MsgDialog speechDialog = new MsgDialog();
+        setDialogText(speechDialog, "Phó chỉ huy: Ta có nhiệm vụ vào Ngã tư tử thần cho ngươi!" );
+        speechDialog.right = new iCommand("Giao tiếp", 4, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 speechSoftkeyInvoked[0] = true;
             }
         });
-        fu.s = speechDialog;
+        GameCanvas.currentDialog = speechDialog;
 
         call("dungeonInteract");
         check("V2 Parity: Speech dialog advances via softkey/action", speechSoftkeyInvoked[0]);
@@ -1538,29 +1608,29 @@ public class DungeonStateMachineTest {
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_ROUTING);
-        fu.q.d = 1;
-        cn.g.aZ = 552;
-        cn.g.ba = 504;
-        cn.g.cH = 0;
-        cn.i = null;
+        GameCanvas.loadmap.idMap = 1;
+        GameScreen.player.x = 552;
+        GameScreen.player.y = 504;
+        GameScreen.player.Direction = 0;
+        GameScreen.ObjFocus = null;
 
         final int[] kCallCount48 = new int[1];
-        fa ezDouble48 = new fa() {
-            public void k() {
+        MainObject ezDouble48 = new MainObject() {
+            public void GiaoTiep() {
                 kCallCount48[0]++;
                 try {
-                    q.a().a((byte) this.cu);
+                    GlobalService.gI().getlist_from_npc((byte) this.ID);
                 } catch (Throwable t) {}
             }
         };
-        ezDouble48.cv = 2;
-        ezDouble48.cu = -37;
-        ezDouble48.cC = "Pho Chi Huy";
-        ezDouble48.aZ = 552;
-        ezDouble48.ba = 504;
+        ezDouble48.typeObject = 2;
+        ezDouble48.ID = -37;
+        ezDouble48.name = "Pho Chi Huy";
+        ezDouble48.x = 552;
+        ezDouble48.y = 504;
 
         getSentPackets().clear();
-        Method mClickNpc48 = Zeus.class.getDeclaredMethod("dungeonClickNpc", fa.class);
+        Method mClickNpc48 = Zeus.class.getDeclaredMethod("dungeonClickNpc", MainObject.class);
         mClickNpc48.setAccessible(true);
         boolean clicked48 = ((Boolean) mClickNpc48.invoke(null, ezDouble48)).booleanValue();
 
@@ -1568,8 +1638,8 @@ public class DungeonStateMachineTest {
         check("Test 48: npc.k() invoked exactly once", kCallCount48[0] == 1);
         check("Test 48: Exactly one packet sent across wire", getSentPackets().size() == 1);
         check("Test 48: Packet is opcode 23 with payload (byte)-37",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == 23
-                && ((ep) getSentPackets().get(0)).a()[0] == (byte) -37);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == 23
+                && ((Message) getSentPackets().get(0)).getData()[0] == (byte) -37);
         check("Test 48: dungeonWait armed to bounded cooldown (40)", ((Integer) get("dungeonWait")).intValue() == 40);
         check("Test 48: dungeonState transitioned to DN_PREPARATION", ((Integer) get("dungeonState")).intValue() == Zeus.DN_PREPARATION);
 
@@ -1580,26 +1650,26 @@ public class DungeonStateMachineTest {
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_ROUTING);
-        fu.q.d = 1;
-        cn.g.aZ = 552;
-        cn.g.ba = 504;
+        GameCanvas.loadmap.idMap = 1;
+        GameScreen.player.x = 552;
+        GameScreen.player.y = 504;
 
         final int[] kCallCount49 = new int[1];
-        fa menuNpcDouble49 = new fa() {
-            public void k() {
+        MainObject menuNpcDouble49 = new MainObject() {
+            public void GiaoTiep() {
                 kCallCount49[0]++;
-                fu.p.a = true;
-                et localMenu = new et("localMenu");
-                localMenu.a(new bt("Giao tiếp", 4));
-                localMenu.a(new bt("Đóng", 1));
-                setFrG(fu.p, localMenu);
+                GameCanvas.menu2.isShowMenu = true;
+                mVector localMenu = new mVector("localMenu");
+                localMenu.addElement(new iCommand("Giao tiếp", 4));
+                localMenu.addElement(new iCommand("Đóng", 1));
+                setFrG(GameCanvas.menu2, localMenu);
             }
         };
-        menuNpcDouble49.cv = 2;
-        menuNpcDouble49.cu = -37;
-        menuNpcDouble49.cC = "Pho Chi Huy";
-        menuNpcDouble49.aZ = 552;
-        menuNpcDouble49.ba = 504;
+        menuNpcDouble49.typeObject = 2;
+        menuNpcDouble49.ID = -37;
+        menuNpcDouble49.name = "Pho Chi Huy";
+        menuNpcDouble49.x = 552;
+        menuNpcDouble49.y = 504;
 
         getSentPackets().clear();
         boolean clicked49 = ((Boolean) mClickNpc48.invoke(null, menuNpcDouble49)).booleanValue();
@@ -1607,7 +1677,7 @@ public class DungeonStateMachineTest {
         check("Test 49: dungeonClickNpc returned true", clicked49);
         check("Test 49: npc.k() invoked exactly once", kCallCount49[0] == 1);
         check("Test 49: Zero packets sent across wire (no synthetic opcode 23 fallback)", getSentPackets().size() == 0);
-        check("Test 49: Native menu opened by npc.k() is active in fu.p", fu.p.a);
+        check("Test 49: Native menu opened by npc.k() is active in GameCanvas.menu2", GameCanvas.menu2.isShowMenu);
         check("Test 49: dungeonWait armed to bounded cooldown (40)", ((Integer) get("dungeonWait")).intValue() == 40);
 
         // ---------------------------------------------------------------------
@@ -1620,18 +1690,19 @@ public class DungeonStateMachineTest {
         set("dungeonState", Zeus.DN_PREPARATION);
         set("dungeonStep", 1);
         set("dungeonWait", 60);
-        fu.p.a = false;
-        setFrG(fu.p, null);
+        GameCanvas.menu2.isShowMenu = false;
+        setFrG(GameCanvas.menu2, null);
 
         final boolean[] speech50AInvoked = new boolean[1];
-        ah speech50A = new ah();
-        speech50A.q = new String[] { "Phó chỉ huy: Ngươi đã sẵn sàng bước vào cõi chết chưa?" };
-        speech50A.ab = new bt("Tiếp tục", 1, new cg() {
+        MsgDialog speech50A = new MsgDialog();
+        setDialogText(speech50A, "Phó chỉ huy: Ngươi đã sẵn sàng bước vào cõi chết chưa?" );
+        speech50A.right = new iCommand("Tiếp tục", 1, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 speech50AInvoked[0] = true;
             }
         });
-        fu.s = speech50A;
+        GameCanvas.currentDialog = speech50A;
 
         call("dungeonInteract");
         check("Test 50A: Intermediate speech at Step 1 advances via softkey ab", speech50AInvoked[0]);
@@ -1641,23 +1712,24 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 2);
         set("dungeonWait", 60);
         final boolean[] speech50BInvoked = new boolean[1];
-        ah speech50B = new ah();
-        speech50B.q = new String[] { "Nhiệm vụ: Hãy tiêu diệt toàn bộ quái vật trong Ngã tư tử thần!" };
-        speech50B.Z = new bt("Đồng ý", 2, new cg() {
+        MsgDialog speech50B = new MsgDialog();
+        setDialogText(speech50B, "Nhiệm vụ: Hãy tiêu diệt toàn bộ quái vật trong Ngã tư tử thần!" );
+        speech50B.left = new iCommand("Đồng ý", 2, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 speech50BInvoked[0] = true;
             }
         });
-        fu.s = speech50B;
+        GameCanvas.currentDialog = speech50B;
 
         call("dungeonInteract");
         check("Test 50B: Intermediate speech at Step 2 advances via softkey Z", speech50BInvoked[0]);
         check("Test 50B: dungeonWait refreshed after dialog advance", ((Integer) get("dungeonWait")).intValue() == 60);
 
         // ---------------------------------------------------------------------
-        // Test 51: Ngã Tư Submenu Dispatch Through fu.p.a(2, 0) (R2_B / R2_D)
+        // Test 51: Ngã Tư Submenu Dispatch Through GameCanvas.menu2.isShowMenu(2, 0) (R2_B / R2_D)
         // ---------------------------------------------------------------------
-        System.out.println("--- Test 51: Ngã Tư Submenu Dispatch Through fu.p.a(2, 0) ---");
+        System.out.println("--- Test 51: Ngã Tư Submenu Dispatch Through GameCanvas.menu2.isShowMenu(2, 0) ---");
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_PREPARATION);
@@ -1665,23 +1737,23 @@ public class DungeonStateMachineTest {
         set("dungeonWait", 0);
         set("dungeonTried", 0);
 
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 3);
-        setFrH(fu.p, -1);
-        et menu51 = new et("menu51");
-        menu51.a(new bt("Thông tin", 0));
-        menu51.a(new bt("Vào Ngã Tư Tử Thần", 1));
-        menu51.a(new bt("Đóng", 2));
-        setFrG(fu.p, menu51);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 3);
+        setFrH(GameCanvas.menu2, -1);
+        mVector menu51 = new mVector("menu51");
+        menu51.addElement(new iCommand("Thông tin", 0));
+        menu51.addElement(new iCommand("Vào Ngã Tư Tử Thần", 1));
+        menu51.addElement(new iCommand("Đóng", 2));
+        setFrG(GameCanvas.menu2, menu51);
         callServerMenu(-37, 3, "Nga Tu", menu51);
 
         getSentPackets().clear();
         call("dungeonInteract");
 
-        check("Test 51: Submenu sets fu.p.h to matching 'Ngã Tư' index (1)", getFrH(fu.p) == 1);
+        check("Test 51: Submenu sets GameCanvas.menu2.h to matching 'Ngã Tư' index (1)", getFrH(GameCanvas.menu2) == 1);
         check("Test 51: Native action dispatched server-menu q.b packet (opcode -30)",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == -30);
         check("Test 51: Submenu dispatch advanced dungeonStep to 2", ((Integer) get("dungeonStep")).intValue() == 2);
         check("Test 51: Bounded wait cooldown armed (60)", ((Integer) get("dungeonWait")).intValue() == 60);
 
@@ -1694,9 +1766,9 @@ public class DungeonStateMachineTest {
         set("dungeonState", Zeus.DN_PREPARATION);
         set("dungeonStep", 2);
         set("dungeonWait", 50);
-        fu.s = null;
+        GameCanvas.currentDialog = null;
 
-        fu.q.d = Zeus.DUNGEON_MAP;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
 
         call("dungeonInteract");
         check("Test 52: Direct arrival at Map 48 transitions to DN_COMBAT without confirmation dialog",
@@ -1711,19 +1783,20 @@ public class DungeonStateMachineTest {
         set("dungeonState", Zeus.DN_PREPARATION);
         set("dungeonStep", 2);
         set("dungeonWait", 60);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
         final boolean[] confirm53Clicked = new boolean[1];
-        ah confirm53 = new ah();
-        confirm53.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
-        confirm53.C = new et("buttons");
-        confirm53.C.a(new bt("Có", 1, new cg() {
+        MsgDialog confirm53 = new MsgDialog();
+        setDialogText(confirm53, "Bạn có muốn vào Ngã tư tử thần không?" );
+        confirm53.cmdList = new mVector("buttons");
+        confirm53.cmdList.addElement(new iCommand("Có", 1, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 confirm53Clicked[0] = true;
             }
         }));
-        confirm53.C.a(new bt("Không", 2));
-        fu.s = confirm53;
+        confirm53.cmdList.addElement(new iCommand("Không", 2));
+        GameCanvas.currentDialog = confirm53;
 
         call("dungeonInteract");
         check("Test 53: Valid confirmation dialog confirmed via affirmative button", confirm53Clicked[0]);
@@ -1740,26 +1813,27 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 0);
         set("dungeonTried", 0);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
         final boolean[] unrelatedActionClicked = new boolean[1];
-        ah unrelated54 = new ah();
-        unrelated54.q = new String[] { "Giao dịch vật phẩm với người chơi khác?" };
-        unrelated54.C = new et("buttons");
-        unrelated54.C.a(new bt("Đồng ý", 1, new cg() {
+        MsgDialog unrelated54 = new MsgDialog();
+        setDialogText(unrelated54, "Giao dịch vật phẩm với người chơi khác?" );
+        unrelated54.cmdList = new mVector("buttons");
+        unrelated54.cmdList.addElement(new iCommand("Đồng ý", 1, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 unrelatedActionClicked[0] = true;
             }
         }));
-        unrelated54.C.a(new bt("Hủy", 2));
-        fu.s = unrelated54;
+        unrelated54.cmdList.addElement(new iCommand("Hủy", 2));
+        GameCanvas.currentDialog = unrelated54;
 
         for (int i = 0; i < 4; i++) {
             call("dungeonInteract");
         }
 
         check("Test 54: Unrelated modal callback NEVER invoked (fail-closed)", !unrelatedActionClicked[0]);
-        check("Test 54: Unrelated modal remains in fu.s untouched", fu.s == unrelated54);
+        check("Test 54: Unrelated modal remains in GameCanvas.currentDialog untouched", GameCanvas.currentDialog == unrelated54);
         check("Test 54: State transitioned to DN_MANUAL_REVIEW on persistent unrelated modal",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_MANUAL_REVIEW);
         check("Test 54: dungeonWhy set to 5", ((Integer) get("dungeonWhy")).intValue() == 5);
@@ -1774,13 +1848,13 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 40);
         set("dungeonTried", 0);
-        fu.s = null;
-        fu.p.a = false;
-        setFrG(fu.p, null);
+        GameCanvas.currentDialog = null;
+        GameCanvas.menu2.isShowMenu = false;
+        setFrG(GameCanvas.menu2, null);
 
-        fa npc55 = makePhoChiHuy(552, 504);
-        cn.j = new et("entities");
-        cn.j.a(npc55);
+        MainObject npc55 = makePhoChiHuy(552, 504);
+        GameScreen.Vecplayers = new mVector("entities");
+        GameScreen.Vecplayers.addElement(npc55);
         set("dungeonNpcCu", -37);
 
         getSentPackets().clear();
@@ -1809,25 +1883,25 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 0);
 
-        ah broadcast56 = makeBroadcastPopup("Sự kiện nhân đôi kinh nghiệm đang diễn ra!");
-        fu.s = broadcast56;
+        MsgDialog broadcast56 = makeBroadcastPopup("Sự kiện nhân đôi kinh nghiệm đang diễn ra!");
+        GameCanvas.currentDialog = broadcast56;
 
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 3);
-        setFrH(fu.p, -1);
-        et menu56 = new et("menu56");
-        menu56.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        menu56.a(new bt("Đóng", 1));
-        setFrG(fu.p, menu56);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 3);
+        setFrH(GameCanvas.menu2, -1);
+        mVector menu56 = new mVector("menu56");
+        menu56.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+        menu56.addElement(new iCommand("Đóng", 1));
+        setFrG(GameCanvas.menu2, menu56);
         callServerMenu(-37, 3, "Nga Tu", menu56);
 
         getSentPackets().clear();
         call("dungeonInteract");
 
-        check("Test 56: Submenu dispatched despite broadcast in fu.s",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
-        check("Test 56: Broadcast popup in fu.s preserved and unmodified", fu.s == broadcast56);
+        check("Test 56: Submenu dispatched despite broadcast in GameCanvas.currentDialog",
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == -30);
+        check("Test 56: Broadcast popup in GameCanvas.currentDialog preserved and unmodified", GameCanvas.currentDialog == broadcast56);
         check("Test 56: Step advanced to 2", ((Integer) get("dungeonStep")).intValue() == 2);
 
         // ---------------------------------------------------------------------
@@ -1840,20 +1914,21 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 2); // Submenu already picked, waiting for confirmation or teleport
         set("dungeonWait", 0);
         set("dungeonTried", 0);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
         final boolean[] blankModalActionClicked = new boolean[1];
-        ah blankModal57 = new ah();
+        MsgDialog blankModal57 = new MsgDialog();
         // empty/no dialog text
-        blankModal57.q = new String[] { "" };
-        blankModal57.C = new et("buttons");
-        blankModal57.C.a(new bt("Đồng ý", 1, new cg() {
+        setDialogText(blankModal57, "" );
+        blankModal57.cmdList = new mVector("buttons");
+        blankModal57.cmdList.addElement(new iCommand("Đồng ý", 1, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 blankModalActionClicked[0] = true;
             }
         }));
-        blankModal57.C.a(new bt("Hủy", 2));
-        fu.s = blankModal57;
+        blankModal57.cmdList.addElement(new iCommand("Hủy", 2));
+        GameCanvas.currentDialog = blankModal57;
 
         // Tick repeatedly to let bounded retry policy run
         for (int i = 0; i < 4; i++) {
@@ -1861,34 +1936,34 @@ public class DungeonStateMachineTest {
         }
 
         check("Test 57: Blank ambiguous modal callback NEVER invoked (fail-closed)", !blankModalActionClicked[0]);
-        check("Test 57: Blank ambiguous modal remains unconfirmed in fu.s", fu.s == blankModal57);
+        check("Test 57: Blank ambiguous modal remains unconfirmed in GameCanvas.currentDialog", GameCanvas.currentDialog == blankModal57);
         check("Test 57: State transitioned to DN_MANUAL_REVIEW on persistent blank modal",
                 ((Integer) get("dungeonState")).intValue() == Zeus.DN_MANUAL_REVIEW);
         check("Test 57: dungeonWhy set to 5", ((Integer) get("dungeonWhy")).intValue() == 5);
 
         // ---------------------------------------------------------------------
-        // Test 58: Current fu.s Giao Tiếp Button with d == null Dispatches Native Callback
+        // Test 58: Current GameCanvas.currentDialog Giao Tiếp Button with d == null Dispatches Native Callback
         // ---------------------------------------------------------------------
-        System.out.println("--- Test 58: Current fu.s Giao Tiếp Button with d == null Dispatches Native Callback ---");
+        System.out.println("--- Test 58: Current GameCanvas.currentDialog Giao Tiếp Button with d == null Dispatches Native Callback ---");
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonState", Zeus.DN_PREPARATION);
         set("dungeonStep", 0);
         set("dungeonWait", 0);
         set("dungeonTried", 0);
-        fu.p.a = false;
-        setFrG(fu.p, null);
+        GameCanvas.menu2.isShowMenu = false;
+        setFrG(GameCanvas.menu2, null);
 
-        ah speechAh58 = new ah();
-        speechAh58.C = new et("dialogButtons");
-        bt giaoTiepBtn58 = new bt("Giao tiếp", 4); // bt.d is NULL
-        speechAh58.C.a(giaoTiepBtn58);
-        speechAh58.C.a(new bt("Đóng", 8));
-        fu.s = speechAh58;
-        fu.T = true;
+        MsgDialog speechAh58 = new MsgDialog();
+        speechAh58.cmdList = new mVector("dialogButtons");
+        iCommand giaoTiepBtn58 = new iCommand("Giao tiếp", 4); // iCommand.d is NULL
+        speechAh58.cmdList.addElement(giaoTiepBtn58);
+        speechAh58.cmdList.addElement(new iCommand("Đóng", 8));
+        GameCanvas.currentDialog = speechAh58;
+        GameCanvas.isPointerSelect = true;
 
         call("dungeonInteract");
-        check("Test 58: Giao tiếp with d == null in fu.s dispatches native bt.a() -> fu.s.b() resetting fu.T", !fu.T);
+        check("Test 58: Giao tiếp with d == null in GameCanvas.currentDialog dispatches native iCommand.a() -> GameCanvas.currentDialog.b() resetting GameCanvas.isPointerClick", !GameCanvas.isPointerSelect);
         check("Test 58: Step advances to 1", ((Integer) get("dungeonStep")).intValue() == 1);
         check("Test 58: Wait cooldown armed (60)", ((Integer) get("dungeonWait")).intValue() == 60);
 
@@ -1901,19 +1976,20 @@ public class DungeonStateMachineTest {
         set("dungeonState", Zeus.DN_PREPARATION);
         set("dungeonStep", 2);
         set("dungeonWait", 60);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
         final boolean[] realConfirmClicked = new boolean[1];
-        ah realConfirm59 = new ah();
-        realConfirm59.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
-        realConfirm59.C = new et("buttons");
-        realConfirm59.C.a(new bt("Vào", 1, new cg() {
+        MsgDialog realConfirm59 = new MsgDialog();
+        setDialogText(realConfirm59, "Bạn có muốn vào Ngã tư tử thần không?" );
+        realConfirm59.cmdList = new mVector("buttons");
+        realConfirm59.cmdList.addElement(new iCommand("Vào", 1, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 realConfirmClicked[0] = true;
             }
         }));
-        realConfirm59.C.a(new bt("Không", 2));
-        fu.s = realConfirm59;
+        realConfirm59.cmdList.addElement(new iCommand("Không", 2));
+        GameCanvas.currentDialog = realConfirm59;
 
         call("dungeonInteract");
         check("Test 59: Real dungeon confirmation confirmed via affirmative button", realConfirmClicked[0]);
@@ -1930,20 +2006,21 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 1);
         set("dungeonWait", 60);
         set("dungeonTried", 0);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         set("dungeonMapSeen", 1);
-        fu.p.a = false;
-        setFrG(fu.p, null);
+        GameCanvas.menu2.isShowMenu = false;
+        setFrG(GameCanvas.menu2, null);
 
         final boolean[] speechActionCalled60 = new boolean[1];
-        ah speechDialog60 = new ah();
-        speechDialog60.q = new String[] { "Phó chỉ huy: Ngươi đã sẵn sàng chưa?" };
-        speechDialog60.ab = new bt("Tiếp tục", 1, new cg() {
+        MsgDialog speechDialog60 = new MsgDialog();
+        setDialogText(speechDialog60, "Phó chỉ huy: Ngươi đã sẵn sàng chưa?" );
+        speechDialog60.right = new iCommand("Tiếp tục", 1, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 speechActionCalled60[0] = true;
             }
         });
-        fu.s = speechDialog60;
+        GameCanvas.currentDialog = speechDialog60;
 
         // Execute via the real runtime entrypoint dungeon(), NOT dungeonInteract() directly
         call("dungeon");
@@ -1960,26 +2037,26 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 1);
         set("dungeonWait", 50); // dungeonWait > 0
         set("dungeonTried", 0);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         set("dungeonMapSeen", 1);
-        fu.s = null;
+        GameCanvas.currentDialog = null;
 
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 3);
-        setFrH(fu.p, -1);
-        et menu61 = new et("menu61");
-        menu61.a(new bt("Nhiệm vụ", 0));
-        menu61.a(new bt("Vào Ngã Tư Tử Thần", 1));
-        menu61.a(new bt("Đóng", 2));
-        setFrG(fu.p, menu61);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 3);
+        setFrH(GameCanvas.menu2, -1);
+        mVector menu61 = new mVector("menu61");
+        menu61.addElement(new iCommand("Nhiệm vụ", 0));
+        menu61.addElement(new iCommand("Vào Ngã Tư Tử Thần", 1));
+        menu61.addElement(new iCommand("Đóng", 2));
+        setFrG(GameCanvas.menu2, menu61);
         callServerMenu(-37, 3, "Nga Tu", menu61);
 
         getSentPackets().clear();
         // Execute via the real runtime entrypoint dungeon(), NOT dungeonInteract()
         call("dungeon");
-        check("Test 61: Native fu.p.a(2,0) path dispatches opcode -30 on that tick via dungeon()",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+        check("Test 61: Native GameCanvas.menu2.isShowMenu(2,0) path dispatches opcode -30 on that tick via dungeon()",
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == -30);
         check("Test 61: Only one action dispatched", getSentPackets().size() == 1);
         check("Test 61: State advanced to Step 2", ((Integer) get("dungeonStep")).intValue() == 2);
 
@@ -1993,17 +2070,17 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 40);
         set("dungeonTried", 0);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         set("dungeonMapSeen", 1);
-        fu.s = null; // no confirmation dialog, no speech dialog
-        fu.p.a = false; // no active submenu
-        setFrG(fu.p, null);
+        GameCanvas.currentDialog = null; // no confirmation dialog, no speech dialog
+        GameCanvas.menu2.isShowMenu = false; // no active submenu
+        setFrG(GameCanvas.menu2, null);
         set("dungeonMenu", null); // no legacy menu
         set("dungeonMenuItems", null);
 
-        fa npc62 = makePhoChiHuy(552, 504);
-        cn.j = new et("entities");
-        cn.j.a(npc62);
+        MainObject npc62 = makePhoChiHuy(552, 504);
+        GameScreen.Vecplayers = new mVector("entities");
+        GameScreen.Vecplayers.addElement(npc62);
         set("dungeonNpcCu", -37);
 
         getSentPackets().clear();
@@ -2022,18 +2099,18 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 0);
         set("dungeonTried", 0);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         set("dungeonMapSeen", 1);
-        fu.s = null;
+        GameCanvas.currentDialog = null;
 
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 0);
-        setFrH(fu.p, -1);
-        et menu63 = new et("menu63");
-        menu63.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        menu63.a(new bt("Hướng dẫn", 1));
-        setFrG(fu.p, menu63);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 0);
+        setFrH(GameCanvas.menu2, -1);
+        mVector menu63 = new mVector("menu63");
+        menu63.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+        menu63.addElement(new iCommand("Hướng dẫn", 1));
+        setFrG(GameCanvas.menu2, menu63);
         callServerMenu(-37, 0, "MENU", menu63);
 
         getSentPackets().clear();
@@ -2042,15 +2119,15 @@ public class DungeonStateMachineTest {
 
         // Verify exactly one opcode -30
         check("Test 63: Exactly one packet sent on first submenu dispatch", getSentPackets().size() == 1);
-        check("Test 63: Dispatched packet is opcode -30", ((ep) getSentPackets().get(0)).a == -30);
-        check("Test 63: Native action closed menu", !fu.p.a);
+        check("Test 63: Dispatched packet is opcode -30", ((Message) getSentPackets().get(0)).command == -30);
+        check("Test 63: Native action closed menu", !GameCanvas.menu2.isShowMenu);
 
         // Simulate server re-presenting the same Ngã Tư submenu
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 0);
-        setFrH(fu.p, -1);
-        setFrG(fu.p, menu63);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 0);
+        setFrH(GameCanvas.menu2, -1);
+        setFrG(GameCanvas.menu2, menu63);
         callServerMenu(-37, 0, "MENU", menu63);
 
         // Invoke dungeon() again
@@ -2060,8 +2137,8 @@ public class DungeonStateMachineTest {
         int op23Count = 0;
         int op30Count = 0;
         for (Object p63 : getSentPackets()) {
-            if (((ep) p63).a == 23) op23Count++;
-            if (((ep) p63).a == -30) op30Count++;
+            if (((Message) p63).command == 23) op23Count++;
+            if (((Message) p63).command == -30) op30Count++;
         }
         check("Test 63: No opcode 23 sent", op23Count == 0);
         check("Test 63: Exactly one opcode -30 across both ticks", op30Count == 1);
@@ -2079,26 +2156,26 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 0);
         set("dungeonTried", 0);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         set("dungeonMapSeen", 1);
-        fu.s = null;
+        GameCanvas.currentDialog = null;
 
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 0);
-        setFrH(fu.p, -1);
-        et menu64 = new et("menu64");
-        menu64.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        setFrG(fu.p, menu64);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 0);
+        setFrH(GameCanvas.menu2, -1);
+        mVector menu64 = new mVector("menu64");
+        menu64.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+        setFrG(GameCanvas.menu2, menu64);
         callServerMenu(-37, 0, "MENU", menu64);
 
         getSentPackets().clear();
         call("dungeon");
         check("Test 64: First tick dispatches opcode -30",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == -30);
 
         // Change map to 48 before next tick (direct teleport)
-        fu.q.d = Zeus.DUNGEON_MAP;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
         call("dungeon");
 
         check("Test 64: DN_COMBAT is reached on direct map 48 teleport",
@@ -2115,36 +2192,37 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 0);
         set("dungeonTried", 0);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         set("dungeonMapSeen", 1);
-        fu.s = null;
+        GameCanvas.currentDialog = null;
 
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 0);
-        setFrH(fu.p, -1);
-        et menu65 = new et("menu65");
-        menu65.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        setFrG(fu.p, menu65);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 0);
+        setFrH(GameCanvas.menu2, -1);
+        mVector menu65 = new mVector("menu65");
+        menu65.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+        setFrG(GameCanvas.menu2, menu65);
         callServerMenu(-37, 0, "MENU", menu65);
 
         getSentPackets().clear();
         call("dungeon");
         check("Test 65: First tick dispatches opcode -30",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == -30);
 
         // Present explicit dungeon confirmation
         final boolean[] confirm65Clicked = new boolean[1];
-        ah confirmDlg65 = new ah();
-        confirmDlg65.q = new String[] { "Bạn có muốn vào Ngã tư tử thần không?" };
-        confirmDlg65.C = new et("btns");
-        confirmDlg65.C.a(new bt("Đồng ý", 1, new cg() {
+        MsgDialog confirmDlg65 = new MsgDialog();
+        setDialogText(confirmDlg65, "Bạn có muốn vào Ngã tư tử thần không?" );
+        confirmDlg65.cmdList = new mVector("btns");
+        confirmDlg65.cmdList.addElement(new iCommand("Đồng ý", 1, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 confirm65Clicked[0] = true;
             }
         }));
-        confirmDlg65.C.a(new bt("Không", 2));
-        fu.s = confirmDlg65;
+        confirmDlg65.cmdList.addElement(new iCommand("Không", 2));
+        GameCanvas.currentDialog = confirmDlg65;
 
         call("dungeon");
         check("Test 65: Confirmation dialog is handled once", confirm65Clicked[0]);
@@ -2161,34 +2239,35 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 0);
         set("dungeonTried", 0);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         set("dungeonMapSeen", 1);
-        fu.s = null;
+        GameCanvas.currentDialog = null;
 
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 0);
-        setFrH(fu.p, -1);
-        et menu66 = new et("menu66");
-        menu66.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        setFrG(fu.p, menu66);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 0);
+        setFrH(GameCanvas.menu2, -1);
+        mVector menu66 = new mVector("menu66");
+        menu66.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+        setFrG(GameCanvas.menu2, menu66);
         callServerMenu(-37, 0, "MENU", menu66);
 
         getSentPackets().clear();
         call("dungeon");
         check("Test 66: First tick dispatches opcode -30",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == -30);
 
         // Present a valid Phó Chỉ Huy / nhiệm vụ speech dialog
         final boolean[] speech66Clicked = new boolean[1];
-        ah speech66 = new ah();
-        speech66.q = new String[] { "Phó chỉ huy: Ngã tư tử thần rất nguy hiểm!" };
-        speech66.ab = new bt("Tiếp tục", 1, new cg() {
+        MsgDialog speech66 = new MsgDialog();
+        setDialogText(speech66, "Phó chỉ huy: Ngã tư tử thần rất nguy hiểm!" );
+        speech66.right = new iCommand("Tiếp tục", 1, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 speech66Clicked[0] = true;
             }
         });
-        fu.s = speech66;
+        GameCanvas.currentDialog = speech66;
 
         call("dungeon");
         check("Test 66: Speech dialog is handled reactively via softkey", speech66Clicked[0]);
@@ -2205,24 +2284,24 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 0);
         set("dungeonTried", 0);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         set("dungeonMapSeen", 1);
-        fu.s = null;
+        GameCanvas.currentDialog = null;
 
         // Dispatches first Ngã Tư submenu normally
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 0);
-        setFrH(fu.p, -1);
-        et menu67A = new et("menu67A");
-        menu67A.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        setFrG(fu.p, menu67A);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 0);
+        setFrH(GameCanvas.menu2, -1);
+        mVector menu67A = new mVector("menu67A");
+        menu67A.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+        setFrG(GameCanvas.menu2, menu67A);
         callServerMenu(-37, 0, "MENU", menu67A);
 
         getSentPackets().clear();
         call("dungeon");
         check("Test 67: First run dispatches opcode -30 normally",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == -30);
 
         // Now reset / start a fresh run
         Zeus.dungeonReset();
@@ -2231,24 +2310,24 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 0);
         set("dungeonTried", 0);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         set("dungeonMapSeen", 1);
-        fu.s = null;
+        GameCanvas.currentDialog = null;
 
         // Fresh run presents Ngã Tư submenu
-        fu.p.a = true;
-        setFrC(fu.p, -37);
-        setFrB(fu.p, 0);
-        setFrH(fu.p, -1);
-        et menu67B = new et("menu67B");
-        menu67B.a(new bt("Vào Ngã Tư Tử Thần", 0));
-        setFrG(fu.p, menu67B);
+        GameCanvas.menu2.isShowMenu = true;
+        setFrC(GameCanvas.menu2, -37);
+        setFrB(GameCanvas.menu2, 0);
+        setFrH(GameCanvas.menu2, -1);
+        mVector menu67B = new mVector("menu67B");
+        menu67B.addElement(new iCommand("Vào Ngã Tư Tử Thần", 0));
+        setFrG(GameCanvas.menu2, menu67B);
         callServerMenu(-37, 0, "MENU", menu67B);
 
         getSentPackets().clear();
         call("dungeon");
         check("Test 67: Fresh run may dispatch its first Ngã Tư submenu normally",
-                getSentPackets().size() == 1 && ((ep) getSentPackets().get(0)).a == -30);
+                getSentPackets().size() == 1 && ((Message) getSentPackets().get(0)).command == -30);
         check("Test 67: Fresh run state is step 2", ((Integer) get("dungeonStep")).intValue() == 2);
 
         // ---------------------------------------------------------------------
@@ -2260,7 +2339,7 @@ public class DungeonStateMachineTest {
         set("dungeonState", Zeus.DN_COMBAT);
         set("dungeonWhy", 0);
         set("dungeonFails", 0);
-        fu.q.d = Zeus.DUNGEON_MAP;
+        GameCanvas.loadmap.idMap = Zeus.DUNGEON_MAP;
 
         // Trigger run timeout
         Zeus.dungeonFailRun(6, "dungeon run timed out (>300s)");
@@ -2280,15 +2359,15 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 2);
         set("dungeonWait", 60);
         set("dungeonAwaitingEntry", true);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
-        // Background dialog with "Giao tiếp" still lingering in fu.s
-        ah bgDialog = new ah();
-        bgDialog.q = new String[] { "Pho Chi Huy: Can gi?" };
-        bgDialog.C = new et("buttons");
-        bgDialog.C.a(new bt("Giao tiếp", 0));
-        bgDialog.C.a(new bt("Đóng", 1));
-        fu.s = bgDialog;
+        // Background dialog with "Giao tiếp" still lingering in GameCanvas.currentDialog
+        MsgDialog bgDialog = new MsgDialog();
+        setDialogText(bgDialog, "Pho Chi Huy: Can gi?" );
+        bgDialog.cmdList = new mVector("buttons");
+        bgDialog.cmdList.addElement(new iCommand("Giao tiếp", 0));
+        bgDialog.cmdList.addElement(new iCommand("Đóng", 1));
+        GameCanvas.currentDialog = bgDialog;
 
         getSentPackets().clear();
         call("dungeonInteract");
@@ -2297,16 +2376,16 @@ public class DungeonStateMachineTest {
         check("Test 69: Step remains 2", ((Integer) get("dungeonStep")).intValue() == 2);
         check("Test 69: Still awaiting entry", ((Boolean) get("dungeonAwaitingEntry")).booleanValue());
 
-        // --- Test 70: Confirmation Dialog in fu.t & Awaiting Entry No-Ask-NPC ---
-        System.out.println("--- Test 70: Confirmation Dialog in fu.t & Awaiting Entry No-Ask-NPC ---");
+        // --- Test 70: Confirmation Dialog in GameCanvas.subDialog & Awaiting Entry No-Ask-NPC ---
+        System.out.println("--- Test 70: Confirmation Dialog in GameCanvas.subDialog & Awaiting Entry No-Ask-NPC ---");
         initWorld();
         set("dungeonEnabled", true);
         set("dungeonState", 2); // DN_INTERACT
         set("dungeonStep", 2);
         set("dungeonWait", 0);
         set("dungeonAwaitingEntry", true);
-        fu.q.d = 1;
-        fu.s = null;
+        GameCanvas.loadmap.idMap = 1;
+        GameCanvas.currentDialog = null;
 
         // Part A: When dungeonWait == 0 and dungeonAwaitingEntry == true, dungeonInteract must NOT ask NPC
         getSentPackets().clear();
@@ -2315,23 +2394,24 @@ public class DungeonStateMachineTest {
         check("Test 70A: Still awaiting entry", ((Boolean) get("dungeonAwaitingEntry")).booleanValue());
         check("Test 70A: Step remains 2", ((Integer) get("dungeonStep")).intValue() == 2);
 
-        // Part B: Confirmation dialog arriving in fu.t
+        // Part B: Confirmation dialog arriving in GameCanvas.subDialog
         final int[] test70BAction = new int[1];
-        ah confirmDlgT = new ah();
-        confirmDlgT.q = new String[] { "Ban co muon vao nga tu tu than mot minh" };
-        confirmDlgT.C = new et("buttons");
-        confirmDlgT.C.a(new bt("Vào", 0, new cg() {
+        MsgDialog confirmDlgT = new MsgDialog();
+        setDialogText(confirmDlgT, "Ban co muon vao nga tu tu than mot minh" );
+        confirmDlgT.cmdList = new mVector("buttons");
+        confirmDlgT.cmdList.addElement(new iCommand("Vào", 0, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 test70BAction[0]++;
             }
         }));
-        confirmDlgT.C.a(new bt("Đóng", 1));
-        fu.t = confirmDlgT;
-        fu.s = null;
+        confirmDlgT.cmdList.addElement(new iCommand("Đóng", 1));
+        GameCanvas.subDialog = confirmDlgT;
+        GameCanvas.currentDialog = null;
 
         call("dungeonInteract");
         check("Test 70B: Confirmation action executed exactly once", test70BAction[0] == 1);
-        check("Test 70B: Step advanced to 3 on fu.t confirmation dialog", ((Integer) get("dungeonStep")).intValue() == 3);
+        check("Test 70B: Step advanced to 3 on GameCanvas.subDialog confirmation dialog", ((Integer) get("dungeonStep")).intValue() == 3);
         check("Test 70B: Wait budget armed for teleport", ((Integer) get("dungeonWait")).intValue() == 80);
 
         // ---------------------------------------------------------------------
@@ -2344,20 +2424,21 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 2);
         set("dungeonWait", 60);
         set("dungeonAwaitingEntry", true);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
         final int[] test71Action = new int[1];
-        ah liveSoloDlg = new ah();
-        liveSoloDlg.q = new String[] { "Ban co muon vao nga tu tu than mot minh" };
-        liveSoloDlg.C = new et("buttons");
-        liveSoloDlg.C.a(new bt("Ok", 0, new cg() {
+        MsgDialog liveSoloDlg = new MsgDialog();
+        setDialogText(liveSoloDlg, "Ban co muon vao nga tu tu than mot minh" );
+        liveSoloDlg.cmdList = new mVector("buttons");
+        liveSoloDlg.cmdList.addElement(new iCommand("Ok", 0, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 test71Action[0]++;
             }
         }));
-        liveSoloDlg.C.a(new bt("Đóng", 1));
-        fu.s = liveSoloDlg;
-        fu.t = null;
+        liveSoloDlg.cmdList.addElement(new iCommand("Đóng", 1));
+        GameCanvas.currentDialog = liveSoloDlg;
+        GameCanvas.subDialog = null;
 
         call("dungeonInteract");
         check("Test 71: Confirmation executes exactly once", test71Action[0] == 1);
@@ -2374,22 +2455,23 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 2);
         set("dungeonWait", 60);
         set("dungeonAwaitingEntry", true);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
         final int[] test72Action = new int[1];
-        ah unrelatedMotMinh = new ah();
-        unrelatedMotMinh.q = new String[] { "Ban co muon tiep tuc mot minh khong?" };
-        unrelatedMotMinh.C = new et("buttons");
-        unrelatedMotMinh.C.a(new bt("Dong y", 0, new cg() {
+        MsgDialog unrelatedMotMinh = new MsgDialog();
+        setDialogText(unrelatedMotMinh, "Ban co muon tiep tuc mot minh khong?" );
+        unrelatedMotMinh.cmdList = new mVector("buttons");
+        unrelatedMotMinh.cmdList.addElement(new iCommand("Dong y", 0, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 test72Action[0]++;
             }
         }));
-        unrelatedMotMinh.C.a(new bt("Khong", 1));
-        fu.s = unrelatedMotMinh;
-        fu.t = null;
+        unrelatedMotMinh.cmdList.addElement(new iCommand("Khong", 1));
+        GameCanvas.currentDialog = unrelatedMotMinh;
+        GameCanvas.subDialog = null;
 
-        java.lang.reflect.Method mIsConfirm = Zeus.class.getDeclaredMethod("isDungeonConfirmDialog", da.class);
+        java.lang.reflect.Method mIsConfirm = Zeus.class.getDeclaredMethod("isDungeonConfirmDialog", MainDialog.class);
         mIsConfirm.setAccessible(true);
         boolean isConfirm = ((Boolean) mIsConfirm.invoke(null, unrelatedMotMinh)).booleanValue();
         check("Test 72: isDungeonConfirmDialog rejects standalone mot minh", !isConfirm);
@@ -2409,20 +2491,21 @@ public class DungeonStateMachineTest {
         set("dungeonStep", 0);
         set("dungeonWait", 60);
         set("dungeonAwaitingEntry", false);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
         final int[] test73Action = new int[1];
-        ah earlyConfirmDlg = new ah();
-        earlyConfirmDlg.q = new String[] { "Ban co muon vao nga tu tu than khong?" };
-        earlyConfirmDlg.C = new et("buttons");
-        earlyConfirmDlg.C.a(new bt("Vao", 0, new cg() {
+        MsgDialog earlyConfirmDlg = new MsgDialog();
+        setDialogText(earlyConfirmDlg, "Ban co muon vao nga tu tu than khong?" );
+        earlyConfirmDlg.cmdList = new mVector("buttons");
+        earlyConfirmDlg.cmdList.addElement(new iCommand("Vao", 0, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 test73Action[0]++;
             }
         }));
-        earlyConfirmDlg.C.a(new bt("Dong", 1));
-        fu.s = earlyConfirmDlg;
-        fu.t = null;
+        earlyConfirmDlg.cmdList.addElement(new iCommand("Dong", 1));
+        GameCanvas.currentDialog = earlyConfirmDlg;
+        GameCanvas.subDialog = null;
 
         getSentPackets().clear();
         call("dungeonInteract");
@@ -2431,71 +2514,73 @@ public class DungeonStateMachineTest {
         check("Test 73: Zero packets sent (no premature -32)", getSentPackets().isEmpty());
 
         // ---------------------------------------------------------------------
-        // Test 74: Negative dz.b Is Never Activated
+        // Test 74: Negative InputDialog.b Is Never Activated
         // ---------------------------------------------------------------------
-        System.out.println("--- Test 74: Negative dz.b Is Never Activated ---");
+        System.out.println("--- Test 74: Negative InputDialog.b Is Never Activated ---");
         initWorld();
         set("dungeonEnabled", true);
         set("dungeonState", 2);
         set("dungeonStep", 2);
         set("dungeonWait", 60);
         set("dungeonAwaitingEntry", true);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
         final int[] test74Action = new int[1];
-        dz negDzDlg = new dz();
-        java.lang.reflect.Field fH = dz.class.getDeclaredField("h");
+        InputDialog negDzDlg = new InputDialog();
+        java.lang.reflect.Field fH = InputDialog.class.getDeclaredField("name");
         fH.setAccessible(true);
         fH.set(negDzDlg, "Ban co muon vao");
-        java.lang.reflect.Field fI = dz.class.getDeclaredField("i");
+        java.lang.reflect.Field fI = InputDialog.class.getDeclaredField("info");
         fI.setAccessible(true);
         fI.set(negDzDlg, "nga tu tu than");
-        java.lang.reflect.Field fJ = dz.class.getDeclaredField("j");
+        java.lang.reflect.Field fJ = InputDialog.class.getDeclaredField("xuluong");
         fJ.setAccessible(true);
         fJ.set(negDzDlg, "mot minh");
-        java.lang.reflect.Field fB = dz.class.getDeclaredField("b");
+        java.lang.reflect.Field fB = InputDialog.class.getDeclaredField("cmdClose");
         fB.setAccessible(true);
-        fB.set(negDzDlg, new bt("Không", 0, new cg() {
+        fB.set(negDzDlg, new iCommand("Không", 0, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 test74Action[0]++;
             }
         }));
-        fu.s = negDzDlg;
-        fu.t = null;
+        GameCanvas.currentDialog = negDzDlg;
+        GameCanvas.subDialog = null;
 
         call("dungeonInteract");
-        check("Test 74: Negative dz.b callback is never invoked", test74Action[0] == 0);
+        check("Test 74: Negative InputDialog.b callback is never invoked", test74Action[0] == 0);
         check("Test 74: Step does not advance to 3", ((Integer) get("dungeonStep")).intValue() != 3);
 
         // ---------------------------------------------------------------------
-        // Test 75: fu.t Giao Tiếp Rejection Contract Remains Intact
+        // Test 75: GameCanvas.subDialog Giao Tiếp Rejection Contract Remains Intact
         // ---------------------------------------------------------------------
-        System.out.println("--- Test 75: fu.t Giao Tiếp Rejection Contract Remains Intact ---");
+        System.out.println("--- Test 75: GameCanvas.subDialog Giao Tiếp Rejection Contract Remains Intact ---");
         initWorld();
         set("dungeonEnabled", true);
         set("dungeonState", 2);
         set("dungeonStep", 0);
         set("dungeonWait", 60);
         set("dungeonAwaitingEntry", false);
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
 
         final int[] test75Action = new int[1];
-        ah fuTGiaoTiep = new ah();
-        fuTGiaoTiep.q = new String[] { "Pho Chi Huy: Can gi?" };
-        fuTGiaoTiep.C = new et("buttons");
-        fuTGiaoTiep.C.a(new bt("Giao tiếp", 0, new cg() {
+        MsgDialog fuTGiaoTiep = new MsgDialog();
+        setDialogText(fuTGiaoTiep, "Pho Chi Huy: Can gi?" );
+        fuTGiaoTiep.cmdList = new mVector("buttons");
+        fuTGiaoTiep.cmdList.addElement(new iCommand("Giao tiếp", 0, new AvMain() {
+            public void commandPointer(int e, int f) { a(e, f); }
             public void a(int e, int f) {
                 test75Action[0]++;
             }
         }));
-        fu.s = null;
-        fu.t = fuTGiaoTiep;
+        GameCanvas.currentDialog = null;
+        GameCanvas.subDialog = fuTGiaoTiep;
 
         getSentPackets().clear();
         call("dungeonInteract");
-        check("Test 75: fu.t is not used as source for Giao tiếp", test75Action[0] == 0);
+        check("Test 75: GameCanvas.subDialog is not used as source for Giao tiếp", test75Action[0] == 0);
         check("Test 75: Step remains 0", ((Integer) get("dungeonStep")).intValue() == 0);
-        check("Test 75: Zero packets sent from fu.t Giao tiếp", getSentPackets().isEmpty());
+        check("Test 75: Zero packets sent from GameCanvas.subDialog Giao tiếp", getSentPackets().isEmpty());
 
         // ---------------------------------------------------------------------
         // Test 76: Exact UTC+7 Boundaries & 1-minute window boundaries
@@ -2621,15 +2706,15 @@ public class DungeonStateMachineTest {
         set("dungeonWasIn", true);
         set("dungeonCombatEngaged", true);
         set("dungeonMonstersCleared", true);
-        fu.q.d = 48; // inside dungeon
-        cn.g.cG = 0; // alive
+        GameCanvas.loadmap.idMap = 48; // inside dungeon
+        GameScreen.player.Action = 0; // alive
 
         // Call tick while inside dungeon past endMin
         call("dungeon");
         check("Test 80: Dungeon not aborted while inside map 48", ((Integer) get("dungeonState")).intValue() == Zeus.DN_COMBAT);
 
         // Client transitions back to Map 1 after run completed
-        fu.q.d = 1;
+        GameCanvas.loadmap.idMap = 1;
         call("dungeon");
         check("Test 80: Run successfully completed and accounted", ((Integer) get("dungeonRuns")).intValue() == 1);
         check("Test 80: Returned to DN_IDLE for cooldown", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
@@ -2850,41 +2935,41 @@ public class DungeonStateMachineTest {
         System.exit(failures == 0 ? 0 : 1);
     }
 
-    static fa makePhoChiHuy(int x, int y) {
-        fa pcf = new fa() {
-            public void k() {
+    static MainObject makePhoChiHuy(int x, int y) {
+        MainObject pcf = new MainObject() {
+            public void GiaoTiep() {
                 try {
-                    q.a().a((byte) this.cu);
+                    GlobalService.gI().getlist_from_npc((byte) this.ID);
                 } catch (Throwable t) {}
             }
         };
-        pcf.cv = 2;
-        pcf.cu = -37;
-        pcf.cC = "Pho Chi Huy";
-        pcf.aZ = x;
-        pcf.ba = y;
+        pcf.typeObject = 2;
+        pcf.ID = -37;
+        pcf.name = "Pho Chi Huy";
+        pcf.x = x;
+        pcf.y = y;
         return pcf;
     }
 
-    static ah makeBroadcastPopup(String text) {
-        ah dialog = new ah();
-        dialog.q = new String[] { text };
-        dialog.C = new et("buttons");
-        dialog.C.a(new bt("Ok", -1));
+    static MsgDialog makeBroadcastPopup(String text) {
+        MsgDialog dialog = new MsgDialog();
+        setDialogText(dialog, text );
+        dialog.cmdList = new mVector("buttons");
+        dialog.cmdList.addElement(new iCommand("Ok", -1));
         return dialog;
     }
 
-    static ah makeBlockingModal(String text) {
-        ah dialog = new ah();
-        dialog.q = new String[] { text };
-        dialog.C = new et("buttons");
-        dialog.C.a(new bt("Đồng ý", 1));
-        dialog.C.a(new bt("Không", 2));
+    static MsgDialog makeBlockingModal(String text) {
+        MsgDialog dialog = new MsgDialog();
+        setDialogText(dialog, text );
+        dialog.cmdList = new mVector("buttons");
+        dialog.cmdList.addElement(new iCommand("Đồng ý", 1));
+        dialog.cmdList.addElement(new iCommand("Không", 2));
         return dialog;
     }
 
-    static void callServerMenu(int idNpc, int idMenu, String title, et items) throws Exception {
-        Method m = Zeus.class.getDeclaredMethod("serverMenu", et.class, int.class, int.class, String.class);
+    static void callServerMenu(int idNpc, int idMenu, String title, mVector items) throws Exception {
+        Method m = Zeus.class.getDeclaredMethod("serverMenu", mVector.class, int.class, int.class, String.class);
         m.setAccessible(true);
         m.invoke(null, items, idMenu, idNpc, title);
     }
@@ -2895,62 +2980,40 @@ public class DungeonStateMachineTest {
         return ((Boolean) m.invoke(null, x, y, tol)).booleanValue();
     }
 
-    static boolean callDungeonNpcEligible(fa npc) throws Exception {
-        Method m = Zeus.class.getDeclaredMethod("dungeonNpcEligible", fa.class);
+    static boolean callDungeonNpcEligible(MainObject npc) throws Exception {
+        Method m = Zeus.class.getDeclaredMethod("dungeonNpcEligible", MainObject.class);
         m.setAccessible(true);
         return ((Boolean) m.invoke(null, npc)).booleanValue();
     }
 
-    static int getFrH(fr menu) {
-        try {
-            Field f = fr.class.getDeclaredField("h");
-            f.setAccessible(true);
-            return f.getInt(menu);
-        } catch (Throwable t) {
-            return -999;
-        }
+    static int getFrH(Menu2 menu) {
+        return menu.menuSelectedItem;
     }
 
-    static void setFrH(fr menu, int val) {
-        try {
-            Field f = fr.class.getDeclaredField("h");
-            f.setAccessible(true);
-            f.setInt(menu, val);
-        } catch (Throwable t) {
-        }
+    static void setFrH(Menu2 menu, int val) {
+        menu.menuSelectedItem = val;
     }
 
-    static et getFrG(fr menu) {
-        try {
-            Field f = fr.class.getDeclaredField("g");
-            f.setAccessible(true);
-            return (et) f.get(menu);
-        } catch (Throwable t) {
-            return null;
-        }
+    static mVector getFrG(Menu2 menu) {
+        return menu.menuItems;
     }
 
-    static void setFrG(fr menu, et items) {
-        try {
-            Field f = fr.class.getDeclaredField("g");
-            f.setAccessible(true);
-            f.set(menu, items);
-        } catch (Throwable t) {
-        }
+    static void setFrG(Menu2 menu, mVector items) {
+        menu.menuItems = items;
     }
 
-    static void setFrC(fr menu, int val) {
+    static void setFrC(Menu2 menu, int val) {
         try {
-            Field f = fr.class.getDeclaredField("C");
+            Field f = Menu2.class.getDeclaredField("IdNpc");
             f.setAccessible(true);
             f.setInt(menu, val);
         } catch (Throwable t) {
         }
     }
 
-    static void setFrB(fr menu, int val) {
+    static void setFrB(Menu2 menu, int val) {
         try {
-            Field f = fr.class.getDeclaredField("B");
+            Field f = Menu2.class.getDeclaredField("IdMenu");
             f.setAccessible(true);
             f.setInt(menu, val);
         } catch (Throwable t) {

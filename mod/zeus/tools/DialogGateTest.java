@@ -1,3 +1,46 @@
+import Main.GameCanvas;
+import GameScreen.GameScreen;
+import GameScreen.SelectCharScreen;
+import GameScreen.LoginScreen;
+import GameScreen.LoadMapScreen;
+import GameScreen.MainScreen;
+import GameScreen.PaintInfoGameScreen;
+import GameScreen.TabScreenNew;
+import GameObjects.Player;
+import GameObjects.MainObject;
+import GameObjects.MainMonster;
+import GameObjects.Item;
+import GameObjects.MainItem;
+import GameObjects.AutoGetItem;
+import GameObjects.MainClan;
+import GameObjects.MainRMS;
+import GameObjects.DelaySkill;
+import GameObjects.Other_Players;
+import InterfaceComponents.MsgDialog;
+import InterfaceComponents.MainDialog;
+import InterfaceComponents.InputDialog;
+import InterfaceComponents.ChatTextField;
+import InterfaceComponents.iCommand;
+import InterfaceComponents.TabRebuildItem;
+import InterfaceComponents.DataRebuildItem;
+import InterfaceComponents.TabShopNew;
+import InterfaceComponents.MainTabNew;
+import CLib.TField;
+import Model.Menu2;
+import Model.Point;
+import Model.T;
+import Model.mCamera;
+import Model.AvMain;
+import Thread_More.LoadMap;
+import Skill.HotKey;
+import CLib.mGraphics;
+import CLib.mVector;
+import CLib.mSystem;
+import CLib.Session_ME;
+import net.Message;
+import netcommand.Cmd_Message;
+import netcommand.global.GlobalService;
+import netcommand.global.GlobalLogicHandler;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
@@ -38,74 +81,85 @@ public class DialogGateTest {
         }
     }
 
-    static class TestTarget extends cg {
+    static void setDialogText(MainDialog d, String text) {
+        try {
+            Field f = MainDialog.class.getDeclaredField("strinfo");
+            f.setAccessible(true);
+            f.set(d, new String[] { text });
+        } catch (Throwable t) {}
+    }
+
+    static class TestTarget extends AvMain {
         boolean pressed = false;
         int pressCount = 0;
         boolean dismissOnPress = true;
 
-        public void a(int id, int h) {
+        public void commandPointer(int index, int subIndex) {
             pressed = true;
             pressCount++;
             if (dismissOnPress) {
-                fu.s = null;
+                GameCanvas.currentDialog = null;
             }
+        }
+        public void a(int id, int h) {
+            commandPointer(id, h);
         }
     }
 
-    static ah makeDialog(String text, TestTarget target, String caption) {
-        ah dialog = new ah();
-        dialog.q = new String[] { text };
-        et list = new et("buttons");
-        bt button = new bt(caption, 1, target);
-        list.a(button);
-        dialog.C = list;
+    static MsgDialog makeDialog(String text, TestTarget target, String caption) {
+        MsgDialog dialog = new MsgDialog();
+        setDialogText(dialog, text );
+        mVector list = new mVector("buttons");
+        iCommand button = new iCommand(caption, 1, target);
+        list.addElement(button);
+        dialog.cmdList = list;
         return dialog;
     }
 
-    static ah makeTwoButtonDialog(String text, TestTarget target1, String cap1, TestTarget target2, String cap2) {
-        ah dialog = new ah();
-        dialog.q = new String[] { text };
-        et list = new et("buttons");
-        bt b1 = new bt(cap1, 1, target1);
-        bt b2 = new bt(cap2, 2, target2);
-        list.a(b1);
-        list.a(b2);
-        dialog.C = list;
+    static MsgDialog makeTwoButtonDialog(String text, TestTarget target1, String cap1, TestTarget target2, String cap2) {
+        MsgDialog dialog = new MsgDialog();
+        setDialogText(dialog, text );
+        mVector list = new mVector("buttons");
+        iCommand b1 = new iCommand(cap1, 1, target1);
+        iCommand b2 = new iCommand(cap2, 2, target2);
+        list.addElement(b1);
+        list.addElement(b2);
+        dialog.cmdList = list;
         return dialog;
     }
 
     static void setupWorldState() {
-        if (fu.c == null) {
-            fu.c = new cn();
+        if (GameCanvas.game == null) {
+            GameCanvas.game = new GameScreen();
         }
-        fu.a = fu.c;
-        eh.h = true;
-        if (fu.q == null) {
+        GameCanvas.currentScreen = GameCanvas.game;
+        LoadMapScreen.isNextMap = true;
+        if (GameCanvas.loadmap == null) {
             try {
                 Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
                 uf.setAccessible(true);
                 sun.misc.Unsafe unsafe = (sun.misc.Unsafe) uf.get(null);
-                fu.q = (cs) unsafe.allocateInstance(cs.class);
+                GameCanvas.loadmap = (LoadMap) unsafe.allocateInstance(LoadMap.class);
             } catch (Throwable t) {
                 // fallback
             }
         }
-        if (fu.q != null) {
-            fu.q.d = 1; // map id 1
+        if (GameCanvas.loadmap != null) {
+            GameCanvas.loadmap.idMap = 1; // map id 1
         }
-        cs.i = 10;
-        cs.j = 20; // cs.i != cs.j
-        if (cn.g == null) {
-            cn.g = new bq(100, (byte) 0, "hero", 0, 0);
+        LoadMap.isShowEffAuto = 10;
+        LoadMap.EFF_PHOBANG_END = 20; // LoadMap.isShowEffAuto != LoadMap.EFF_PHOBANG_END
+        if (GameScreen.player == null) {
+            GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
         }
-        cn.g.cG = (byte) 0; // alive
-        cn.g.cx = 100;
-        cn.g.cy = 100;
-        cn.i = null; // no captcha
-        fu.s = null;
-        fu.t = null;
-        if (fu.p != null) {
-            fu.p.a = false;
+        GameScreen.player.Action = (byte) 0; // alive
+        GameScreen.player.typePk = 100;
+        GameScreen.player.typeBoss = 100;
+        GameScreen.ObjFocus = null; // no captcha
+        GameCanvas.currentDialog = null;
+        GameCanvas.subDialog = null;
+        if (GameCanvas.menu2 != null) {
+            GameCanvas.menu2.isShowMenu = false;
         }
     }
 
@@ -117,10 +171,10 @@ public class DialogGateTest {
         // =====================================================================
         System.out.println("--- Test 1: Safe Informational Dialog Dismissal ---");
         TestTarget targetSafe = new TestTarget();
-        ah safeDialog = makeDialog("Thong bao tu server: Bao tri hoan tat.", targetSafe, "Đóng");
-        fu.s = safeDialog;
+        MsgDialog safeDialog = makeDialog("Thong bao tu server: Bao tri hoan tat.", targetSafe, "Đóng");
+        GameCanvas.currentDialog = safeDialog;
 
-        // Verify ready() is false initially because fu.s != null
+        // Verify ready() is false initially because GameCanvas.currentDialog != null
         check("ready() is false while dialog open", !boolCall("ready"));
         check("gameReady() is false while dialog open", !boolCall("gameReady"));
 
@@ -129,24 +183,24 @@ public class DialogGateTest {
             call("tick");
         }
         check("safe dialog button pressed", targetSafe.pressed);
-        check("safe dialog dismissed (fu.s == null)", fu.s == null);
+        check("safe dialog dismissed (GameCanvas.currentDialog == null)", GameCanvas.currentDialog == null);
 
         // =====================================================================
         // Test 2: Unknown dialog fails closed (untouched, automation blocked)
         // =====================================================================
         System.out.println("--- Test 2: Unknown Dialog Fails Closed ---");
         TestTarget targetUnknown = new TestTarget();
-        ah unknownDialog = makeDialog("Nap the nhan khuyen mai 500% cuc hot", targetUnknown, "Đóng");
-        fu.s = unknownDialog;
+        MsgDialog unknownDialog = makeDialog("Nap the nhan khuyen mai 500% cuc hot", targetUnknown, "Đóng");
+        GameCanvas.currentDialog = unknownDialog;
 
         for (int i = 0; i < 10; i++) {
             call("tick");
         }
         check("unknown dialog NOT pressed", !targetUnknown.pressed);
-        check("unknown dialog remains open", fu.s == unknownDialog);
+        check("unknown dialog remains open", GameCanvas.currentDialog == unknownDialog);
         check("ready() remains false", !boolCall("ready"));
         check("gameReady() remains false", !boolCall("gameReady"));
-        fu.s = null; // clear for next test
+        GameCanvas.currentDialog = null; // clear for next test
 
         // =====================================================================
         // Test 3: Dangerous/confirmation dialog never auto-confirmed
@@ -154,27 +208,27 @@ public class DialogGateTest {
         System.out.println("--- Test 3: Dangerous Dialog Safety ---");
         TestTarget targetYes = new TestTarget();
         TestTarget targetNo = new TestTarget();
-        ah deleteDialog = makeTwoButtonDialog("Ban co muon xoa nhan vat nay khong?", targetYes, "Đồng ý", targetNo, "Không");
-        fu.s = deleteDialog;
+        MsgDialog deleteDialog = makeTwoButtonDialog("Ban co muon xoa nhan vat nay khong?", targetYes, "Đồng ý", targetNo, "Không");
+        GameCanvas.currentDialog = deleteDialog;
 
         for (int i = 0; i < 10; i++) {
             call("tick");
         }
         check("dangerous 2-button dialog NOT pressed", !targetYes.pressed && !targetNo.pressed);
-        check("dangerous dialog remains open", fu.s == deleteDialog);
+        check("dangerous dialog remains open", GameCanvas.currentDialog == deleteDialog);
         check("gameReady() blocked by dangerous dialog", !boolCall("gameReady"));
-        fu.s = null;
+        GameCanvas.currentDialog = null;
 
         // Single button with "Đồng ý" caption should also NEVER be confirmed
         TestTarget targetDongY = new TestTarget();
-        ah confirmSingle = makeDialog("Xac nhan mua vat pham voi gia 1000 ngoc?", targetDongY, "Đồng ý");
-        fu.s = confirmSingle;
+        MsgDialog confirmSingle = makeDialog("Xac nhan mua vat pham voi gia 1000 ngoc?", targetDongY, "Đồng ý");
+        GameCanvas.currentDialog = confirmSingle;
         for (int i = 0; i < 10; i++) {
             call("tick");
         }
         check("single-button Dong Y dialog NOT confirmed", !targetDongY.pressed);
-        check("single-button Dong Y dialog remains open", fu.s == confirmSingle);
-        fu.s = null;
+        check("single-button Dong Y dialog remains open", GameCanvas.currentDialog == confirmSingle);
+        GameCanvas.currentDialog = null;
 
         // =====================================================================
         // Test 4: Bounded retries on stubborn dialog
@@ -182,29 +236,29 @@ public class DialogGateTest {
         System.out.println("--- Test 4: Bounded Retries ---");
         TestTarget targetStubborn = new TestTarget();
         targetStubborn.dismissOnPress = false; // Dialog refuses to close
-        ah stubbornDialog = makeDialog("Thong bao: Su kien dua top.", targetStubborn, "OK");
-        fu.s = stubbornDialog;
+        MsgDialog stubbornDialog = makeDialog("Thong bao: Su kien dua top.", targetStubborn, "OK");
+        GameCanvas.currentDialog = stubbornDialog;
 
         for (int i = 0; i < 20; i++) {
             call("tick");
         }
         check("stubborn dialog retry count is bounded (<= 3)", targetStubborn.pressCount <= 3);
         check("stubborn dialog still blocks gameReady()", !boolCall("gameReady"));
-        fu.s = null;
+        GameCanvas.currentDialog = null;
 
         // =====================================================================
         // Test 5: Internal readiness during login/char-select/world loading
         // =====================================================================
         System.out.println("--- Test 5: Internal Readiness Login/Loading ---");
-        if (fu.i == null) {
-            fu.i = new x();
+        if (GameCanvas.selectChar == null) {
+            GameCanvas.selectChar = new SelectCharScreen();
         }
-        fu.a = fu.i; // char select
+        GameCanvas.currentScreen = GameCanvas.selectChar; // char select
         call("tick");
         check("gameReady() false on char-select", !boolCall("gameReady"));
 
-        fu.a = null; // uninitialized
-        check("gameReady() false when fu.a is null", !boolCall("gameReady"));
+        GameCanvas.currentScreen = null; // uninitialized
+        check("gameReady() false when GameCanvas.currentScreen is null", !boolCall("gameReady"));
 
         // =====================================================================
         // Test 6: Internal readiness settles in world and becomes true

@@ -1,3 +1,89 @@
+import Main.GameCanvas;
+import GameScreen.GameScreen;
+import GameScreen.SelectCharScreen;
+import GameScreen.LoginScreen;
+import GameScreen.LoadMapScreen;
+import GameScreen.MainScreen;
+import GameScreen.PaintInfoGameScreen;
+import GameScreen.TabScreenNew;
+import GameObjects.Player;
+import GameObjects.MainObject;
+import GameObjects.MainMonster;
+import GameObjects.Item;
+import GameObjects.MainItem;
+import GameObjects.AutoGetItem;
+import GameObjects.MainClan;
+import GameObjects.MainRMS;
+import GameObjects.DelaySkill;
+import GameObjects.Other_Players;
+import InterfaceComponents.MsgDialog;
+import InterfaceComponents.MainDialog;
+import InterfaceComponents.InputDialog;
+import InterfaceComponents.ChatTextField;
+import InterfaceComponents.iCommand;
+import InterfaceComponents.TabRebuildItem;
+import InterfaceComponents.DataRebuildItem;
+import InterfaceComponents.TabShopNew;
+import InterfaceComponents.MainTabNew;
+import CLib.TField;
+import Model.Menu2;
+import Model.Point;
+import Model.T;
+import Model.mCamera;
+import Model.AvMain;
+import Thread_More.LoadMap;
+import Skill.HotKey;
+import CLib.mGraphics;
+import CLib.mVector;
+import CLib.mSystem;
+import CLib.Session_ME;
+import net.Message;
+import netcommand.Cmd_Message;
+import netcommand.global.GlobalService;
+import netcommand.global.GlobalLogicHandler;
+import Main.GameCanvas;
+import GameScreen.GameScreen;
+import GameScreen.SelectCharScreen;
+import GameScreen.LoginScreen;
+import GameScreen.LoadMapScreen;
+import GameScreen.MainScreen;
+import GameScreen.PaintInfoGameScreen;
+import GameScreen.TabScreenNew;
+import GameObjects.Player;
+import GameObjects.MainObject;
+import GameObjects.MainMonster;
+import GameObjects.Item;
+import GameObjects.MainItem;
+import GameObjects.AutoGetItem;
+import GameObjects.MainClan;
+import GameObjects.MainRMS;
+import GameObjects.DelaySkill;
+import GameObjects.Other_Players;
+import InterfaceComponents.MsgDialog;
+import InterfaceComponents.MainDialog;
+import InterfaceComponents.InputDialog;
+import InterfaceComponents.ChatTextField;
+import InterfaceComponents.iCommand;
+import InterfaceComponents.TabRebuildItem;
+import InterfaceComponents.DataRebuildItem;
+import InterfaceComponents.TabShopNew;
+import InterfaceComponents.MainTabNew;
+import CLib.TField;
+import Model.Menu2;
+import Model.Point;
+import Model.T;
+import Model.mCamera;
+import Model.AvMain;
+import Thread_More.LoadMap;
+import Skill.HotKey;
+import CLib.mGraphics;
+import CLib.mVector;
+import CLib.mSystem;
+import CLib.Session_ME;
+import net.Message;
+import netcommand.Cmd_Message;
+import netcommand.global.GlobalService;
+import netcommand.global.GlobalLogicHandler;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Vector;
@@ -37,10 +123,10 @@ public class EnhancementEngineTest {
 
     @SuppressWarnings("unchecked")
     static Vector<Object> queue() throws Exception {
-        Object link = l.a();
-        Field o = f(l.class, "o");
+        Object link = Session_ME.gI();
+        Field o = f(Session_ME.class, "sender");
         Object sender = o.get(link);
-        Field a = f(sender.getClass(), "a");
+        Field a = f(sender.getClass(), "sendingMessage");
         return (Vector<Object>) a.get(sender);
     }
 
@@ -57,38 +143,38 @@ public class EnhancementEngineTest {
         }
     }
 
-    static j makeItem(int id, int category, String name, String baseName, int level, int tier) {
-        j it = new j();
-        it.O = id;
-        it.u = category;
-        it.g = name;
-        it.i = baseName;
-        it.z = (byte) level;
-        it.N = tier;
-        it.K = 1;
-        it.v = (short) 100;
-        it.B = 1;
-        it.t = 10;
+    static MainItem makeItem(int id, int category, String name, String baseName, int level, int tier) {
+        MainItem it = new MainItem();
+        it.Id = id;
+        it.ItemCatagory = category;
+        it.itemName = name;
+        it.itemNameExcludeLv = baseName;
+        it.tier = (byte) level;
+        it.colorNameItem = tier;
+        it.numPotion = 1;
+        it.IdTem = (short) 100;
+        it.isLock = 1;
+        it.imageId = 10;
         return it;
     }
 
-    static j makeCharm(int id, String name, String baseName, int charmType) {
-        j it = new j();
-        it.O = id;
-        it.u = 7; // category 7
-        it.A = 11; // charm family
-        it.g = name;
-        it.i = baseName;
-        it.z = 0;
-        it.N = 0;
-        it.K = 10;
+    static MainItem makeCharm(int id, String name, String baseName, int charmType) {
+        MainItem it = new MainItem();
+        it.Id = id;
+        it.ItemCatagory = 7; // category 7
+        it.typeMaterial = 11; // charm family
+        it.itemName = name;
+        it.itemNameExcludeLv = baseName;
+        it.tier = 0;
+        it.colorNameItem = 0;
+        it.numPotion = 10;
         return it;
     }
 
-    static et bag(bw... items) {
-        et v = new et("bag");
+    static mVector bag(Item... items) {
+        mVector v = new mVector("bag");
         for (int i = 0; i < items.length; i++) {
-            v.a(items[i]);
+            v.addElement(items[i]);
         }
         return v;
     }
@@ -98,8 +184,8 @@ public class EnhancementEngineTest {
 
         // Precondition setup
         clearQueue();
-        if (cn.g == null) {
-            cn.g = new bq(100, (byte) 0, "hero", 0, 0);
+        if (GameScreen.player == null) {
+            GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
         }
 
         // ---------------------------------------------------------------------
@@ -130,7 +216,7 @@ public class EnhancementEngineTest {
         validateTargetMethod.setAccessible(true);
 
         // Subtest 2.1: 0 matching items -> ITEM_MISSING_OR_CHANGED
-        bw.V = bag(makeItem(102, 3, "Kiem khac", "Kiem khac", 0, 1));
+        Item.VecInvetoryPlayer = bag(makeItem(102, 3, "Kiem khac", "Kiem khac", 0, 1));
         set("enhTemplateId", 101);
         set("enhCategory", 3);
         set("enhBaseName", "Kiem ngan");
@@ -143,9 +229,9 @@ public class EnhancementEngineTest {
         check("0 matching O+u items enters ITEM_MISSING_OR_CHANGED (20)", state == 20);
 
         // Subtest 2.2: 2 matching items with same O+u -> AMBIGUOUS_WIRE_TARGET
-        j swordA = makeItem(101, 3, "Kiem ngan +5", "Kiem ngan", 5, 2);
-        j swordB = makeItem(101, 3, "Kiem ngan +5", "Kiem ngan", 5, 2);
-        bw.V = bag(swordA, swordB);
+        MainItem swordA = makeItem(101, 3, "Kiem ngan +5", "Kiem ngan", 5, 2);
+        MainItem swordB = makeItem(101, 3, "Kiem ngan +5", "Kiem ngan", 5, 2);
+        Item.VecInvetoryPlayer = bag(swordA, swordB);
         set("enhState", 3);
 
         validateTargetMethod.invoke(null);
@@ -153,8 +239,8 @@ public class EnhancementEngineTest {
         check("2 matching O+u items enters AMBIGUOUS_WIRE_TARGET (21)", state == 21);
 
         // Subtest 2.3: Fingerprint mismatch (different base_name) -> ITEM_MISSING_OR_CHANGED
-        j swordWrongName = makeItem(101, 3, "Kiem dai +5", "Kiem dai", 5, 2);
-        bw.V = bag(swordWrongName);
+        MainItem swordWrongName = makeItem(101, 3, "Kiem dai +5", "Kiem dai", 5, 2);
+        Item.VecInvetoryPlayer = bag(swordWrongName);
         set("enhState", 3);
 
         validateTargetMethod.invoke(null);
@@ -162,8 +248,8 @@ public class EnhancementEngineTest {
         check("Fingerprint name mismatch enters ITEM_MISSING_OR_CHANGED", state == 20);
 
         // Subtest 2.4: Fingerprint mismatch (different tier) -> ITEM_MISSING_OR_CHANGED
-        j swordWrongTier = makeItem(101, 3, "Kiem ngan +5", "Kiem ngan", 5, 1);
-        bw.V = bag(swordWrongTier);
+        MainItem swordWrongTier = makeItem(101, 3, "Kiem ngan +5", "Kiem ngan", 5, 1);
+        Item.VecInvetoryPlayer = bag(swordWrongTier);
         set("enhState", 3);
 
         validateTargetMethod.invoke(null);
@@ -171,8 +257,8 @@ public class EnhancementEngineTest {
         check("Fingerprint tier mismatch enters ITEM_MISSING_OR_CHANGED", state == 20);
 
         // Subtest 2.5: Level mismatch -> ITEM_MISSING_OR_CHANGED
-        j swordWrongLevel = makeItem(101, 3, "Kiem ngan +4", "Kiem ngan", 4, 2);
-        bw.V = bag(swordWrongLevel);
+        MainItem swordWrongLevel = makeItem(101, 3, "Kiem ngan +4", "Kiem ngan", 4, 2);
+        Item.VecInvetoryPlayer = bag(swordWrongLevel);
         set("enhState", 3);
 
         validateTargetMethod.invoke(null);
@@ -180,8 +266,8 @@ public class EnhancementEngineTest {
         check("Current level mismatch enters ITEM_MISSING_OR_CHANGED", state == 20);
 
         // Subtest 2.6: Exactly 1 valid match -> proceeds to LOCATING_BLACKSMITH (4)
-        j swordValid = makeItem(101, 3, "Kiem ngan +5", "Kiem ngan", 5, 2);
-        bw.V = bag(swordValid);
+        MainItem swordValid = makeItem(101, 3, "Kiem ngan +5", "Kiem ngan", 5, 2);
+        Item.VecInvetoryPlayer = bag(swordValid);
         set("enhState", 3);
 
         validateTargetMethod.invoke(null);
@@ -206,7 +292,7 @@ public class EnhancementEngineTest {
         check("Mode 0 proceeds to VERIFYING_RESOURCES with resolved_charm 0", state == 10 && resolvedCharm == 0);
 
         // Subtest 3.2: Mode 1 missing charm -> CHARM_MISSING (24)
-        bw.V = bag(swordValid);
+        Item.VecInvetoryPlayer = bag(swordValid);
         set("enhConfiguredCharmMode", 1);
         set("enhState", 8);
         resolveCharmMethod.invoke(null);
@@ -214,8 +300,8 @@ public class EnhancementEngineTest {
         check("Mode 1 with missing charm enters CHARM_MISSING (24)", state == 24);
 
         // Subtest 3.3: Mode 1 with valid charm -> proceeds to INSERTING_CHARM (9)
-        j charm3 = makeCharm(501, "Cỏ 3 lá", "Cỏ 3 lá", 1);
-        bw.V = bag(swordValid, charm3);
+        MainItem charm3 = makeCharm(501, "Cỏ 3 lá", "Cỏ 3 lá", 1);
+        Item.VecInvetoryPlayer = bag(swordValid, charm3);
         set("enhConfiguredCharmMode", 1);
         set("enhState", 8);
         resolveCharmMethod.invoke(null);
@@ -224,8 +310,8 @@ public class EnhancementEngineTest {
         check("Mode 1 with valid charm proceeds to INSERTING_CHARM (9)", state == 9 && resolvedCharm == 1);
 
         // Subtest 3.4: Ambiguous charm candidates (multiple templates for same semantic type) -> AMBIGUOUS_CHARM (22)
-        j charm3_dup = makeCharm(502, "Cỏ 3 lá", "Cỏ 3 lá", 1);
-        bw.V = bag(swordValid, charm3, charm3_dup);
+        MainItem charm3_dup = makeCharm(502, "Cỏ 3 lá", "Cỏ 3 lá", 1);
+        Item.VecInvetoryPlayer = bag(swordValid, charm3, charm3_dup);
         set("enhConfiguredCharmMode", 1);
         set("enhState", 8);
         resolveCharmMethod.invoke(null);
@@ -233,7 +319,7 @@ public class EnhancementEngineTest {
         check("Ambiguous charm templates enters AMBIGUOUS_CHARM (22)", state == 22);
 
         // Subtest 3.5: No silent fallback (Mode 2 when only Co 3 la is present) -> CHARM_MISSING
-        bw.V = bag(swordValid, charm3);
+        Item.VecInvetoryPlayer = bag(swordValid, charm3);
         set("enhConfiguredCharmMode", 2);
         set("enhState", 8);
         resolveCharmMethod.invoke(null);
@@ -241,8 +327,8 @@ public class EnhancementEngineTest {
         check("Mode 2 cannot fall back to Co 3 la -> CHARM_MISSING (24)", state == 24);
 
         // Subtest 3.6: Explicit Cỏ bốn lá resolves when bag text uses Vietnamese word form
-        j charm4Word = makeCharm(777, "Cỏ bốn lá", "Cỏ bốn lá", 2);
-        bw.V = bag(swordValid, charm4Word);
+        MainItem charm4Word = makeCharm(777, "Cỏ bốn lá", "Cỏ bốn lá", 2);
+        Item.VecInvetoryPlayer = bag(swordValid, charm4Word);
         set("enhConfiguredCharmMode", 2);
         set("enhState", 8);
         resolveCharmMethod.invoke(null);
@@ -251,8 +337,8 @@ public class EnhancementEngineTest {
         check("Explicit Cỏ bốn lá resolves when bag text uses Vietnamese word form", state == 9 && resolvedCharm == 2);
 
         // Subtest 3.7: Explicit Cỏ bốn lá resolves after normalized diacritics
-        j charm4NoDiacritics = makeCharm(778, "Co bon la", "Co bon la", 2);
-        bw.V = bag(swordValid, charm4NoDiacritics);
+        MainItem charm4NoDiacritics = makeCharm(778, "Co bon la", "Co bon la", 2);
+        Item.VecInvetoryPlayer = bag(swordValid, charm4NoDiacritics);
         set("enhConfiguredCharmMode", 2);
         set("enhState", 8);
         resolveCharmMethod.invoke(null);
@@ -261,8 +347,8 @@ public class EnhancementEngineTest {
         check("Explicit Cỏ bốn lá resolves after normalized diacritics", state == 9 && resolvedCharm == 2);
 
         // Subtest 3.8: Explicit Cỏ 4 lá remains compatible
-        j charm4Digit = makeCharm(779, "Cỏ 4 lá", "Cỏ 4 lá", 2);
-        bw.V = bag(swordValid, charm4Digit);
+        MainItem charm4Digit = makeCharm(779, "Cỏ 4 lá", "Cỏ 4 lá", 2);
+        Item.VecInvetoryPlayer = bag(swordValid, charm4Digit);
         set("enhConfiguredCharmMode", 2);
         set("enhState", 8);
         resolveCharmMethod.invoke(null);
@@ -271,8 +357,8 @@ public class EnhancementEngineTest {
         check("Explicit Cỏ 4 lá remains compatible", state == 9 && resolvedCharm == 2);
 
         // Subtest 3.9: Explicit Cỏ ba lá resolves
-        j charm3Word = makeCharm(780, "Cỏ ba lá", "Cỏ ba lá", 1);
-        bw.V = bag(swordValid, charm3Word);
+        MainItem charm3Word = makeCharm(780, "Cỏ ba lá", "Cỏ ba lá", 1);
+        Item.VecInvetoryPlayer = bag(swordValid, charm3Word);
         set("enhConfiguredCharmMode", 1);
         set("enhState", 8);
         resolveCharmMethod.invoke(null);
@@ -281,10 +367,10 @@ public class EnhancementEngineTest {
         check("Explicit Cỏ ba lá resolves", state == 9 && resolvedCharm == 1);
 
         // Subtest 3.10: Unrelated similarly named items do not match
-        j unrelatedA = makeCharm(801, "Bánh bao", "Bánh bao", 0);
-        j unrelatedB = makeCharm(802, "Bình máu 4", "Bình máu 4", 0);
-        j unrelatedC = makeCharm(803, "Cỏ bốn góc", "Cỏ bốn góc", 0);
-        bw.V = bag(swordValid, unrelatedA, unrelatedB, unrelatedC);
+        MainItem unrelatedA = makeCharm(801, "Bánh bao", "Bánh bao", 0);
+        MainItem unrelatedB = makeCharm(802, "Bình máu 4", "Bình máu 4", 0);
+        MainItem unrelatedC = makeCharm(803, "Cỏ bốn góc", "Cỏ bốn góc", 0);
+        Item.VecInvetoryPlayer = bag(swordValid, unrelatedA, unrelatedB, unrelatedC);
         set("enhConfiguredCharmMode", 1);
         set("enhState", 8);
         resolveCharmMethod.invoke(null);
@@ -298,8 +384,8 @@ public class EnhancementEngineTest {
         check("Unrelated items with 4/bon do not match Mode 2 -> CHARM_MISSING (24)", state == 24);
 
         // Subtest 3.11: No hardcoded charm template ID is required for runtime matching
-        j customTemplateCharm = makeCharm(9999, "Cỏ bốn lá", "Cỏ bốn lá", 2);
-        bw.V = bag(swordValid, customTemplateCharm);
+        MainItem customTemplateCharm = makeCharm(9999, "Cỏ bốn lá", "Cỏ bốn lá", 2);
+        Item.VecInvetoryPlayer = bag(swordValid, customTemplateCharm);
         set("enhConfiguredCharmMode", 2);
         set("enhState", 8);
         resolveCharmMethod.invoke(null);
@@ -309,7 +395,7 @@ public class EnhancementEngineTest {
 
         // Subtest 3.12: Missing requested charm produces CHARM_MISSING before Opcode67
         clearQueue();
-        bw.V = bag(swordValid);
+        Item.VecInvetoryPlayer = bag(swordValid);
         set("enhConfiguredCharmMode", 2);
         set("enhState", 8);
         resolveCharmMethod.invoke(null);
@@ -328,7 +414,7 @@ public class EnhancementEngineTest {
         set("enhTier", 2);
         set("enhExpectedLevel", 5);
         set("enhCapturedSlot", 3); // Expected at slot 3
-        bw.V = bag(swordValid); // Placed at slot 0
+        Item.VecInvetoryPlayer = bag(swordValid); // Placed at slot 0
         set("enhState", 3);
         validateTargetMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
@@ -344,40 +430,40 @@ public class EnhancementEngineTest {
         verifyResMethod.setAccessible(true);
 
         // Setup mock forge cost structures
-        c.k = new b[16];
+        TabRebuildItem.dataRebuild = new DataRebuildItem[16];
         for (int i = 0; i < 16; i++) {
-            c.k[i] = new b();
-            c.k[i].c = 50000; // quoted gold
-            c.k[i].d = 20;    // quoted gems
-            c.k[i].e = new byte[]{2, 1, 0, 0}; // mandatory materials
+            TabRebuildItem.dataRebuild[i] = new DataRebuildItem();
+            TabRebuildItem.dataRebuild[i].priceCoin = 50000; // quoted gold
+            TabRebuildItem.dataRebuild[i].priceGold = 20;    // quoted gems
+            TabRebuildItem.dataRebuild[i].mValue = new byte[]{2, 1, 0, 0}; // mandatory materials
         }
-        c.q = new short[]{301, 302, 303, 304}; // material template IDs
-        c.p = new int[]{5, 5, 5, 5}; // bag counts
-        c.j = new String[]{"Da", "Sat", "Dong", "Vang"};
-        c.l = swordValid;
+        TabRebuildItem.idMaterial = new short[]{301, 302, 303, 304}; // material template IDs
+        TabRebuildItem.numMaterialInven = new int[]{5, 5, 5, 5}; // bag counts
+        TabRebuildItem.mNameMaterial = new String[]{"Da", "Sat", "Dong", "Vang"};
+        TabRebuildItem.itemRe = swordValid;
 
         // Subtest 4.1: Gold mode with sufficient gold but 0 gems -> SUCCESS (READY_FOR_ATTEMPT)
-        cn.g.bD = 100000; // gold
-        cn.g.bC = 0;      // gems
+        GameScreen.player.coin = 100000; // gold
+        GameScreen.player.gold = 0;      // gems
         set("enhPaymentType", 0);
         set("enhResolvedCharmMode", 0);
         set("enhState", 10);
-        bw.V = bag(swordValid, makeItem(301, 7, "Da", "Da", 0, 0), makeItem(302, 7, "Sat", "Sat", 0, 0));
+        Item.VecInvetoryPlayer = bag(swordValid, makeItem(301, 7, "Da", "Da", 0, 0), makeItem(302, 7, "Sat", "Sat", 0, 0));
 
         verifyResMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
         check("Payment type 0 succeeds with 0 gems if gold is sufficient", state == 11);
 
         // Subtest 4.2: Gold mode with insufficient gold -> INSUFFICIENT_GOLD (25)
-        cn.g.bD = 1000;
+        GameScreen.player.coin = 1000;
         set("enhState", 10);
         verifyResMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
         check("Payment type 0 with low gold enters INSUFFICIENT_GOLD (25)", state == 25);
 
         // Subtest 4.3: Gem mode with sufficient gems but 0 gold -> SUCCESS (READY_FOR_ATTEMPT)
-        cn.g.bD = 0;
-        cn.g.bC = 50;
+        GameScreen.player.coin = 0;
+        GameScreen.player.gold = 50;
         set("enhPaymentType", 1);
         set("enhState", 10);
         verifyResMethod.invoke(null);
@@ -385,20 +471,20 @@ public class EnhancementEngineTest {
         check("Payment type 1 succeeds with 0 gold if gems are sufficient", state == 11);
 
         // Subtest 4.4: Gem mode with insufficient gems -> INSUFFICIENT_GEMS (26)
-        cn.g.bC = 5;
+        GameScreen.player.gold = 5;
         set("enhState", 10);
         verifyResMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
         check("Payment type 1 with low gems enters INSUFFICIENT_GEMS (26)", state == 26);
 
         // Subtest 4.5: Missing mandatory material -> INSUFFICIENT_MATERIALS (27)
-        cn.g.bC = 50;
-        c.p[0] = 0; // missing material 0
+        GameScreen.player.gold = 50;
+        TabRebuildItem.numMaterialInven[0] = 0; // missing material 0
         set("enhState", 10);
         verifyResMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
         check("Missing mandatory material enters INSUFFICIENT_MATERIALS (27)", state == 27);
-        c.p[0] = 5; // restore
+        TabRebuildItem.numMaterialInven[0] = 5; // restore
 
         // ---------------------------------------------------------------------
         // Test 5: Execution Semantics & Attempt Limits
@@ -421,8 +507,8 @@ public class EnhancementEngineTest {
         check("Execute packet increments attempt count to 1", attempts == 1);
         check("State becomes ATTEMPTING / WAITING_RESULT", state == 12 || state == 13);
         check("Opcode 67 emitted exactly once", q.size() == 1);
-        ep pkt = (ep) q.elementAt(0);
-        check("Emitted packet opcode is 67", pkt.a == 67);
+        Message pkt = (Message) q.elementAt(0);
+        check("Emitted packet opcode is 67", pkt.command == 67);
 
         // Subtest 5.2: Exceeding max_attempts enters ATTEMPT_LIMIT_REACHED (18)
         set("enhState", 11);
@@ -456,11 +542,11 @@ public class EnhancementEngineTest {
         set("enhActualCharmsSpent", 0L);
 
         // Simulate after-state: gold dropped by 50000, 1 charm consumed, level upgraded to 6
-        cn.g.bD = 50000;
-        cn.g.bC = 50;
-        j swordPlus6 = makeItem(101, 3, "Kiem ngan +6", "Kiem ngan", 6, 2);
-        bw.V = bag(swordPlus6, makeItem(501, 7, "Cỏ 3 lá", "Cỏ 3 lá", 0, 0)); // 1 charm left
-        c.C = 3; // Success
+        GameScreen.player.coin = 50000;
+        GameScreen.player.gold = 50;
+        MainItem swordPlus6 = makeItem(101, 3, "Kiem ngan +6", "Kiem ngan", 6, 2);
+        Item.VecInvetoryPlayer = bag(swordPlus6, makeItem(501, 7, "Cỏ 3 lá", "Cỏ 3 lá", 0, 0)); // 1 charm left
+        TabRebuildItem.isNextRebuild = 3; // Success
 
         settleMethod.invoke(null);
         long actualGold = ((Long) get("enhActualGoldSpent")).longValue();
@@ -470,36 +556,36 @@ public class EnhancementEngineTest {
         check("Actual charm spent measured from live delta (1)", actualCharms == 1);
         check("Authoritative level updated to 6", currentLv == 6);
 
-        // Subtest 6.2: Protected failure (c.C == 4, same level) -> FAILURE_PROTECTED
-        c.C = 4;
+        // Subtest 6.2: Protected failure (TabRebuildItem.isNextRebuild == 4, same level) -> FAILURE_PROTECTED
+        TabRebuildItem.isNextRebuild = 4;
         set("snapTargetLevelBefore", 6);
-        j swordStill6 = makeItem(101, 3, "Kiem ngan +6", "Kiem ngan", 6, 2);
-        bw.V = bag(swordStill6);
+        MainItem swordStill6 = makeItem(101, 3, "Kiem ngan +6", "Kiem ngan", 6, 2);
+        Item.VecInvetoryPlayer = bag(swordStill6);
         settleMethod.invoke(null);
         String lastRes = (String) get("enhLastResult");
-        check("c.C == 4 with unchanged level classifies as FAILURE_PROTECTED", "FAILURE_PROTECTED".equals(lastRes));
+        check("TabRebuildItem.isNextRebuild == 4 with unchanged level classifies as FAILURE_PROTECTED", "FAILURE_PROTECTED".equals(lastRes));
 
-        // Subtest 6.3: Degraded failure (c.C == 4, dropped to level 5) -> FAILURE_DEGRADED
+        // Subtest 6.3: Degraded failure (TabRebuildItem.isNextRebuild == 4, dropped to level 5) -> FAILURE_DEGRADED
         set("snapTargetLevelBefore", 6);
-        j swordDegraded5 = makeItem(101, 3, "Kiem ngan +5", "Kiem ngan", 5, 2);
-        bw.V = bag(swordDegraded5);
+        MainItem swordDegraded5 = makeItem(101, 3, "Kiem ngan +5", "Kiem ngan", 5, 2);
+        Item.VecInvetoryPlayer = bag(swordDegraded5);
         settleMethod.invoke(null);
         lastRes = (String) get("enhLastResult");
         currentLv = ((Integer) get("enhCurrentLevel")).intValue();
-        check("c.C == 4 with lower level classifies as FAILURE_DEGRADED", "FAILURE_DEGRADED".equals(lastRes));
+        check("TabRebuildItem.isNextRebuild == 4 with lower level classifies as FAILURE_DEGRADED", "FAILURE_DEGRADED".equals(lastRes));
         check("Adopted authoritative lower level 5", currentLv == 5);
 
         // Subtest 6.4: Destruction (item missing) -> ITEM_DESTROYED (19)
-        bw.V = bag(); // empty
+        Item.VecInvetoryPlayer = bag(); // empty
         settleMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
         check("Missing item after attempt enters ITEM_DESTROYED (19)", state == 19);
 
         // Subtest 6.5: Target Reached (upgraded to target level 7)
-        c.C = 3;
+        TabRebuildItem.isNextRebuild = 3;
         set("snapTargetLevelBefore", 6);
-        j swordTarget7 = makeItem(101, 3, "Kiem ngan +7", "Kiem ngan", 7, 2);
-        bw.V = bag(swordTarget7);
+        MainItem swordTarget7 = makeItem(101, 3, "Kiem ngan +7", "Kiem ngan", 7, 2);
+        Item.VecInvetoryPlayer = bag(swordTarget7);
         settleMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
         check("Reaching target level enters TARGET_REACHED (17)", state == 17);
@@ -612,11 +698,11 @@ public class EnhancementEngineTest {
 
         // Character arrives on Map 1, but far from anchor
         setupWorldState(1);
-        cn.g.aZ = 100;
-        cn.g.ba = 100;
+        GameScreen.player.x = 100;
+        GameScreen.player.y = 100;
         // Map 1 Pháp sư NPC present at anchor 324, 624
-        cn.j = new et("npcs");
-        cn.j.a(makeNpc("Pháp sư", -36, 2, 324, 624));
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(makeNpc("Pháp sư", -36, 2, 324, 624));
         // Settle map
         Field mapStableField = Class.forName("Zeus").getDeclaredField("mapStableTicks");
         mapStableField.setAccessible(true);
@@ -630,23 +716,23 @@ public class EnhancementEngineTest {
         check("On Map 1 with dist > 45, transitions to APPROACHING_BLACKSMITH (5)", state == 5);
 
         // Character approaches anchor (dist <= 45)
-        cn.g.aZ = 320;
-        cn.g.ba = 624;
+        GameScreen.player.x = 320;
+        GameScreen.player.y = 624;
         clearQueue();
         enhanceMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
         check("When near Pháp sư, transitions to OPENING_FORGE (6)", state == 6);
         check("Emitted NPC interaction packet (not opcode 67)", queue().size() == 1);
-        ep talkPkt = (ep) queue().elementAt(0);
-        check("Interaction packet is not opcode 67", talkPkt.a != 67);
+        Message talkPkt = (Message) queue().elementAt(0);
+        check("Interaction packet is not opcode 67", talkPkt.command != 67);
 
         // Subtest 9.5: Current Map 1 near-anchor fast path
         clearQueue();
         setupWorldState(1);
-        cn.g.aZ = 324;
-        cn.g.ba = 624;
-        cn.j = new et("npcs");
-        cn.j.a(makeNpc("Pháp sư", -36, 2, 324, 624));
+        GameScreen.player.x = 324;
+        GameScreen.player.y = 624;
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(makeNpc("Pháp sư", -36, 2, 324, 624));
         mapStableField.set(null, 15);
         stableMapField.set(null, 1);
         set("enhState", 4);
@@ -657,11 +743,11 @@ public class EnhancementEngineTest {
 
         // Subtest 9.6: Missing live Pháp sư after bounded scans
         setupWorldState(1);
-        cn.g.aZ = 324;
-        cn.g.ba = 624;
-        // cn.j has NPC with cu=-36 but WRONG name / not Pháp sư
-        cn.j = new et("npcs");
-        cn.j.a(makeNpc("Dan lang", -36, 2, 324, 624));
+        GameScreen.player.x = 324;
+        GameScreen.player.y = 624;
+        // cn.MainItem has NPC with cu=-36 but WRONG name / not Pháp sư
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(makeNpc("Dan lang", -36, 2, 324, 624));
         set("enhState", 4);
         set("enhBlacksmithScanTicks", 0);
         mapStableField.set(null, 15);
@@ -680,8 +766,8 @@ public class EnhancementEngineTest {
         set("enhState", 6); // OPENING_FORGE
         set("enhWait", 0);
         set("enhForgeOpenTries", 0);
-        cn.j = new et("npcs");
-        cn.j.a(makeNpc("Pháp sư", -36, 2, 324, 624));
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(makeNpc("Pháp sư", -36, 2, 324, 624));
         // Retry until forge open fails
         for (int i = 0; i < 5; i++) {
             set("enhWait", 0);
@@ -708,70 +794,70 @@ public class EnhancementEngineTest {
         Method findBsMethod = Class.forName("Zeus").getDeclaredMethod("findBlacksmithNpc");
         findBsMethod.setAccessible(true);
         setupWorldState(1);
-        cn.g.aZ = 300;
-        cn.g.ba = 600;
+        GameScreen.player.x = 300;
+        GameScreen.player.y = 600;
 
         // 10.1: cv=2, name "Pháp sư" => eligible
-        cn.j = new et("npcs");
-        cn.j.a(makeNpc("Pháp sư", -36, 2, 324, 624));
-        fa res = (fa) findBsMethod.invoke(null);
-        check("cv=2 with name 'Pháp sư' is eligible", res != null && "Pháp sư".equals(res.cC));
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(makeNpc("Pháp sư", -36, 2, 324, 624));
+        MainObject res = (MainObject) findBsMethod.invoke(null);
+        check("cv=2 with name 'Pháp sư' is eligible", res != null && "Pháp sư".equals(res.name));
 
         // 10.2: cv!=2, name "Pháp sư" => not eligible
-        cn.j = new et("npcs");
-        cn.j.a(makeNpc("Pháp sư", -36, 1, 324, 624)); // cv = 1
-        res = (fa) findBsMethod.invoke(null);
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(makeNpc("Pháp sư", -36, 1, 324, 624)); // cv = 1
+        res = (MainObject) findBsMethod.invoke(null);
         check("cv!=2 with name 'Pháp sư' is NOT eligible", res == null);
 
         // 10.3: cv=2, name containing 'Cường hóa' but NOT 'Pháp sư' => NOT eligible
-        cn.j = new et("npcs");
-        cn.j.a(makeNpc("Cường hóa", -36, 2, 324, 624));
-        res = (fa) findBsMethod.invoke(null);
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(makeNpc("Cường hóa", -36, 2, 324, 624));
+        res = (MainObject) findBsMethod.invoke(null);
         check("cv=2 with name 'Cường hóa' but not 'Pháp sư' is NOT eligible", res == null);
 
         // 10.4: cu=-36 with non-Pháp-sư name => not eligible
-        cn.j = new et("npcs");
-        cn.j.a(makeNpc("Thợ rèn", -36, 2, 324, 624));
-        res = (fa) findBsMethod.invoke(null);
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(makeNpc("Thợ rèn", -36, 2, 324, 624));
+        res = (MainObject) findBsMethod.invoke(null);
         check("cu=-36 with non-Pháp-sư name is NOT eligible", res == null);
 
         // 10.5: Pháp sư candidate with cu=-36 receives priority only after eligibility
-        cn.j = new et("npcs");
-        cn.j.a(makeNpc("Pháp sư tập sự", -10, 2, 305, 605)); // dist = 10
-        cn.j.a(makeNpc("Pháp sư", -36, 2, 350, 650));         // dist = 100, but -10000 bonus
-        res = (fa) findBsMethod.invoke(null);
-        check("cu=-36 provides distance priority between valid Pháp sư candidates", res != null && res.cu == -36);
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(makeNpc("Pháp sư tập sự", -10, 2, 305, 605)); // dist = 10
+        GameScreen.Vecplayers.addElement(makeNpc("Pháp sư", -36, 2, 350, 650));         // dist = 100, but -10000 bonus
+        res = (MainObject) findBsMethod.invoke(null);
+        check("cu=-36 provides distance priority between valid Pháp sư candidates", res != null && res.ID == -36);
 
         // 10.6: Menu option 'Cường hóa' remains accepted in serverMenu
-        Method serverMenuMethod = Class.forName("Zeus").getDeclaredMethod("serverMenu", et.class, int.class, int.class, String.class);
+        Method serverMenuMethod = Class.forName("Zeus").getDeclaredMethod("serverMenu", mVector.class, int.class, int.class, String.class);
         serverMenuMethod.setAccessible(true);
         set("enhState", 6); // OPENING_FORGE
         clearQueue();
-        et menuItems = new et("menu");
-        bt opt1 = new bt("Nhiệm vụ", 0);
-        bt opt2 = new bt("Cường hoá", 1);
-        bt opt3 = new bt("Thoát", 2);
-        menuItems.a(opt1);
-        menuItems.a(opt2);
-        menuItems.a(opt3);
+        mVector menuItems = new mVector("menu");
+        iCommand opt1 = new iCommand("Nhiệm vụ", 0);
+        iCommand opt2 = new iCommand("Cường hoá", 1);
+        iCommand opt3 = new iCommand("Thoát", 2);
+        menuItems.addElement(opt1);
+        menuItems.addElement(opt2);
+        menuItems.addElement(opt3);
         boolean menuTaken = ((Boolean) serverMenuMethod.invoke(null, menuItems, 10, -36, "Pháp sư")).booleanValue();
         check("serverMenu takes 'Cường hoá' option in state 6", menuTaken);
         check("serverMenu dispatches option pick packet", queue().size() == 1);
-        ep pkt10 = (ep) queue().elementAt(0);
-        check("serverMenu option pick opcode is -30 (not 67)", pkt10.a == (byte) -30);
+        Message pkt10 = (Message) queue().elementAt(0);
+        check("serverMenu option pick opcode is -30 (not 67)", pkt10.command == (byte) -30);
 
         // 10.7: Focused wire test proving NPC=-36, menu=0, option=0 selects short-byte-byte overload
         clearQueue();
         set("enhState", 6);
-        et liveMenuItems = new et("menu");
-        liveMenuItems.a(new bt("Cường hóa", 0)); // option index 0
+        mVector liveMenuItems = new mVector("menu");
+        liveMenuItems.addElement(new iCommand("Cường hóa", 0)); // option index 0
         boolean liveMenuTaken = ((Boolean) serverMenuMethod.invoke(null, liveMenuItems, 0, -36, "Pháp sư")).booleanValue();
         check("live-shape menu selection taken", liveMenuTaken);
         check("exactly 1 packet queued for menu selection", queue().size() == 1);
-        ep wirePkt = (ep) queue().elementAt(0);
-        check("menu-selection wire opcode is -30", wirePkt.a == (byte) -30);
-        check("menu-selection produces zero Opcode 67 packets", wirePkt.a != (byte) 67);
-        byte[] payload = wirePkt.a();
+        Message wirePkt = (Message) queue().elementAt(0);
+        check("menu-selection wire opcode is -30", wirePkt.command == (byte) -30);
+        check("menu-selection produces zero Opcode 67 packets", wirePkt.command != (byte) 67);
+        byte[] payload = wirePkt.getData();
         java.io.DataInputStream dis = new java.io.DataInputStream(new java.io.ByteArrayInputStream(payload));
         short wireNpc = dis.readShort();
         byte wireMenu = dis.readByte();
@@ -789,7 +875,7 @@ public class EnhancementEngineTest {
         set("enhState", 6); // OPENING_FORGE
         set("enhValidationOnly", true);
         clearQueue();
-        fu.a = makeForgePopup();
+        GameCanvas.currentScreen = makeForgePopup();
         enhanceMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
         check("Forge-ready with validationOnly=true transitions to DRY_RUN_COMPLETE (39)", state == 39);
@@ -802,7 +888,7 @@ public class EnhancementEngineTest {
         set("enhState", 6); // OPENING_FORGE
         set("enhValidationOnly", false);
         clearQueue();
-        fu.a = makeForgePopup();
+        GameCanvas.currentScreen = makeForgePopup();
         enhanceMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
         check("Forge-ready with validationOnly=false transitions to INSERTING_TARGET (7)", state == 7);
@@ -866,67 +952,67 @@ public class EnhancementEngineTest {
         Method dialogRecoveryMethod = Class.forName("Zeus").getDeclaredMethod("dialogRecovery");
         dialogRecoveryMethod.setAccessible(true);
 
-        if (fu.p == null) {
-            fu.p = new fr();
+        if (GameCanvas.menu2 == null) {
+            GameCanvas.menu2 = new Menu2();
         }
 
-        // 12.1: Unrelated fu.p notification (fr.d=1) while unowned is NOT dismissed
-        fu.s = null;
-        fu.p.a = true;
-        fr.d = 1; // notification mode
+        // 12.1: Unrelated GameCanvas.menu2 notification (Menu2.isNPCMenu=1) while unowned is NOT dismissed
+        GameCanvas.currentDialog = null;
+        GameCanvas.menu2.isShowMenu = true;
+        Menu2.isNPCMenu = 1; // notification mode
         setupWorldState(1);
-        fu.a = fu.c;
+        GameCanvas.currentScreen = GameCanvas.game;
         dialogRecoveryMethod.invoke(null);
-        check("Unrelated fu.p notification (fr.d=1) is NOT dismissed when unowned", fu.p.a);
-        fu.p.a = false; // reset
+        check("Unrelated GameCanvas.menu2 notification (Menu2.isNPCMenu=1) is NOT dismissed when unowned", GameCanvas.menu2.isShowMenu);
+        GameCanvas.menu2.isShowMenu = false; // reset
 
-        // 12.2: fu.p menu mode (fr.d=0) is NOT auto-dismissed (fail-closed)
-        fu.s = null;
-        fu.p.a = true;
-        fr.d = 0; // menu mode
+        // 12.2: GameCanvas.menu2 menu mode (Menu2.isNPCMenu=0) is NOT auto-dismissed (fail-closed)
+        GameCanvas.currentDialog = null;
+        GameCanvas.menu2.isShowMenu = true;
+        Menu2.isNPCMenu = 0; // menu mode
         dialogRecoveryMethod.invoke(null);
-        check("fu.p menu mode (fr.d=0) fails closed and remains open", fu.p.a);
-        fu.p.a = false; // reset
+        check("GameCanvas.menu2 menu mode (Menu2.isNPCMenu=0) fails closed and remains open", GameCanvas.menu2.isShowMenu);
+        GameCanvas.menu2.isShowMenu = false; // reset
 
         // 12.3: Unrelated ev tab-screen (e.g. inventory) is NOT force-closed by cleanEnhancementRouting
-        ev invScreen = makeInventoryPopup();
-        fu.a = invScreen;
+        TabScreenNew invScreen = makeInventoryPopup();
+        GameCanvas.currentScreen = invScreen;
         call("cleanEnhancementRouting");
-        check("Unrelated ev screen is NOT force-closed to fu.c", fu.a == invScreen);
-        check("fu.a remains invScreen and not fu.c", fu.a != fu.c);
+        check("Unrelated ev screen is NOT force-closed to GameCanvas.game", GameCanvas.currentScreen == invScreen);
+        check("GameCanvas.currentScreen remains invScreen and not GameCanvas.game", GameCanvas.currentScreen != GameCanvas.game);
 
         // 12.4: Unowned forge screen is NOT closed by cleanEnhancementRouting
-        ev unownedForge = makeForgePopup();
-        fu.a = unownedForge;
+        TabScreenNew unownedForge = makeForgePopup();
+        GameCanvas.currentScreen = unownedForge;
         set("enhOwnsForgeScreen", false);
         call("cleanEnhancementRouting");
-        check("Unowned forge screen is NOT closed by cleanEnhancementRouting", fu.a == unownedForge);
+        check("Unowned forge screen is NOT closed by cleanEnhancementRouting", GameCanvas.currentScreen == unownedForge);
 
-        // 12.5: Enhancement-owned fu.p is dismissed via native fr.f() when owned
-        ev ownedForge = makeForgePopup();
-        fu.a = ownedForge;
-        fu.p.a = true;
-        fr.d = 1;
+        // 12.5: Enhancement-owned GameCanvas.menu2 is dismissed via native fr.f() when owned
+        TabScreenNew ownedForge = makeForgePopup();
+        GameCanvas.currentScreen = ownedForge;
+        GameCanvas.menu2.isShowMenu = true;
+        Menu2.isNPCMenu = 1;
         set("enhOwnsForgeScreen", true);
         set("enhOwnsResultDialog", true);
         dialogRecoveryMethod.invoke(null);
-        check("Enhancement-owned fu.p is dismissed by dialogRecovery", !fu.p.a);
+        check("Enhancement-owned GameCanvas.menu2 is dismissed by dialogRecovery", !GameCanvas.menu2.isShowMenu);
         check("enhOwnsResultDialog is cleared after dismissal", !((Boolean) get("enhOwnsResultDialog")).booleanValue());
 
         // 12.6: Zero Opcode 67 packets emitted on dialog dismissal
         clearQueue();
         set("enhOwnsForgeScreen", true);
         set("enhOwnsResultDialog", true);
-        fu.p.a = true;
-        fr.d = 1;
+        GameCanvas.menu2.isShowMenu = true;
+        Menu2.isNPCMenu = 1;
         dialogRecoveryMethod.invoke(null);
         check("Dialog dismissal emits zero packets", queue().size() == 0);
 
-        // 12.7: Enhancement-owned forge screen cleanup restores fu.a to fu.c
-        fu.a = ownedForge;
+        // 12.7: Enhancement-owned forge screen cleanup restores GameCanvas.currentScreen to GameCanvas.game
+        GameCanvas.currentScreen = ownedForge;
         set("enhOwnsForgeScreen", true);
         call("cleanEnhancementRouting");
-        check("Enhancement-owned forge screen is restored to fu.c", fu.a == fu.c);
+        check("Enhancement-owned forge screen is restored to GameCanvas.game", GameCanvas.currentScreen == GameCanvas.game);
         check("enhOwnsForgeScreen cleared after cleanup", !((Boolean) get("enhOwnsForgeScreen")).booleanValue());
 
         // 12.8: Dry-run validation never sets enhOwnsResultDialog
@@ -934,7 +1020,7 @@ public class EnhancementEngineTest {
         setupWorldState(1);
         set("enhValidationOnly", true);
         set("enhState", 6); // OPENING_FORGE
-        fu.a = makeForgePopup();
+        GameCanvas.currentScreen = makeForgePopup();
         enhanceMethod.invoke(null);
         check("Dry run terminates in DRY_RUN_COMPLETE (39)", ((Integer) get("enhState")).intValue() == 39);
         check("Dry run does NOT set enhOwnsResultDialog", !((Boolean) get("enhOwnsResultDialog")).booleanValue());
@@ -947,7 +1033,7 @@ public class EnhancementEngineTest {
         set("enhState", 13); // WAITING_RESULT
         set("enhInFlightExecute", true);
         set("enhOwnsForgeScreen", true);
-        c.C = 3; // server SUCCESS result
+        TabRebuildItem.isNextRebuild = 3; // server SUCCESS result
         enhanceMethod.invoke(null);
         check("Real result lifecycle sets enhOwnsResultDialog", ((Boolean) get("enhOwnsResultDialog")).booleanValue());
         call("enhanceReset");
@@ -965,17 +1051,17 @@ public class EnhancementEngineTest {
         // ---------------------------------------------------------------------
         System.out.println("--- Test 13: Result wait window & conservative state reconciliation ---");
 
-        // 13.1: Normal c.C == 3 arriving after >1.5s within wait window is captured as RESULT_CODE_SUCCESS
+        // 13.1: Normal TabRebuildItem.isNextRebuild == 3 arriving after >1.5s within wait window is captured as RESULT_CODE_SUCCESS
         call("enhanceReset");
         setupWorldState(1);
-        c.C = 0;
+        TabRebuildItem.isNextRebuild = 0;
         set("enhState", 13); // WAITING_RESULT
         set("enhInFlightExecute", true);
         set("enhWait", 100); // 100 ticks remaining (>1.5s)
         set("enhResultDeadline", System.currentTimeMillis() + 4000L); // deadline in future
-        c.C = 3; // server result arrives
+        TabRebuildItem.isNextRebuild = 3; // server result arrives
         enhanceMethod.invoke(null);
-        check("13.1: Normal c.C == 3 captures SUCCESS", "SUCCESS".equals(get("enhLastResult")));
+        check("13.1: Normal TabRebuildItem.isNextRebuild == 3 captures SUCCESS", "SUCCESS".equals(get("enhLastResult")));
         check("13.1: Settlement provenance is RESULT_CODE_SUCCESS", "RESULT_CODE_SUCCESS".equals(get("enhSettlementProvenance")));
         check("13.1: Settlement source is RESULT_CODE", "RESULT_CODE".equals(get("enhSettlementSource")));
         check("13.1: Result code is 3", ((Integer) get("enhResultCode")).intValue() == 3);
@@ -983,7 +1069,7 @@ public class EnhancementEngineTest {
         // 13.2: Native result delay around 3.7 seconds does not cause premature RESULT_AMBIGUOUS
         call("enhanceReset");
         setupWorldState(1);
-        c.C = 0;
+        TabRebuildItem.isNextRebuild = 0;
         set("enhState", 13);
         set("enhInFlightExecute", true);
         set("enhWait", 150); // still waiting
@@ -1005,12 +1091,12 @@ public class EnhancementEngineTest {
         set("enhCategory", 3);
         set("enhBaseName", "Kiem tap");
         set("enhTier", 1);
-        bw.V = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1));
-        if (c.k == null) c.k = new b[16];
-        c.k[0] = new b();
-        c.k[0].c = 3000;
-        c.k[0].d = 0;
-        c.k[0].e = new byte[]{1, 1, 0, 0};
+        Item.VecInvetoryPlayer = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1));
+        if (TabRebuildItem.dataRebuild == null) TabRebuildItem.dataRebuild = new DataRebuildItem[16];
+        TabRebuildItem.dataRebuild[0] = new DataRebuildItem();
+        TabRebuildItem.dataRebuild[0].priceCoin = 3000;
+        TabRebuildItem.dataRebuild[0].priceGold = 0;
+        TabRebuildItem.dataRebuild[0].mValue = new byte[]{1, 1, 0, 0};
         executeAttemptMethod.invoke(null);
         int queuedPackets = queue().size();
         check("13.3: Exactly one Opcode 67 packet sent on execute", queuedPackets == 1);
@@ -1019,23 +1105,23 @@ public class EnhancementEngineTest {
         enhanceMethod.invoke(null);
         check("13.4: Zero execute retries during result wait", queue().size() == 1);
 
-        // 13.5: Normal c.C == 4 (failure) remains correctly classified
+        // 13.5: Normal TabRebuildItem.isNextRebuild == 4 (failure) remains correctly classified
         call("enhanceReset");
         setupWorldState(1);
-        bw.V = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1));
+        Item.VecInvetoryPlayer = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1));
         set("enhState", 13);
         set("enhInFlightExecute", true);
         set("snapTargetLevelBefore", 0);
-        c.C = 4;
+        TabRebuildItem.isNextRebuild = 4;
         enhanceMethod.invoke(null);
-        check("13.5: Normal c.C == 4 classified as FAILURE_PROTECTED", "FAILURE_PROTECTED".equals(get("enhLastResult")));
+        check("13.5: Normal TabRebuildItem.isNextRebuild == 4 classified as FAILURE_PROTECTED", "FAILURE_PROTECTED".equals(get("enhLastResult")));
         check("13.5: Settlement source is RESULT_CODE", "RESULT_CODE".equals(get("enhSettlementSource")));
         check("13.5: Result code is 4", ((Integer) get("enhResultCode")).intValue() == 4);
 
         // 13.6, 13.7, 13.8: Exact state fallback reconciliation produces STATE_RECONCILED_SUCCESS with result_code null
         call("enhanceReset");
         setupWorldState(1);
-        c.C = 0; // No c.C captured!
+        TabRebuildItem.isNextRebuild = 0; // No TabRebuildItem.isNextRebuild captured!
         set("enhState", 13);
         set("enhInFlightExecute", true);
         set("enhWait", 0); // timeout expired
@@ -1064,10 +1150,10 @@ public class EnhancementEngineTest {
         set("snapGoldBefore", 10000L);
         set("snapGemBefore", 50L);
         set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
-        bw.V = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
-        cn.g.bD = 7000;
-        cn.g.bC = 50;
-        c.p = new int[]{9, 9, 0, 0};
+        Item.VecInvetoryPlayer = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
+        GameScreen.player.coin = 7000;
+        GameScreen.player.gold = 50;
+        TabRebuildItem.numMaterialInven = new int[]{9, 9, 0, 0};
         enhanceMethod.invoke(null);
         check("13.7: Exact state reconciliation produces STATE_RECONCILED_SUCCESS", "STATE_RECONCILED_SUCCESS".equals(get("enhSettlementProvenance")));
         check("13.7: State transitions to TARGET_REACHED (17)", ((Integer) get("enhState")).intValue() == 17);
@@ -1081,7 +1167,7 @@ public class EnhancementEngineTest {
         // 13.9: Level advancement with mismatched resources remains ambiguous
         call("enhanceReset");
         setupWorldState(1);
-        c.C = 0;
+        TabRebuildItem.isNextRebuild = 0;
         set("enhState", 13);
         set("enhInFlightExecute", true);
         set("enhWait", 0);
@@ -1109,17 +1195,17 @@ public class EnhancementEngineTest {
         set("snapGoldBefore", 10000L);
         set("snapGemBefore", 50L);
         set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
-        bw.V = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
-        cn.g.bD = 8000; // mismatch
-        cn.g.bC = 50;
-        c.p = new int[]{9, 9, 0, 0};
+        Item.VecInvetoryPlayer = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
+        GameScreen.player.coin = 8000; // mismatch
+        GameScreen.player.gold = 50;
+        TabRebuildItem.numMaterialInven = new int[]{9, 9, 0, 0};
         enhanceMethod.invoke(null);
         check("13.9: Mismatched resources enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
 
         // 13.10: Resource delta match without exact target level advancement remains ambiguous
         call("enhanceReset");
         setupWorldState(1);
-        c.C = 0;
+        TabRebuildItem.isNextRebuild = 0;
         set("enhState", 13);
         set("enhInFlightExecute", true);
         set("enhWait", 0);
@@ -1145,17 +1231,17 @@ public class EnhancementEngineTest {
         set("snapGoldBefore", 10000L);
         set("snapGemBefore", 50L);
         set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
-        bw.V = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1)); // unadvanced level 0
-        cn.g.bD = 7000;
-        cn.g.bC = 50;
-        c.p = new int[]{9, 9, 0, 0};
+        Item.VecInvetoryPlayer = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1)); // unadvanced level 0
+        GameScreen.player.coin = 7000;
+        GameScreen.player.gold = 50;
+        TabRebuildItem.numMaterialInven = new int[]{9, 9, 0, 0};
         enhanceMethod.invoke(null);
         check("13.10: Unadvanced level enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
 
         // 13.11: Wrong fingerprint remains ambiguous
         call("enhanceReset");
         setupWorldState(1);
-        c.C = 0;
+        TabRebuildItem.isNextRebuild = 0;
         set("enhState", 13);
         set("enhInFlightExecute", true);
         set("enhWait", 0);
@@ -1181,17 +1267,17 @@ public class EnhancementEngineTest {
         set("snapGoldBefore", 10000L);
         set("snapGemBefore", 50L);
         set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
-        bw.V = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 2)); // tier 2 != tier 1
-        cn.g.bD = 7000;
-        cn.g.bC = 50;
-        c.p = new int[]{9, 9, 0, 0};
+        Item.VecInvetoryPlayer = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 2)); // tier 2 != tier 1
+        GameScreen.player.coin = 7000;
+        GameScreen.player.gold = 50;
+        TabRebuildItem.numMaterialInven = new int[]{9, 9, 0, 0};
         enhanceMethod.invoke(null);
         check("13.11: Wrong fingerprint enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
 
         // 13.12: Duplicate O+u remains ambiguous
         call("enhanceReset");
         setupWorldState(1);
-        c.C = 0;
+        TabRebuildItem.isNextRebuild = 0;
         set("enhState", 13);
         set("enhInFlightExecute", true);
         set("enhWait", 0);
@@ -1217,17 +1303,17 @@ public class EnhancementEngineTest {
         set("snapGoldBefore", 10000L);
         set("snapGemBefore", 50L);
         set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
-        bw.V = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1), makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
-        cn.g.bD = 7000;
-        cn.g.bC = 50;
-        c.p = new int[]{9, 9, 0, 0};
+        Item.VecInvetoryPlayer = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1), makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
+        GameScreen.player.coin = 7000;
+        GameScreen.player.gold = 50;
+        TabRebuildItem.numMaterialInven = new int[]{9, 9, 0, 0};
         enhanceMethod.invoke(null);
         check("13.12: Duplicate O+u enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
 
         // 13.13: Wrong request UUID cannot reconcile
         call("enhanceReset");
         setupWorldState(1);
-        c.C = 0;
+        TabRebuildItem.isNextRebuild = 0;
         set("enhState", 13);
         set("enhInFlightExecute", true);
         set("enhWait", 0);
@@ -1253,17 +1339,17 @@ public class EnhancementEngineTest {
         set("snapGoldBefore", 10000L);
         set("snapGemBefore", 50L);
         set("snapMaterialsBefore", new long[]{10L, 10L, 0L, 0L});
-        bw.V = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
-        cn.g.bD = 7000;
-        cn.g.bC = 50;
-        c.p = new int[]{9, 9, 0, 0};
+        Item.VecInvetoryPlayer = bag(makeItem(67, 3, "Kiem tap +1", "Kiem tap", 1, 1));
+        GameScreen.player.coin = 7000;
+        GameScreen.player.gold = 50;
+        TabRebuildItem.numMaterialInven = new int[]{9, 9, 0, 0};
         enhanceMethod.invoke(null);
         check("13.13: Request UUID mismatch enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
 
         // 13.14: Unchanged target does not become fake failure or fake success
         call("enhanceReset");
         setupWorldState(1);
-        c.C = 0;
+        TabRebuildItem.isNextRebuild = 0;
         set("enhLastResult", null);
         set("enhState", 13);
         set("enhInFlightExecute", true);
@@ -1281,9 +1367,9 @@ public class EnhancementEngineTest {
         set("enhTier", 1);
         set("snapExpectedLevel", 0);
         set("snapTargetLevel", 1);
-        bw.V = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1));
-        cn.g.bD = 10000;
-        cn.g.bC = 50;
+        Item.VecInvetoryPlayer = bag(makeItem(67, 3, "Kiem tap", "Kiem tap", 0, 1));
+        GameScreen.player.coin = 10000;
+        GameScreen.player.gold = 50;
         enhanceMethod.invoke(null);
         check("13.14: Unchanged target enters RESULT_AMBIGUOUS (29)", ((Integer) get("enhState")).intValue() == 29);
         check("13.14: Last result is null", get("enhLastResult") == null);
@@ -1383,8 +1469,8 @@ public class EnhancementEngineTest {
         clearQueue();
         set("enhOwnsForgeScreen", true);
         set("enhOwnsResultDialog", true);
-        fu.p.a = true;
-        fr.d = 1;
+        GameCanvas.menu2.isShowMenu = true;
+        Menu2.isNPCMenu = 1;
         dialogRecoveryMethod.invoke(null);
         check("14.7: Dialog dismissal emits zero packets", queue().size() == 0);
 
@@ -1515,49 +1601,56 @@ public class EnhancementEngineTest {
         return new String(b, 0, read, "UTF-8");
     }
 
-    static ev makeForgePopup() {
-        ev popup = new ev();
-        popup.b = new et("tabs");
-        c forgeTab = new c("Cuong hoa", (byte) 0);
-        popup.b.a(forgeTab);
-        popup.a = 0;
+    static TabScreenNew makeForgePopup() {
+        TabScreenNew popup = new TabScreenNew();
+        popup.VecTabScreen = new mVector("tabs");
+        TabRebuildItem forgeTab = new TabRebuildItem("Cuong hoa", (byte) 0);
+        popup.VecTabScreen.addElement(forgeTab);
+        popup.selectTab = 0;
         return popup;
     }
 
-    static ev makeInventoryPopup() {
-        ev popup = new ev();
-        popup.b = new et("tabs");
-        fm invTab = new fm();
-        popup.b.a(invTab);
-        popup.a = 0;
+    static TabScreenNew makeInventoryPopup() {
+        TabScreenNew popup = new TabScreenNew();
+        popup.VecTabScreen = new mVector("tabs");
+        TabShopNew invTab = null;
+        try {
+            Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+            uf.setAccessible(true);
+            sun.misc.Unsafe unsafe = (sun.misc.Unsafe) uf.get(null);
+            invTab = (TabShopNew) unsafe.allocateInstance(TabShopNew.class);
+        } catch (Throwable t) {
+        }
+        popup.VecTabScreen.addElement(invTab);
+        popup.selectTab = 0;
         return popup;
     }
 
     static void setupWorldState(int mapId) {
-        if (fu.c == null) {
-            fu.c = new cn();
+        if (GameCanvas.game == null) {
+            GameCanvas.game = new GameScreen();
         }
-        fu.a = fu.c;
-        eh.h = true;
-        fu.s = null;
-        if (fu.q == null) {
+        GameCanvas.currentScreen = GameCanvas.game;
+        LoadMapScreen.isNextMap = true;
+        GameCanvas.currentDialog = null;
+        if (GameCanvas.loadmap == null) {
             try {
                 Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
                 uf.setAccessible(true);
                 sun.misc.Unsafe unsafe = (sun.misc.Unsafe) uf.get(null);
-                fu.q = (cs) unsafe.allocateInstance(cs.class);
+                GameCanvas.loadmap = (LoadMap) unsafe.allocateInstance(LoadMap.class);
             } catch (Throwable t) {
             }
         }
-        if (fu.q != null) {
-            fu.q.d = mapId;
+        if (GameCanvas.loadmap != null) {
+            GameCanvas.loadmap.idMap = mapId;
         }
-        if (cn.g == null) {
-            cn.g = new bq(100, (byte) 0, "hero", 0, 0);
+        if (GameScreen.player == null) {
+            GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
         }
-        cn.g.cG = 0; // alive (4 is dead)
-        cn.g.cx = 0;
-        cn.g.cy = 0;
+        GameScreen.player.Action = 0; // alive (4 is dead)
+        GameScreen.player.typePk = 0;
+        GameScreen.player.typeBoss = 0;
         try {
             Field rst = Class.forName("Zeus").getDeclaredField("readySettleTicks");
             rst.setAccessible(true);
@@ -1572,13 +1665,13 @@ public class EnhancementEngineTest {
         }
     }
 
-    static fa makeNpc(String name, int cu, int cv, int x, int y) {
-        fa npc = new fa();
-        npc.cC = name;
-        npc.cu = cu;
-        npc.cv = (byte) cv;
-        npc.aZ = x;
-        npc.ba = y;
+    static MainObject makeNpc(String name, int cu, int cv, int x, int y) {
+        MainObject npc = new MainObject();
+        npc.name = name;
+        npc.ID = cu;
+        npc.typeObject = (byte) cv;
+        npc.x = x;
+        npc.y = y;
         return npc;
     }
 }

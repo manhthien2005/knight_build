@@ -1,18 +1,56 @@
+import Main.GameCanvas;
+import GameScreen.GameScreen;
+import GameScreen.SelectCharScreen;
+import GameScreen.LoginScreen;
+import GameScreen.LoadMapScreen;
+import GameScreen.MainScreen;
+import GameScreen.PaintInfoGameScreen;
+import GameScreen.TabScreenNew;
+import GameObjects.Player;
+import GameObjects.MainObject;
+import GameObjects.MainMonster;
+import GameObjects.Item;
+import GameObjects.MainItem;
+import GameObjects.AutoGetItem;
+import GameObjects.MainClan;
+import GameObjects.MainRMS;
+import GameObjects.DelaySkill;
+import InterfaceComponents.MsgDialog;
+import InterfaceComponents.MainDialog;
+import InterfaceComponents.InputDialog;
+import InterfaceComponents.ChatTextField;
+import InterfaceComponents.iCommand;
+import InterfaceComponents.TabRebuildItem;
+import InterfaceComponents.DataRebuildItem;
+import CLib.TField;
+import Model.Menu2;
+import Model.Point;
+import Model.T;
+import Model.mCamera;
+import Model.AvMain;
+import Thread_More.LoadMap;
+import Skill.HotKey;
+import CLib.mGraphics;
+import CLib.mVector;
+import CLib.mSystem;
+import net.Message;
+import netcommand.global.GlobalService;
+import netcommand.global.GlobalLogicHandler;
 /*
  * Zeus_Knight — local-only assistant for KnightOnline_402 (J2ME MIDlet).
  *
  * Modules: AUTH (enter the game), PLAYER (publish a read-only snapshot),
  * ATTACK (hold a spot and fight there) and ITEM (pick up drops, ride, dismiss a dialog).
  *
- * PLAYER sends no packet and writes no native field. It reads cn.g every tick and
+ * PLAYER sends no packet and writes no native field. It reads GameScreen.player every tick and
  * writes a small key=value file the tool polls; see docs/core/11-player-transport.md
  * for why a file and not a socket. Field semantics are verified in
  * docs/core/10-module-player.md — the two that are easy to get wrong:
  *
- *   - cn.g.bA is XP as PERMILLE of the current level (0..1000), not absolute XP.
+ *   - GameScreen.player.phantramLv is XP as PERMILLE of the current level (0..1000), not absolute XP.
  *     Proof: the client renders bA/10 + "," + bA%10 + "%" (cf.java:795) and sizes
  *     the bar as bA/10*77/100 (cf.java:798).
- *   - cn.g.bD is gold (readLong) and cn.g.bC is gem (readInt), and BOTH arrive
+ *   - GameScreen.player.coin is gold (readLong) and GameScreen.player.gold is gem (readInt), and BOTH arrive
  *     only with the inventory packet, opcode 16 (er.java:4982-4983, reached from
  *     er.o via al.java case 16). The chest packet, opcode 65, carries no wallet.
  *     So before opcode 16 both read 0, which is why walletKnown exists: an unknown
@@ -23,7 +61,7 @@
  * unparsable turns every module off rather than acting on half a setting.
  *
  * Neither module invents a packet. ATTACK sets the client's own auto fields and lets
- * bq.q() pick targets and bq's own loop swing; ITEM sends the same opcode 20 the
+ * Player.autoItem() pick targets and bq's own loop swing; ITEM sends the same opcode 20 the
  * client sends when the operator taps a drop. Every action travels through code the
  * client already ships.
  *
@@ -32,15 +70,15 @@
  *   - bs.c() (login-screen constructor) reads RMS user_pass and, when present,
  *     calls bs.i() + fu.o() + bs.a(i,j) — i.e. the CLIENT logs itself in.
  *     (bs.java:127-139)
- *   - After login the client shows the character-select screen (fu.i, class x).
- *   - x.a() ticks that screen; when ah.k == true it selects the slot x.k and
+ *   - After login the client shows the character-select screen (GameCanvas.selectChar, class x).
+ *   - SelectCharScreen.VecSelectChar() ticks that screen; when MsgDialog.isAutologin == true it selects the slot SelectCharScreen.selectChar and
  *     enters the game. (x.java:132-146)
- *   - The vanilla reconnect loop (bv.a + ah.a, 30 s) is untouched — Auth does
+ *   - The vanilla reconnect loop (GlobalLogicHandler.isDisConect + MsgDialog.a, 30 s) is untouched — Auth does
  *     not swallow the disconnect dialog in round 1, so the native loop keeps
- *     running on its own. (bv.java, ah.java:1289-1302)
+ *     running on its own. (bv.java, MsgDialog.java:1289-1302)
  *
  * So the ONLY thing AUTH does: when the character-select screen appears, set
- * the slot cursor and raise ah.k. Everything else is the client's own code.
+ * the slot cursor and raise MsgDialog.isAutologin. Everything else is the client's own code.
  */
 public final class Zeus {
 
@@ -81,11 +119,11 @@ public final class Zeus {
         authRefusalTraced = false;
     }
 
-    /** Called at the end of fu.b() every tick. */
+    /** Called at the end of GameCanvas.login() every tick. */
     public static void tick() {
         healthSidecarTick();
         reconnectStatusSidecarTick();
-        if (fu.a == null) {
+        if (GameCanvas.currentScreen == null) {
             sessionReset();
             return;
         }
@@ -130,7 +168,7 @@ public final class Zeus {
         player();
         // Last, so a trace records what the modules above already did this tick, and so the flush
         // is the final thing that happens: a client crash still leaves everything recorded.
-        traceCheck(dx.a());
+        traceCheck(mSystem.currentTimeMillis());
         traceTick();
         if (probeArmed) {
             probeArmed = false;
@@ -140,7 +178,7 @@ public final class Zeus {
             spotArmed = false;
             probeSpots();
         }
-        spotSidecarTick(dx.a());
+        spotSidecarTick(mSystem.currentTimeMillis());
         traceFlush();
     }
 
@@ -148,7 +186,7 @@ public final class Zeus {
 
     private static void auth() {
         try {
-            if (fu.a == fu.i) {
+            if (GameCanvas.currentScreen == GameCanvas.selectChar) {
                 // Character-select screen. Strict positional validation — CHAR-SLOT-02.
                 int targetSlot = slot();
                 if (targetSlot < 0 || targetSlot > 2) {
@@ -159,7 +197,7 @@ public final class Zeus {
                     return;
                 }
 
-                if (x.a == null) {
+                if (SelectCharScreen.VecSelectChar == null) {
                     if (!authRefusalTraced) {
                         authRefusalTraced = true;
                         trace("AUTH character slot refused internal=" + targetSlot + " visual=" + (targetSlot + 1) + " count=0 reason=LIST_NULL");
@@ -167,7 +205,7 @@ public final class Zeus {
                     return;
                 }
 
-                int count = x.a.c();
+                int count = SelectCharScreen.VecSelectChar.size();
                 if (targetSlot >= count) {
                     if (!authRefusalTraced) {
                         authRefusalTraced = true;
@@ -176,7 +214,7 @@ public final class Zeus {
                     return;
                 }
 
-                if (x.a.a(targetSlot) == null) {
+                if (SelectCharScreen.VecSelectChar.elementAt(targetSlot) == null) {
                     if (!authRefusalTraced) {
                         authRefusalTraced = true;
                         trace("AUTH character slot refused internal=" + targetSlot + " visual=" + (targetSlot + 1) + " count=" + count + " reason=NULL_CHARACTER_OBJECT");
@@ -184,13 +222,13 @@ public final class Zeus {
                     return;
                 }
 
-                // fu.a == fu.i && x.a != null && targetSlot >= 0 && targetSlot < x.a.c() && x.a.a(targetSlot) != null
+                // GameCanvas.currentScreen == GameCanvas.selectChar && SelectCharScreen.VecSelectChar != null && targetSlot >= 0 && targetSlot < SelectCharScreen.VecSelectChar.size() && SelectCharScreen.VecSelectChar.elementAt(targetSlot) != null
                 if (authAttempts == 0) {
-                    // x.k is private in vanilla; PatchZeus widens it to public.
-                    // Access through the live screen instance fu.i.
-                    fu.i.k = targetSlot;
-                    // ah.k makes x.a() select the slot and enter the game.
-                    ah.k = true;
+                    // SelectCharScreen.selectChar is private in vanilla; PatchZeus widens it to public.
+                    // Access through the live screen instance GameCanvas.selectChar.
+                    GameCanvas.selectChar.selectChar = targetSlot;
+                    // MsgDialog.isAutologin makes SelectCharScreen.VecSelectChar() select the slot and enter the game.
+                    MsgDialog.isAutologin = true;
                     armed = true;
                     authAttempts = 1;
                     authWaitTicks = 0;
@@ -199,9 +237,9 @@ public final class Zeus {
                     if (++authWaitTicks >= AUTH_RETRY_INTERVAL_TICKS) {
                         authWaitTicks = 0;
                         ++authAttempts;
-                        fu.i.k = targetSlot;
-                        ah.k = true;
-                        trace("AUTH retry character select slot=" + fu.i.k + " attempt=" + authAttempts);
+                        GameCanvas.selectChar.selectChar = targetSlot;
+                        MsgDialog.isAutologin = true;
+                        trace("AUTH retry character select slot=" + GameCanvas.selectChar.selectChar + " attempt=" + authAttempts);
                     }
                 } else {
                     if (!authExhaustedTraced) {
@@ -209,7 +247,7 @@ public final class Zeus {
                         trace("AUTH character select retry exhausted attempts=" + authAttempts);
                     }
                 }
-            } else if (fu.a != fu.i) {
+            } else if (GameCanvas.currentScreen != GameCanvas.selectChar) {
                 // Any other screen: re-arm for the next visit.
                 authReset();
             }
@@ -235,8 +273,8 @@ public final class Zeus {
      *
      * It exists to answer one question no amount of reading the client can: whether the *server*
      * refuses a board interaction sent from far away. The client does not check — `cn.a(0,·)` calls
-     * `i.k()` for any `cv != 0` target without the hostility test it applies to players, and
-     * `ez.k()` then sends opcode 23 with the board's `cu` (`ez.java:239-243`). So only a live send
+     * `i.GiaoTiep()` for any `cv != 0` target without the hostility test it applies to players, and
+     * `ez.GiaoTiep()` then sends opcode 23 with the board's `cu` (`ez.java:239-243`). So only a live send
      * from a distance can settle it, and the answer decides whether the zone feature has to walk
      * the character to the board or can leave it where it stands.
      */
@@ -344,8 +382,8 @@ public final class Zeus {
      * Pickup settings in the client's own shape, not a shape of our own invention.
      *
      * `itemRank` is a threshold, not a set of flags: `bq.java:541` skips a drop when
-     * `fa.ct < bq.q.a`, so 1 means "blue and better". Index 5 in the client's own option list is
-     * "don't pick equipment", which it stores as −1 (`ah.java:208-212`). `itemMpHp` and `itemGold`
+     * `MainObject.ct < Player.autoItem.a`, so 1 means "blue and better". Index 5 in the client's own option list is
+     * "don't pick equipment", which it stores as −1 (`MsgDialog.java:208-212`). `itemMpHp` and `itemGold`
      * are the other two bytes of the same native record. Zeus writes them exactly the way the
      * game's own menu does and lets the client's collector do the work — a second filter here
      * would fight the native one and nobody could tell which had collected an item.
@@ -364,7 +402,7 @@ public final class Zeus {
     private static boolean mountOn = false;
     private static int mountId = 0;
 
-    /** Buff slots the operator can address. The client's own count is `ah.b`. */
+    /** Buff slots the operator can address. The client's own count is `MsgDialog.MaxSkillBuff`. */
     private static final int BUFF_SLOTS = 3;
 
     /**
@@ -466,7 +504,7 @@ public final class Zeus {
             return;
         }
         try {
-            long now = dx.a();
+            long now = mSystem.currentTimeMillis();
             if (now - ctlReadAt < CTL_EVERY_MS) {
                 return;
             }
@@ -477,10 +515,10 @@ public final class Zeus {
             } else {
                 ctlState = 1;
             }
-            // `co.b()` is a packet, so it is sent when a setting actually changed rather than every
+            // `MainRMS.setSaveAuto()` is a packet, so it is sent when a setting actually changed rather than every
             // half second. The signature covers exactly the values that live in native fields.
             int signature = nativeSignature();
-            if (signature != syncedSignature && inGame() && cn.g != null) {
+            if (signature != syncedSignature && inGame() && GameScreen.player != null) {
                 syncedSignature = signature;
                 syncNativeSettings();
             }
@@ -499,7 +537,7 @@ public final class Zeus {
         return signature;
     }
 
-    /** Signature last pushed with `co.b()`. Deliberately impossible to match on the first read. */
+    /** Signature last pushed with `MainRMS.setSaveAuto()`. Deliberately impossible to match on the first read. */
     private static int syncedSignature = Integer.MIN_VALUE;
 
     /** Reads a whole small file, or null when it is absent, too big, or unreadable. */
@@ -615,32 +653,32 @@ public final class Zeus {
     /**
      * Reconciles desired visual QoL settings directly into native client static fields.
      * Change-only application prevents redundant writes.
-     * Guaranteed never to produce cn.aN=true && cn.aO=true simultaneously.
+     * Guaranteed never to produce GameScreen.isHideOderPlayer=true && GameScreen.isHideFullOderPlayer=true simultaneously.
      */
     private static void reconcileVisualQoL() {
         try {
-            // ui.effects: 1 -> fa.ch = 0, 0 -> fa.ch = 1
+            // ui.effects: 1 -> MainObject.hideEff = 0, 0 -> MainObject.hideEff = 1
             byte targetCh = (byte) (desiredEffects == 1 ? 0 : 1);
-            if (fa.ch != targetCh) {
-                fa.ch = targetCh;
+            if (MainObject.hideEff != targetCh) {
+                MainObject.hideEff = targetCh;
             }
 
             // ui.hidePlayers:
-            // 0 -> cn.aN=false, cn.aO=false
-            // 1 -> cn.aN=true,  cn.aO=false
-            // 2 -> cn.aN=false, cn.aO=true
+            // 0 -> GameScreen.isHideOderPlayer=false, GameScreen.isHideFullOderPlayer=false
+            // 1 -> GameScreen.isHideOderPlayer=true,  GameScreen.isHideFullOderPlayer=false
+            // 2 -> GameScreen.isHideOderPlayer=false, GameScreen.isHideFullOderPlayer=true
             boolean targetN = (desiredHidePlayers == 1);
             boolean targetO = (desiredHidePlayers == 2);
-            if (cn.aN != targetN || cn.aO != targetO) {
+            if (GameScreen.isHideOderPlayer != targetN || GameScreen.isHideFullOderPlayer != targetO) {
                 // Clear the opposite flag first so both are never true simultaneously
                 if (!targetN) {
-                    cn.aN = false;
+                    GameScreen.isHideOderPlayer = false;
                 }
                 if (!targetO) {
-                    cn.aO = false;
+                    GameScreen.isHideFullOderPlayer = false;
                 }
-                cn.aN = targetN;
-                cn.aO = targetO;
+                GameScreen.isHideOderPlayer = targetN;
+                GameScreen.isHideFullOderPlayer = targetO;
             }
         } catch (Throwable t) {
             // Visual QoL reconciliation must never throw or interrupt tick execution
@@ -1086,12 +1124,12 @@ public final class Zeus {
     // Opening its menu is opcode 23 with that `cu`, and the server answered a probe sent from 678 px
     // away — so this never moves the character.
     //
-    // The switch is SENT, not tapped. Every board button is `new bt(caption, 13, index, cn.b())`
-    // (er.java:4102-4104), and `bt.a()` reaches `cn.a(13, index)`, whose entire body is
-    // `q.a().d((byte) index)` — opcode 51, one byte. So a switch is one packet and the menu is not
+    // The switch is SENT, not tapped. Every board button is `new iCommand(caption, 13, index, cn.b())`
+    // (er.java:4102-4104), and `iCommand.a()` reaches `cn.a(13, index)`, whose entire body is
+    // `GlobalService.gI().Change_Area((byte) index)` — opcode 51, one byte. So a switch is one packet and the menu is not
     // part of it.
     //
-    // What the menu is still needed for: the captions. `cs.v` is the entry count and `cs.o[]` a
+    // What the menu is still needed for: the captions. `LoadMap.MaxArea` is the entry count and `cs.o[]` a
     // per-entry decoration, but the zone numbers and the player counts live in the caption text,
     // which `er.V` builds locally and never stores. So the board is opened ONCE per map to read the
     // roster, dismissed immediately, and every switch after that is a bare packet.
@@ -1129,21 +1167,21 @@ public final class Zeus {
             // state phase 2 waits in. Gating on it here is a deadlock — the menu blocks the module
             // and only the module dismisses the menu.
             if (!inGame() || !sceneReady() || !alive() || captcha()
-                    || cn.g == null || fu.q == null) {
+                    || GameScreen.player == null || GameCanvas.loadmap == null) {
                 return;
             }
             if (zonePhase != 2 && !noDialog()) {
                 return;
             }
-            int here = fu.q.d;
+            int here = GameCanvas.loadmap.idMap;
             // A zone belongs to one map, so landing on a different one re-arms the switch.
             if (here != zoneMapDone && zonePhase == 0) {
                 zonePhase = 1;
                 zoneTries = 0;
             }
             // Naming a zone is checkable without opening anything: selecting button `sub` lands on
-            // `cs.u == sub`, and the caption for that button reads "khu sub+1".
-            if (atkZoneMode == 2 && cs.u == atkZonePick - 1) {
+            // `LoadMap.Area == sub`, and the caption for that button reads "khu sub+1".
+            if (atkZoneMode == 2 && LoadMap.Area == atkZonePick - 1) {
                 zonePhase = 0;
                 zoneMapDone = here;
                 return;
@@ -1167,7 +1205,7 @@ public final class Zeus {
                 zonePhase = 3;
             }
             if (zonePhase == 1) {
-                fa board = zoneBoard();
+                MainObject board = zoneBoard();
                 if (board == null) {
                     zonePhase = 0;              // no board here; nothing to do on this map
                     zoneMapDone = here;
@@ -1175,10 +1213,10 @@ public final class Zeus {
                     return;
                 }
                 zoneRosterMap = Integer.MIN_VALUE;
-                q.a().a((byte) board.cu);
+                GlobalService.gI().chat_npc((byte) board.ID);
                 zonePhase = 2;
                 zoneWait = 100;                 // 5 s for the server to answer
-                trace("ZONE opened board cu=" + board.cu + " on map " + here);
+                trace("ZONE opened board cu=" + board.ID + " on map " + here);
                 return;
             }
             if (zonePhase == 2) {
@@ -1213,9 +1251,9 @@ public final class Zeus {
     /** Dismisses the board menu the way the client's own Back does. */
     private static void zoneCloseMenu() {
         try {
-            if (fu.p != null && fu.p.a) {
-                fu.p.f();
-                fu.m();
+            if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
+                GameCanvas.menu2.doCloseMenu();
+                GameCanvas.clearKeyHold();
             }
         } catch (Throwable t) {
             // A menu that will not close is not worth failing the switch over.
@@ -1225,13 +1263,13 @@ public final class Zeus {
     /**
      * Reads the board roster out of a menu this module asked for.
      *
-     * Called from the `fr.a` prologue, where the button list is already assembled. Every fact a
-     * switch needs is here and nowhere else: `bt.f` is the byte opcode 51 carries, and the caption
+     * Called from the `Menu2.a` prologue, where the button list is already assembled. Every fact a
+     * switch needs is here and nowhere else: `iCommand.f` is the byte opcode 51 carries, and the caption
      * carries the zone number and the population.
      */
-    private static void zoneRoster(et items) {
+    private static void zoneRoster(mVector items) {
         try {
-            int count = items == null ? 0 : items.c();
+            int count = items == null ? 0 : items.size();
             byte[] sub = new byte[count];
             int[] num = new int[count];
             int[] players = new int[count];
@@ -1239,19 +1277,19 @@ public final class Zeus {
             for (int i = 0; i < count; i++) {
                 num[i] = -1;
                 players[i] = -1;
-                Object entry = items.a(i);
-                if (!(entry instanceof bt)) {
+                Object entry = items.elementAt(i);
+                if (!(entry instanceof iCommand)) {
                     skip[i] = true;
                     continue;
                 }
-                bt button = (bt) entry;
-                String text = norm(button.a);
-                sub[i] = button.f;
+                iCommand button = (iCommand) entry;
+                String text = norm(button.caption);
+                sub[i] = button.subIndex;
                 num[i] = captionZone(text);
                 players[i] = captionCount(text);
                 // `e != 13` is not a zone button at all. The rest are zones this module will not
                 // enter: the trade zone, the two-hour zone, and the ticketed one.
-                skip[i] = button.e != 13
+                skip[i] = button.indexMenu != 13
                         || text.indexOf("khu") < 0
                         || text.indexOf("buon") >= 0
                         || text.indexOf("2h") >= 0
@@ -1261,7 +1299,7 @@ public final class Zeus {
             zoneRosterNum = num;
             zoneRosterCount = players;
             zoneRosterSkip = skip;
-            zoneRosterMap = fu.q == null ? Integer.MIN_VALUE : fu.q.d;
+            zoneRosterMap = GameCanvas.loadmap == null ? Integer.MIN_VALUE : GameCanvas.loadmap.idMap;
             trace("ZONE roster map=" + zoneRosterMap + " entries=" + count
                     + " enterable=" + zoneEnterable());
         } catch (Throwable t) {
@@ -1283,7 +1321,7 @@ public final class Zeus {
     /**
      * Sends the switch for the wanted zone: one byte, opcode 51.
      *
-     * `q.a().d((byte) sub)` is the whole of `cn.a(13, sub)`, which is where `bt.a()` arrives when the
+     * `GlobalService.gI().Change_Area((byte) sub)` is the whole of `cn.a(13, sub)`, which is where `iCommand.a()` arrives when the
      * operator taps a board button — the same packet, without the menu.
      */
     private static void sendZone() {
@@ -1319,34 +1357,34 @@ public final class Zeus {
             }
         }
         // Already there: the switch would be a packet that changes nothing.
-        if (zoneRosterSub[at] == cs.u) {
+        if (zoneRosterSub[at] == LoadMap.Area) {
             trace("ZONE already in khu " + zoneRosterNum[at]);
             return;
         }
-        q.a().d(zoneRosterSub[at]);
+        GlobalService.gI().Change_Area(zoneRosterSub[at]);
         trace("ZONE sent op=51 sub=" + zoneRosterSub[at] + " khu=" + zoneRosterNum[at]
-                + " players=" + zoneRosterCount[at] + " from khu " + (cs.u + 1));
+                + " players=" + zoneRosterCount[at] + " from khu " + (LoadMap.Area + 1));
     }
 
     /** The nearest zone board on this map, or null when there is none. */
-    private static fa zoneBoard() {
-        if (cn.j == null || cn.g == null) {
+    private static MainObject zoneBoard() {
+        if (GameScreen.Vecplayers == null || GameScreen.player == null) {
             return null;
         }
-        fa best = null;
+        MainObject best = null;
         int bestDistance = Integer.MAX_VALUE;
-        for (int i = 0; i < cn.j.c(); i++) {
-            Object entry = cn.j.a(i);
-            if (!(entry instanceof fa)) {
+        for (int i = 0; i < GameScreen.Vecplayers.size(); i++) {
+            Object entry = GameScreen.Vecplayers.elementAt(i);
+            if (!(entry instanceof MainObject)) {
                 continue;
             }
-            fa candidate = (fa) entry;
+            MainObject candidate = (MainObject) entry;
             // The name, not the template id: a map carries several boards and their ids differ.
-            if (candidate.cv != 2 || candidate.cC == null
-                    || norm(candidate.cC).indexOf("khu") < 0) {
+            if (candidate.typeObject != 2 || candidate.name == null
+                    || norm(candidate.name).indexOf("khu") < 0) {
                 continue;
             }
-            int distance = abs(cn.g.aZ - candidate.aZ) + abs(cn.g.ba - candidate.ba);
+            int distance = abs(GameScreen.player.x - candidate.x) + abs(GameScreen.player.y - candidate.y);
             if (distance < bestDistance) {
                 bestDistance = distance;
                 best = candidate;
@@ -1406,7 +1444,7 @@ public final class Zeus {
     // The third packet the operator's own taps send — opcode −91 sub 5, the board's "Khác" branch —
     // is deliberately NOT sent. It exists to make the server build a panel, and that panel is not an
     // overlay: `er.aE` answers it with `fu.w.a(cn.b())`, and `ev extends p`, whose `a(p)` assigns
-    // `fu.a = this`. So the panel BECOMES the active screen, `inGame()` goes false, and every module
+    // `GameCanvas.currentScreen = this`. So the panel BECOMES the active screen, `inGame()` goes false, and every module
     // — including this one — stops. The walk used to send packet 1 and then die, which is exactly
     // what the operator saw: a menu opened and nothing was ever selected.
     //
@@ -1448,7 +1486,7 @@ public final class Zeus {
             // Deliberately NOT ready(): that requires no menu open, and the server answers packet 1
             // with a menu of its own (traced: SMENU npc=-125 menu=-125 count=6). Gated on ready(),
             // phase 1 never ran — the module waited for the operator to dismiss its own menu.
-            if (!inGame() || !sceneReady() || !alive() || captcha() || cn.g == null) {
+            if (!inGame() || !sceneReady() || !alive() || captcha() || GameScreen.player == null) {
                 return;
             }
             if (dropPhase == 0 && !noDialog()) {
@@ -1479,7 +1517,7 @@ public final class Zeus {
                     // recognised as this module's own — it would be shown and then time out.
                     dropPhase = 1;
                     dropWait = 60;              // 3 s for the menu to arrive
-                    q.a().b((short) 125, (byte) 125, (byte) 0);
+                    GlobalService.gI().Dynamic_Menu((short) 125, (byte) 125, (byte) 0);
                     return;
                 }
                 case 1: {
@@ -1504,7 +1542,7 @@ public final class Zeus {
                     // Quoted from the menu rather than hardcoded: the pair identifies the submenu the
                     // selection belongs to, and a server that renumbered it would otherwise be sent
                     // an index against the wrong menu.
-                    q.a().b((short) npc, (byte) menu, (byte) dropSlot);
+                    GlobalService.gI().Dynamic_Menu((short) npc, (byte) menu, (byte) dropSlot);
                     dropPhase = 2;
                     dropWait = 80;              // 4 s for the confirmation to arrive
                     trace("DROP sent npc=" + npc + " menu=" + menu + " slot=" + dropSlot
@@ -1532,9 +1570,9 @@ public final class Zeus {
      * this menu answers for is chosen HERE, from what the server just said, rather than from the
      * guess phase 0 made before the menu existed.
      */
-    private static boolean dropMenu(et items, int idMenu, int idNPC) {
+    private static boolean dropMenu(mVector items, int idMenu, int idNPC) {
         try {
-            int count = items == null ? 0 : items.c();
+            int count = items == null ? 0 : items.size();
             if (count != MATERIAL_SLOTS) {
                 trace("DROP menu has " + count + " entries, expected " + MATERIAL_SLOTS
                         + " — stopping");
@@ -1548,8 +1586,8 @@ public final class Zeus {
             // what stops the walk from flipping a material that was already where it was wanted:
             // every slot used to cost two packets, one wrong way and one back.
             for (int i = 0; i < MATERIAL_SLOTS; i++) {
-                Object entry = items.a(i);
-                String label = entry instanceof bt ? norm(((bt) entry).a) : "";
+                Object entry = items.elementAt(i);
+                String label = entry instanceof iCommand ? norm(((iCommand) entry).caption) : "";
                 if (label.indexOf(DROP_NAMES[i]) < 0) {
                     trace("DROP menu entry " + i + " reads \"" + clean(label)
                             + "\", expected " + DROP_NAMES[i] + " — stopping");
@@ -1610,7 +1648,7 @@ public final class Zeus {
      * carrying on would close drops the operator never chose. That stops the whole feature instead.
      */
     private static void readDropDialog() {
-        if (fu.s == null) {
+        if (GameCanvas.currentDialog == null) {
             if (dropWait <= 0) {
                 if (++dropTries >= 2) {
                     trace("DROP slot=" + dropSlot + " no confirmation, giving up on it");
@@ -1622,12 +1660,12 @@ public final class Zeus {
             }
             return;
         }
-        String text = norm(dialogText(fu.s));
+        String text = norm(dialogText(GameCanvas.currentDialog));
         if (text.indexOf("chuc nang rot") < 0) {
             return;                                 // some other dialog; wait for ours
         }
-        boolean closed = text.indexOf("da duoc dong") >= 0;
-        boolean opened = text.indexOf("da duoc mo") >= 0;
+        boolean closed = text.indexOf("MainDialog duoc dong") >= 0;
+        boolean opened = text.indexOf("MainDialog duoc mo") >= 0;
         int named = -1;
         for (int i = 0; i < MATERIAL_SLOTS; i++) {
             if (text.indexOf(DROP_NAMES[i]) >= 0) {
@@ -1635,7 +1673,7 @@ public final class Zeus {
                 break;
             }
         }
-        pressOk(fu.s);
+        pressOk(GameCanvas.currentDialog);
         if (named != dropSlot || (!closed && !opened)) {
             trace("DROP slot=" + dropSlot + " confirmation named " + named
                     + " — stopping, the menu order is not what was measured");
@@ -1759,7 +1797,7 @@ public final class Zeus {
      * Sends one teleport-stone interaction from wherever the character happens to be standing.
      *
      * Two questions, one packet. The distance: it logs every `cv == 2` entity with its distance, then
-     * sends opcode 23 with the stone's own `cu` — byte for byte what `ez.k()` sends when the operator
+     * sends opcode 23 with the stone's own `cu` — byte for byte what `ez.GiaoTiep()` sends when the operator
      * taps it. A `SMENU` line following in the log means the server does not care how far away the
      * character was, exactly as the zone board turned out (§10.1 of docs/core/12-control-transport.md),
      * and TRAVEL needs no walk to the stone. The destinations: `SMENU` carries the server's own labels
@@ -1774,49 +1812,49 @@ public final class Zeus {
      */
     private static void probeStone() {
         try {
-            if (!inGame() || cn.g == null || cn.j == null) {
+            if (!inGame() || GameScreen.player == null || GameScreen.Vecplayers == null) {
                 trace("PROBE skipped: not in the world");
                 return;
             }
-            fa[] stones = new fa[8];
+            MainObject[] stones = new MainObject[8];
             int found = 0;
             int listed = 0;
-            for (int i = 0; i < cn.j.c(); i++) {
-                Object entry = cn.j.a(i);
-                if (!(entry instanceof fa)) {
+            for (int i = 0; i < GameScreen.Vecplayers.size(); i++) {
+                Object entry = GameScreen.Vecplayers.elementAt(i);
+                if (!(entry instanceof MainObject)) {
                     continue;
                 }
-                fa candidate = (fa) entry;
-                if (candidate.cv != 2) {
+                MainObject candidate = (MainObject) entry;
+                if (candidate.typeObject != 2) {
                     continue;
                 }
-                int distance = abs(cn.g.aZ - candidate.aZ) + abs(cn.g.ba - candidate.ba);
+                int distance = abs(GameScreen.player.x - candidate.x) + abs(GameScreen.player.y - candidate.y);
                 // Listed in full, not capped at a dozen: the previous run truncated before reaching
                 // the entities further down the map, which is how a second stone would be missed.
                 if (listed < 40) {
                     ++listed;
-                    trace("PROBE near cv=2 cu=" + candidate.cu + " x=" + candidate.aZ + " y="
-                            + candidate.ba + " dist=" + distance + " name=" + clean(candidate.cC));
+                    trace("PROBE near cv=2 cu=" + candidate.ID + " x=" + candidate.x + " y="
+                            + candidate.y + " dist=" + distance + " name=" + clean(candidate.name));
                 }
                 // Matched by name, not by cu: the four zone boards on one map already proved cu is
                 // per-instance, and the stone's cu is what tells its region apart (10/33/55).
-                if (found < stones.length && norm(candidate.cC).indexOf("dich chuyen") >= 0) {
+                if (found < stones.length && norm(candidate.name).indexOf("dich chuyen") >= 0) {
                     stones[found++] = candidate;
                 }
             }
             trace("PROBE cv=2 total listed=" + listed + " stones=" + found
-                    + " map=" + (fu.q == null ? -1 : fu.q.d) + " me=" + cn.g.aZ + "," + cn.g.ba);
+                    + " map=" + (GameCanvas.loadmap == null ? -1 : GameCanvas.loadmap.idMap) + " me=" + GameScreen.player.x + "," + GameScreen.player.y);
             if (found == 0) {
                 trace("PROBE no teleport stone on this map");
                 return;
             }
-            fa stone = stones[probeRound % found];
+            MainObject stone = stones[probeRound % found];
             ++probeRound;
-            int distance = abs(cn.g.aZ - stone.aZ) + abs(cn.g.ba - stone.ba);
-            trace("PROBE stone cu=" + stone.cu + " x=" + stone.aZ + " y=" + stone.ba
+            int distance = abs(GameScreen.player.x - stone.x) + abs(GameScreen.player.y - stone.y);
+            trace("PROBE stone cu=" + stone.ID + " x=" + stone.x + " y=" + stone.y
                     + " dist=" + distance);
-            q.a().a((byte) stone.cu);
-            trace("PROBE sent op=23 cu=" + stone.cu);
+            GlobalService.gI().chat_npc((byte) stone.ID);
+            trace("PROBE sent op=23 cu=" + stone.ID);
         } catch (Throwable t) {
             trace("PROBE failed");
         }
@@ -1827,7 +1865,7 @@ public final class Zeus {
      *
      * The anchor is the fact worth having. `cc`'s constructor sets `F`/`G` from the spawn coordinates
      * the catalogue packet carried and never moves them, while `aZ`/`ba` drift as the monster wanders;
-     * `au.java:253` pulls it back to `(F, G)` once it passes 1.5 × `C` (= 60). So a spot's centre is
+     * `MainMonster.java:253` pulls it back to `(F, G)` once it passes 1.5 × `C` (= 60). So a spot's centre is
      * the mean of a cluster of ANCHORS, not of current positions — the anchors stand still.
      *
      * Clustered here rather than in the tool because the raw list is the thing that would be lost: the
@@ -1862,7 +1900,7 @@ public final class Zeus {
     }
 
     private static SpotCandidate[] computeSpotCandidates(boolean doTrace) {
-        if (!inGame() || cn.g == null || cn.j == null || fu.q == null) {
+        if (!inGame() || GameScreen.player == null || GameScreen.Vecplayers == null || GameCanvas.loadmap == null) {
             if (doTrace) {
                 trace("SPOT skipped: not in the world");
             }
@@ -1875,31 +1913,31 @@ public final class Zeus {
         String[] mobName = new String[cap];
         int[] mobLevel = new int[cap];
         int found = 0;
-        for (int i = 0; i < cn.j.c() && found < cap; i++) {
-            Object entry = cn.j.a(i);
-            if (!(entry instanceof au)) {
+        for (int i = 0; i < GameScreen.Vecplayers.size() && found < cap; i++) {
+            Object entry = GameScreen.Vecplayers.elementAt(i);
+            if (!(entry instanceof MainMonster)) {
                 continue;
             }
-            au mob = (au) entry;
-            if (mob.cv != 1) {
+            MainMonster mob = (MainMonster) entry;
+            if (mob.typeObject != 1) {
                 continue;
             }
-            ax[found] = mob.F;
-            ay[found] = mob.G;
+            ax[found] = mob.xAnchor;
+            ay[found] = mob.yAnchor;
             group[found] = -1;
-            mobName[found] = mob.cC;
-            mobLevel[found] = mob.bz;
+            mobName[found] = mob.name;
+            mobLevel[found] = mob.Lv;
             if (doTrace) {
-                trace("SPOT mob cu=" + mob.cu + " lv=" + mob.bz + " hp=" + mob.bt
-                        + " anchor=" + mob.F + "," + mob.G
-                        + " at=" + mob.aZ + "," + mob.ba
-                        + " drift=" + (abs(mob.aZ - mob.F) + abs(mob.ba - mob.G))
-                        + " name=" + clean(mob.cC));
+                trace("SPOT mob cu=" + mob.ID + " lv=" + mob.Lv + " hp=" + mob.maxHp
+                        + " anchor=" + mob.xAnchor + "," + mob.yAnchor
+                        + " at=" + mob.x + "," + mob.y
+                        + " drift=" + (abs(mob.x - mob.xAnchor) + abs(mob.y - mob.yAnchor))
+                        + " name=" + clean(mob.name));
             }
             ++found;
         }
         if (doTrace) {
-            trace("SPOT map=" + fu.q.d + " khu=" + (cs.u + 1) + " me=" + cn.g.aZ + "," + cn.g.ba
+            trace("SPOT map=" + GameCanvas.loadmap.idMap + " khu=" + (LoadMap.Area + 1) + " me=" + GameScreen.player.x + "," + GameScreen.player.y
                     + " monsters=" + found);
         }
         if (found == 0) {
@@ -1989,7 +2027,7 @@ public final class Zeus {
             if (doTrace) {
                 trace("SPOT cluster mobs=" + count + " centre=" + cx + "," + cy
                         + " spread=" + spread
-                        + " fromMe=" + (abs(cn.g.aZ - cx) + abs(cn.g.ba - cy))
+                        + " fromMe=" + (abs(GameScreen.player.x - cx) + abs(GameScreen.player.y - cy))
                         + " name=" + (name == null ? "?" : clean(name))
                         + " lv=" + level
                         + " same=" + best);
@@ -2183,7 +2221,7 @@ public final class Zeus {
             }
         }
 
-        if (!inGame() || cn.g == null || cn.j == null || fu.q == null) {
+        if (!inGame() || GameScreen.player == null || GameScreen.Vecplayers == null || GameCanvas.loadmap == null) {
             return;
         }
 
@@ -2202,8 +2240,8 @@ public final class Zeus {
             return;
         }
 
-        int mapId = fu.q.d & 0xFF;
-        int capturedZone = cs.u >= 0 ? (cs.u + 1) : 0;
+        int mapId = GameCanvas.loadmap.idMap & 0xFF;
+        int capturedZone = LoadMap.Area >= 0 ? (LoadMap.Area + 1) : 0;
         String jsonPayload = formatSpotResultJson(scanId, mapId, capturedZone, candidates);
 
         java.io.FileOutputStream fos = null;
@@ -2304,10 +2342,10 @@ public final class Zeus {
     /**
      * Draws the attack-range ring around the character, when the operator asked for it.
      *
-     * Called from every RETURN of `cn.a(bx)`, the world paint, not from its first line. Two reasons, and
-     * the first cost two rounds of "nothing appears": a prologue runs before `bx2.a(-p.d.a, -p.d.b)`,
+     * Called from every RETURN of `cn.a(mGraphics)`, the world paint, not from its first line. Two reasons, and
+     * the first cost two rounds of "nothing appears": a prologue runs before `bx2.a(-MainScreen.cameraMain.xCam, -MainScreen.cameraMain.yCam)`,
      * so the context is still in SCREEN space and world coordinates land hundreds of pixels off a
-     * 240x320 display; and it also runs before `fu.q.a(bx2)` paints the map, which would then cover
+     * 240x320 display; and it also runs before `GameCanvas.loadmap.a(bx2)` paints the map, which would then cover
      * whatever did land. At the epilogue the translation is in force and the map is already down.
      *
      * Why a ring at all: every threshold this tool works in is a distance in world pixels, and there
@@ -2319,7 +2357,7 @@ public final class Zeus {
      * most, and only while tracing is on. Three rounds of "nothing appears" were spent reasoning about
      * a transform nobody had measured; the numbers cost one line and end the argument.
      */
-    public static void paint(bx canvas) {
+    public static void paint(mGraphics canvas) {
         if (canvas == null) {
             return;
         }
@@ -2333,10 +2371,10 @@ public final class Zeus {
             return;
         }
         try {
-            if (cn.g == null || fu.a != fu.c) {
+            if (GameScreen.player == null || GameCanvas.currentScreen != GameCanvas.game) {
                 return;             // not on the world screen; nothing to anchor to
             }
-            if (p.d == null) {
+            if (MainScreen.cameraMain == null) {
                 return;             // no camera yet; there is no screen position to draw at
             }
             // Where a world coordinate has to be DRAWN so that it LANDS where the client's own
@@ -2344,21 +2382,21 @@ public final class Zeus {
             // for three rounds:
             //
             //   1. The client draws an entity at its raw world coordinate (`cn.java:896`,
-            //      `bx2.a(fe2.a, ..., this.aZ, this.ba, 33)`), because `cn.a(bx)` translates by
-            //      `-p.d` first (`cn.java:548`). So "on screen at the character" means the pixel
+            //      `bx2.a(fe2.a, ..., this.x, this.y, 33)`), because `cn.a(mGraphics)` translates by
+            //      `-MainScreen.cameraMain` first (`cn.java:548`). So "on screen at the character" means the pixel
             //      `world - camera`.
-            //   2. At the RETURN the translation is no longer just `-p.d`. `bx2.a(bu, bv)` added the
-            //      screen shake and the HUD block added `bx2.a(fu.X - fu.r.a * ey.c - 3, ...)` and
+            //   2. At the RETURN the translation is no longer just `-MainScreen.cameraMain`. `bx2.a(bu, bv)` added the
+            //      screen shake and the HUD block added `bx2.a(GameCanvas.w - fu.r.a * ey.c - 3, ...)` and
             //      never undid it.
             //
             // Drawing at `C` puts ink at `C + T`, where `T` is whatever is in force. Wanting
             // `C + T == world - camera` gives `C = world - camera - T`. The old code drew at
             // `world - T`, which is that answer plus the camera: correct only while the camera sat at
             // the origin, which is the top-left corner of the map and nowhere a character ever farms.
-            int shiftX = -canvas.a() - p.d.a;
-            int shiftY = -canvas.b() - p.d.b;
-            int x = cn.g.aZ + shiftX;
-            int y = cn.g.ba + shiftY;
+            int shiftX = -canvas.getTranslateX() - MainScreen.cameraMain.xCam;
+            int shiftY = -canvas.getTranslateY() - MainScreen.cameraMain.yCam;
+            int x = GameScreen.player.x + shiftX;
+            int y = GameScreen.player.y + shiftY;
             // A real circle, not the Manhattan diamond this drew first. The diamond was honest about
             // the client's own reach test and useless for the job: judging which monster is inside the
             // reach, and picking one to aim at, needs a shape the eye reads as a distance.
@@ -2369,33 +2407,33 @@ public final class Zeus {
             long now = System.currentTimeMillis();
             if (traceOn && now - lastRingTrace >= 1000L) {
                 lastRingTrace = now;
-                trace("RING t=" + canvas.a() + ',' + canvas.b()
-                        + " cam=" + p.d.a + ',' + p.d.b
-                        + " world=" + cn.g.aZ + ',' + cn.g.ba
+                trace("RING t=" + canvas.getTranslateX() + ',' + canvas.getTranslateY()
+                        + " cam=" + MainScreen.cameraMain.xCam + ',' + MainScreen.cameraMain.yCam
+                        + " world=" + GameScreen.player.x + ',' + GameScreen.player.y
                         + " at=" + x + ',' + y
-                        + " ink=" + (x + canvas.a()) + ',' + (y + canvas.b())
-                        + " screen=" + fu.X + 'x' + fu.Y
+                        + " ink=" + (x + canvas.getTranslateX()) + ',' + (y + canvas.getTranslateY())
+                        + " screen=" + GameCanvas.w + 'x' + GameCanvas.h
                         + " r=" + atkRadius);
             }
-            canvas.a(0x33FF33);
+            canvas.setColor(0x33FF33);
             circle(canvas, x, y, atkRadius);
-            // Who the client is aiming at. `cn.i` is its own focus, so this marks the same entity the
+            // Who the client is aiming at. `GameScreen.ObjFocus` is its own focus, so this marks the same entity the
             // next attack will reach for rather than the tool's guess at one.
-            fa aim = cn.i;
+            MainObject aim = GameScreen.ObjFocus;
             if (aim != null) {
-                int aimX = aim.aZ + shiftX;
-                int aimY = aim.ba + shiftY;
+                int aimX = aim.x + shiftX;
+                int aimY = aim.y + shiftY;
                 // Measured in world coordinates, drawn in translated ones: the reach test is the
                 // client's own and must not be affected by where the HUD left the origin.
-                boolean reachable = abs(aim.aZ - cn.g.aZ) + abs(aim.ba - cn.g.ba) <= atkRadius;
+                boolean reachable = abs(aim.x - GameScreen.player.x) + abs(aim.y - GameScreen.player.y) <= atkRadius;
                 // Colour carries the one fact worth knowing about the aim: whether it is close enough
                 // to be hit. Naming it in a trace would mean reading a log while fighting.
-                canvas.a(reachable ? 0xFFFF33 : 0xFF3333);
+                canvas.setColor(reachable ? 0xFFFF33 : 0xFF3333);
                 circle(canvas, aimX, aimY, 14);
-                canvas.a(aimX - 8, aimY, aimX + 8, aimY);
-                canvas.a(aimX, aimY - 8, aimX, aimY + 8);
+                canvas.drawLine(aimX - 8, aimY, aimX + 8, aimY, false);
+                canvas.drawLine(aimX, aimY - 8, aimX, aimY + 8, false);
                 // And the line to it, which is what makes a target legible in a crowd.
-                canvas.a(x, y, aimX, aimY);
+                canvas.drawLine(x, y, aimX, aimY, false);
             }
             if (atkMode != 0 && atkX >= 0 && atkY >= 0) {
                 // The leash, drawn on the spot rather than the character: this is the distance the
@@ -2403,12 +2441,12 @@ public final class Zeus {
                 // would put it in the wrong place entirely.
                 int spotX = atkX + shiftX;
                 int spotY = atkY + shiftY;
-                canvas.a(0xFFAA00);
+                canvas.setColor(0xFFAA00);
                 circle(canvas, spotX, spotY, atkMode == 1 ? STAND_DRIFT : MOVE_DRIFT);
                 // And the spot itself, because a leash with no centre is hard to read.
-                canvas.a(0xFFFFFF);
-                canvas.a(spotX - 4, spotY, spotX + 4, spotY);
-                canvas.a(spotX, spotY - 4, spotX, spotY + 4);
+                canvas.setColor(0xFFFFFF);
+                canvas.drawLine(spotX - 4, spotY, spotX + 4, spotY, false);
+                canvas.drawLine(spotX, spotY - 4, spotX, spotY + 4, false);
             }
         } catch (Throwable t) {
             // An overlay is never worth breaking the client's paint over: one bad frame beats none.
@@ -2422,7 +2460,7 @@ public final class Zeus {
      * mirrors, so a circle costs `reach / 1.4` iterations and no trigonometry. J2ME has no float worth
      * using here and `drawArc` would need a bounding box in screen space, which is not what this has.
      */
-    private static void circle(bx canvas, int cx, int cy, int reach) {
+    private static void circle(mGraphics canvas, int cx, int cy, int reach) {
         if (reach <= 0) {
             return;
         }
@@ -2442,7 +2480,7 @@ public final class Zeus {
     }
 
     /** Plots one octant's point into all eight, as single-pixel lines. */
-    private static void plot8(bx canvas, int cx, int cy, int dx, int dy) {
+    private static void plot8(mGraphics canvas, int cx, int cy, int dx, int dy) {
         dot(canvas, cx + dx, cy + dy);
         dot(canvas, cx + dy, cy + dx);
         dot(canvas, cx - dy, cy + dx);
@@ -2453,9 +2491,9 @@ public final class Zeus {
         dot(canvas, cx + dx, cy - dy);
     }
 
-    /** One pixel, as the shortest line `bx` can draw: it exposes no point primitive. */
-    private static void dot(bx canvas, int x, int y) {
-        canvas.a(x, y, x, y);
+    /** One pixel, as the shortest line `mGraphics` can draw: it exposes no point primitive. */
+    private static void dot(mGraphics canvas, int x, int y) {
+        canvas.drawLine(x, y, x, y, false);
     }
     // ---- POTATO --------------------------------------------------------------
     //
@@ -2463,8 +2501,8 @@ public final class Zeus {
     // where the measurement and the per-layer safety arguments were made; the entry points
     // keep their names so the bytecode half of A3.1 stays a one-word owner change per site
     // (`PatchCanvas` folds com/silverknight/a.run()'s repaint+serviceRepaints pair into one
-    // `Zeus.doRepaint(Canvas)`, `PatchLayers` injects `Zeus.skipLayer(bit)` into ey.a(bx)
-    // and br.a(bx), and the recompiled bx calls `Zeus.countDraw()` on every primitive that
+    // `Zeus.doRepaint(Canvas)`, `PatchLayers` injects `Zeus.skipLayer(bit)` into ey.a(mGraphics)
+    // and br.a(mGraphics), and the recompiled mGraphics calls `Zeus.countDraw()` on every primitive that
     // reaches Graphics).
     //
     // Vanilla `com.silverknight.a.run()` paints on every 40 ms iteration, so the only way to
@@ -2497,7 +2535,7 @@ public final class Zeus {
     public static long paintTicks = 0L;
     /** ticks that actually painted. */
     public static long paintFrames = 0L;
-    /** bx draw calls, summed across every primitive. */
+    /** mGraphics draw calls, summed across every primitive. */
     public static long paintDraws = 0L;
 
     /** report interval in ms; 0 disables reporting. -Dpotato.reportMs. */
@@ -2531,8 +2569,8 @@ public final class Zeus {
      *
      * A set bit SKIPS that layer, so 0 is vanilla. Bits are assigned in
      * mod/potato/tools/PatchLayers.java, which injects the call site:
-     *   1 = ey.a(bx)  minimap
-     *   2 = br.a(bx)  effects
+     *   1 = ey.a(mGraphics)  minimap
+     *   2 = br.a(mGraphics)  effects
      */
     public static int layerMask = 0;
     /** Layer draws skipped; surfaced in the report so gating is visible. */
@@ -2572,7 +2610,7 @@ public final class Zeus {
      * hook that still runs at paintEvery 0, which is what lets a hidden tab be shown again.
      */
     public static void doRepaint(javax.microedition.lcdui.Canvas canvas) {
-        pollPotatoControl(dx.a());
+        pollPotatoControl(mSystem.currentTimeMillis());
         boolean painted = shouldPaint();
         if (painted) {
             canvas.repaint();
@@ -2603,7 +2641,7 @@ public final class Zeus {
         return true;
     }
 
-    /** Called by bx on every primitive that reaches Graphics. */
+    /** Called by mGraphics on every primitive that reaches Graphics. */
     public static void countDraw() {
         ++paintDraws;
     }
@@ -2613,8 +2651,8 @@ public final class Zeus {
      *
      * Guard: some vanilla logic lives inside the draw path, so paint cannot be dropped
      * unconditionally — not even at paintEvery 0, which is why the guard is checked before
-     * the never-paint case. cf.i(bx) advances the map-19/67 cutscene and ends it through
-     * n.b().c(); eq.a(bx) advances character-select animation. Both run only from a draw
+     * the never-paint case. cf.i(mGraphics) advances the map-19/67 cutscene and ends it through
+     * n.b().c(); eq.a(mGraphics) advances character-select animation. Both run only from a draw
      * call, so those states keep painting regardless of paintEvery. Verified in
      * mod/src_decomp/cf.java:1858 and mod/src_decomp/eq.java:158.
      */
@@ -2637,8 +2675,8 @@ public final class Zeus {
             if (!inGame()) {
                 return true;    // login, character select, or no screen at all yet
             }
-            if (fu.q != null && (fu.q.d == 19 || fu.q.d == 67)) {
-                return true;    // cutscene advanced from cf.i(bx)
+            if (GameCanvas.loadmap != null && (GameCanvas.loadmap.idMap == 19 || GameCanvas.loadmap.idMap == 67)) {
+                return true;    // cutscene advanced from cf.i(mGraphics)
             }
         } catch (Throwable t) {
             return true;        // never trade a stall for a saved frame
@@ -2732,7 +2770,7 @@ public final class Zeus {
      * which is also why nothing here touches the 48-key snapshot.
      */
     private static void paintReport() {
-        long now = dx.a();
+        long now = mSystem.currentTimeMillis();
         if (paintReportAt == 0L) {
             paintReportAt = now;
             return;
@@ -2763,7 +2801,7 @@ public final class Zeus {
             if (inGame()) {
                 return "game";
             }
-            if (fu.a == fu.b) {
+            if (GameCanvas.currentScreen == GameCanvas.login) {
                 return "login";
             }
             return "other";
@@ -2780,14 +2818,14 @@ public final class Zeus {
      * sender funnels through (`q` extends `ef`, and every `q` method ends in `this.b()`).
      * At that moment the payload is complete, because every write happens before the send.
      */
-    public static void sent(ep packet) {
+    public static void sent(Message packet) {
         if (!traceOn || packet == null) {
             return;
         }
         try {
-            byte[] payload = packet.a();
+            byte[] payload = packet.getData();
             StringBuffer line = new StringBuffer(64);
-            line.append("SEND op=").append(packet.a).append(" len=")
+            line.append("SEND op=").append(packet.command).append(" len=")
                     .append(payload == null ? 0 : payload.length).append(' ');
             if (payload != null) {
                 // Bounded: a long packet is a template dump, and its tail says nothing useful.
@@ -2811,7 +2849,7 @@ public final class Zeus {
     /**
      * Records one menu the client is about to show, and says whether a module took it.
      *
-     * Called from a prologue injected into `fr.a(et,int,String,boolean,et)`, the menu builder. The
+     * Called from a prologue injected into `Menu2.a(mVector,int,String,boolean,mVector)`, the menu builder. The
      * button's own command id travels with its caption, which is what lets a module send the same
      * selection the operator's tap would.
      *
@@ -2819,7 +2857,7 @@ public final class Zeus {
      * drawn. A module that answers the menu itself has no use for it on screen — and dismissing it
      * after the fact was not enough, because the frame in between still showed it.
      */
-    public static boolean menu(et items, String title) {
+    public static boolean menu(mVector items, String title) {
         // Captured before the trace gate, because ZONE needs the roster whether or not the operator
         // asked for a log. Only while a board is being waited on: reading every local menu into
         // module state would make a shop or an inventory menu look like a board reply.
@@ -2829,7 +2867,7 @@ public final class Zeus {
             // Only a roster this module could actually read is worth hiding: a menu it rejected has
             // to stay visible, or a board that is not what was measured would vanish silently.
             //
-            // FORCED OFF. The swallow returns from `fr.a` before its own prologue runs, so the menu
+            // FORCED OFF. The swallow returns from `Menu2.a` before its own prologue runs, so the menu
             // object keeps the previous menu's state: `this.a` stays true from the last one and
             // `this.g`/`this.aa` are stale or null. cn's paint gate (cn.java:704) reads exactly those,
             // and the frame came out blank white with the tick still running. Hiding the menu has to
@@ -2840,23 +2878,23 @@ public final class Zeus {
             return taken;
         }
         try {
-            trace("MENU title=" + clean(title) + " count=" + (items == null ? 0 : items.c())
+            trace("MENU title=" + clean(title) + " count=" + (items == null ? 0 : items.size())
                     + (taken ? " (taken)" : ""));
             if (items == null) {
                 return taken;
             }
-            for (int i = 0; i < items.c(); i++) {
-                Object entry = items.a(i);
-                if (!(entry instanceof bt)) {
+            for (int i = 0; i < items.size(); i++) {
+                Object entry = items.elementAt(i);
+                if (!(entry instanceof iCommand)) {
                     trace("  [" + i + "] (not a button)");
                     continue;
                 }
-                bt button = (bt) entry;
+                iCommand button = (iCommand) entry;
                 // `e` is the command id the client dispatches on and `f` the sub-index, both set by
-                // the bt constructors (bt.java:38-54). Together they are what a later round would
+                // the iCommand constructors (iCommand.java:38-54). Together they are what a later round would
                 // have to reproduce to make the same selection the operator's tap makes.
-                trace("  [" + i + "] cmd=" + button.e + " sub=" + button.f + " text="
-                        + clean(button.a));
+                trace("  [" + i + "] cmd=" + button.indexMenu + " sub=" + button.subIndex + " text="
+                        + clean(button.caption));
             }
         } catch (Throwable t) {
             // As above: never break the client's own menu.
@@ -2868,27 +2906,27 @@ public final class Zeus {
      * Records a server-driven menu, the kind a teleport stone or a shop NPC arrives as, and says
      * whether a module took it.
      *
-     * Separate from {@link #menu} because the two overloads of `fr.a` carry different facts. A local
+     * Separate from {@link #menu} because the two overloads of `Menu2.a` carry different facts. A local
      * menu's buttons hold their own command and sub-index, so logging those is enough to reproduce a
-     * selection. A server menu's buttons hold neither: `fr.a(2, _)` sends `q.a().b(fr.C, fr.B, fr.h)`,
+     * selection. A server menu's buttons hold neither: `Menu2.a(2, _)` sends `GlobalService.gI().b(Menu2.C, Menu2.B, Menu2.h)`,
      * so the reproducible part is the idNPC/idMenu pair from the builder call plus the entry's
      * position — and pressing a button selects whatever is highlighted, not what was pressed.
      *
      * Returning true hides it, for the same reason the local overload does: a module that answers the
      * menu itself never needs it drawn.
      */
-    public static boolean serverMenu(et items, int idMenu, int idNPC, String title) {
+    public static boolean serverMenu(mVector items, int idMenu, int idNPC, String title) {
         boolean taken = false;
         // Captured before the trace gate, because TRAVEL needs the labels whether or not the operator
         // asked for a log. Only while a stone is being waited on: hooking every server menu into
         // module state would make a shop visit look like a travel reply.
         if (travelState == TV_STONE_WAIT && travelMenuNpc == Integer.MIN_VALUE) {
             try {
-                int count = items == null ? 0 : items.c();
+                int count = items == null ? 0 : items.size();
                 String[] labels = new String[count];
                 for (int i = 0; i < count; i++) {
-                    Object entry = items.a(i);
-                    labels[i] = entry instanceof bt ? ((bt) entry).a : null;
+                    Object entry = items.elementAt(i);
+                    labels[i] = entry instanceof iCommand ? ((iCommand) entry).caption : null;
                 }
                 travelMenu = labels;
                 travelMenuNpc = idNPC;
@@ -2906,8 +2944,8 @@ public final class Zeus {
                 // builder return before `this.a = true`, so this menu never becomes the open panel —
                 // there is no frame that draws it and no later tick that has to close it.
                 //
-                // Nothing is written to `fu.p` here on purpose. Phase 0 only starts behind
-                // `noDialog()`, so `fu.p.a` is already false when the reply lands, and the swallowed
+                // Nothing is written to `GameCanvas.menu2` here on purpose. Phase 0 only starts behind
+                // `noDialog()`, so `GameCanvas.menu2.isShowMenu` is already false when the reply lands, and the swallowed
                 // build leaves every field of the singleton exactly as it was. Clearing `a` would be
                 // a no-op in that case and would silently close a menu the OPERATOR opened during
                 // the wait in the other — the swallow must not take a panel it did not create.
@@ -2922,11 +2960,11 @@ public final class Zeus {
         // Gated on its own wait state so an operator's own shop visit is never read as a reply.
         if (dungeonState == DN_INTERACT && dungeonMenuNpc == Integer.MIN_VALUE) {
             try {
-                int count = items == null ? 0 : items.c();
+                int count = items == null ? 0 : items.size();
                 String[] labels = new String[count];
                 for (int i = 0; i < count; i++) {
-                    Object entry = items.a(i);
-                    labels[i] = entry instanceof bt ? ((bt) entry).a : null;
+                    Object entry = items.elementAt(i);
+                    labels[i] = entry instanceof iCommand ? ((iCommand) entry).caption : null;
                 }
                 dungeonMenu = labels;
                 dungeonMenuItems = items;
@@ -2948,17 +2986,17 @@ public final class Zeus {
         if (enhState == 6 && items != null) {
             try {
                 int pickIndex = 0;
-                for (int i = 0; i < items.c(); i++) {
-                    Object entry = items.a(i);
-                    if (entry instanceof bt) {
-                        String label = norm(((bt) entry).a);
+                for (int i = 0; i < items.size(); i++) {
+                    Object entry = items.elementAt(i);
+                    if (entry instanceof iCommand) {
+                        String label = norm(((iCommand) entry).caption);
                         if (label.indexOf("cuong hoa") >= 0) {
                             pickIndex = i;
                             break;
                         }
                     }
                 }
-                q.a().b((short) idNPC, (byte) idMenu, (byte) pickIndex);
+                GlobalService.gI().Dynamic_Menu((short) idNPC, (byte) idMenu, (byte) pickIndex);
                 taken = true;
             } catch (Throwable t) {
             }
@@ -2969,17 +3007,17 @@ public final class Zeus {
         }
         try {
             trace("SMENU npc=" + idNPC + " menu=" + idMenu + " title=" + clean(title)
-                    + " count=" + (items == null ? 0 : items.c()) + (taken ? " (taken)" : ""));
+                    + " count=" + (items == null ? 0 : items.size()) + (taken ? " (taken)" : ""));
             if (items == null) {
                 return taken;
             }
-            for (int i = 0; i < items.c(); i++) {
-                Object entry = items.a(i);
-                if (!(entry instanceof bt)) {
+            for (int i = 0; i < items.size(); i++) {
+                Object entry = items.elementAt(i);
+                if (!(entry instanceof iCommand)) {
                     trace("  <" + i + "> (not a button)");
                     continue;
                 }
-                trace("  <" + i + "> text=" + clean(((bt) entry).a));
+                trace("  <" + i + "> text=" + clean(((iCommand) entry).caption));
             }
         } catch (Throwable t) {
             // As above: never break the client's own menu.
@@ -3003,18 +3041,18 @@ public final class Zeus {
             return;
         }
         try {
-            if (cn.i != null) {
-                int id = cn.i.cu * 1000 + cn.i.cv;
+            if (GameScreen.ObjFocus != null) {
+                int id = GameScreen.ObjFocus.ID * 1000 + GameScreen.ObjFocus.typeObject;
                 if (id != traceTargetId) {
                     traceTargetId = id;
-                    trace("TARGET cv=" + cn.i.cv + " cu=" + cn.i.cu + " x=" + cn.i.aZ
-                            + " y=" + cn.i.ba + " name=" + clean(cn.i.cC));
+                    trace("TARGET cv=" + GameScreen.ObjFocus.typeObject + " cu=" + GameScreen.ObjFocus.ID + " x=" + GameScreen.ObjFocus.x
+                            + " y=" + GameScreen.ObjFocus.y + " name=" + clean(GameScreen.ObjFocus.name));
                 }
             } else if (traceTargetId != Integer.MIN_VALUE) {
                 traceTargetId = Integer.MIN_VALUE;
                 trace("TARGET none");
             }
-            da activeDialog = fu.s != null ? fu.s : (fu.t != null ? fu.t : null);
+            MainDialog activeDialog = GameCanvas.currentDialog != null ? GameCanvas.currentDialog : (GameCanvas.subDialog != null ? GameCanvas.subDialog : null);
             String dialog = activeDialog == null ? null : dialogText(activeDialog);
             if (dialog != null && !dialog.equals(traceDialog)) {
                 traceDialog = dialog;
@@ -3023,9 +3061,9 @@ public final class Zeus {
                 traceDialog = null;
                 trace("DIALOG closed");
             }
-            if (cs.u != traceZone) {
-                traceZone = cs.u;
-                trace("ZONE now=" + cs.u + " count=" + cs.v);
+            if (LoadMap.Area != traceZone) {
+                traceZone = LoadMap.Area;
+                trace("ZONE now=" + LoadMap.Area + " count=" + LoadMap.MaxArea);
             }
         } catch (Throwable t) {
             // A trace must never stall the tick.
@@ -3037,21 +3075,21 @@ public final class Zeus {
             return;
         }
         try {
-            // dx.a() is System.currentTimeMillis(). fu.aj is a tick counter that wraps
+            // mSystem.currentTimeMillis() is System.currentTimeMillis(). fu.aj is a tick counter that wraps
             // at 10000, so it cannot measure a five-minute window (docs/core/10 §4.3).
-            long now = dx.a();
-            if (cn.g == null) {
+            long now = mSystem.currentTimeMillis();
+            if (GameScreen.player == null) {
                 return;             // not in a character yet: nothing to report
             }
-            // cn.g is non-null well before the character exists: the client installs a
+            // GameScreen.player is non-null well before the character exists: the client installs a
             // level-0 placeholder called "unname" (cn.java:94) and only fills the real
             // stats in when opcode 3 arrives. Sampling that placeholder put a level-0
             // reading at the start of the window, so the first real reading looked like a
             // gain of 80 levels and the rate came out in the millions.
-            boolean statsArrived = cn.g.bz > 0;
+            boolean statsArrived = GameScreen.player.Lv > 0;
             if (statsArrived && now - sampledAt >= sampleEveryMs) {
                 sampledAt = now;
-                sample(now, cn.g.bz, cn.g.bA);
+                sample(now, GameScreen.player.Lv, GameScreen.player.phantramLv);
             }
             if (now - wroteAt >= writeEveryMs) {
                 wroteAt = now;
@@ -3125,6 +3163,31 @@ public final class Zeus {
     }
 
     /** Writes the snapshot atomically: temp file, then replace. */
+    private static int getAutoItemRank() {
+        try {
+            if (Player.autoItem == null) return -1;
+            java.lang.reflect.Field f = AutoGetItem.class.getDeclaredField("valueColorItem");
+            f.setAccessible(true);
+            return f.getByte(Player.autoItem);
+        } catch (Throwable t) { return -1; }
+    }
+    private static int getAutoItemPotion() {
+        try {
+            if (Player.autoItem == null) return -1;
+            java.lang.reflect.Field f = AutoGetItem.class.getDeclaredField("isGetPotion");
+            f.setAccessible(true);
+            return f.getByte(Player.autoItem);
+        } catch (Throwable t) { return -1; }
+    }
+    private static int getAutoItemMoney() {
+        try {
+            if (Player.autoItem == null) return -1;
+            java.lang.reflect.Field f = AutoGetItem.class.getDeclaredField("isGetMoney");
+            f.setAccessible(true);
+            return f.getByte(Player.autoItem);
+        } catch (Throwable t) { return -1; }
+    }
+
     private static void publish(long now) {
         StringBuffer out = new StringBuffer(320);
         // 5: travelgoal now reports the destination in force rather than the configured one, so a
@@ -3133,42 +3196,42 @@ public final class Zeus {
         // anywhere in the client, so the bag is the only honest source.
         out.append("v=6\n");
         out.append("t=").append(now).append('\n');
-        out.append("name=").append(clean(cn.g.cC)).append('\n');
-        out.append("lv=").append(cn.g.bz).append('\n');
-        out.append("xp=").append(cn.g.bA).append('\n');
-        out.append("hp=").append(cn.g.bs).append('\n');
-        out.append("hpmax=").append(cn.g.bt).append('\n');
-        out.append("mp=").append(cn.g.bu).append('\n');
-        out.append("mpmax=").append(cn.g.bv).append('\n');
+        out.append("name=").append(clean(GameScreen.player.name)).append('\n');
+        out.append("lv=").append(GameScreen.player.Lv).append('\n');
+        out.append("xp=").append(GameScreen.player.phantramLv).append('\n');
+        out.append("hp=").append(GameScreen.player.hp).append('\n');
+        out.append("hpmax=").append(GameScreen.player.maxHp).append('\n');
+        out.append("mp=").append(GameScreen.player.mp).append('\n');
+        out.append("mpmax=").append(GameScreen.player.maxMp).append('\n');
         // bD is gold and bC is gem; both only arrive with opcode 16.
-        if (cn.g.bD != 0L || cn.g.bC != 0L) {
+        if (GameScreen.player.coin != 0L || GameScreen.player.gold != 0L) {
             walletKnown = true;
         }
         out.append("wallet=").append(walletKnown ? 1 : 0).append('\n');
-        out.append("gold=").append(cn.g.bD).append('\n');
-        out.append("gem=").append(cn.g.bC).append('\n');
-        out.append("map=").append(fu.q != null ? fu.q.d : -1).append('\n');
-        out.append("zone=").append(cs.u).append('\n');
-        out.append("px=").append(cn.g.aZ).append('\n');
-        out.append("py=").append(cn.g.ba).append('\n');
-        // bq.e is the attack quota. At <= 0 the client silently drops auto from 1 to 0
+        out.append("gold=").append(GameScreen.player.coin).append('\n');
+        out.append("gem=").append(GameScreen.player.gold).append('\n');
+        out.append("map=").append(GameCanvas.loadmap != null ? GameCanvas.loadmap.idMap : -1).append('\n');
+        out.append("zone=").append(LoadMap.Area).append('\n');
+        out.append("px=").append(GameScreen.player.x).append('\n');
+        out.append("py=").append(GameScreen.player.y).append('\n');
+        // Player.demUnFire is the attack quota. At <= 0 the client silently drops auto from 1 to 0
         // (bq.java:577), which is the top cause of "auto stopped for no reason".
-        out.append("quota=").append(bq.e).append('\n');
-        out.append("bag=").append(bw.V != null ? bw.V.c() : -1).append('\n');
-        out.append("bagmax=").append(bq.x).append('\n');
-        out.append("state=").append(cn.g.cG).append('\n');
-        out.append("mount=").append(cn.g.ef).append('\n');
+        out.append("quota=").append(Player.demUnFire).append('\n');
+        out.append("bag=").append(Item.VecInvetoryPlayer != null ? Item.VecInvetoryPlayer.size() : -1).append('\n');
+        out.append("bagmax=").append(Player.maxInven).append('\n');
+        out.append("state=").append(GameScreen.player.Action).append('\n');
+        out.append("mount=").append(GameScreen.player.typeMount).append('\n');
         // The mounts actually in the bag, `id:name` pairs joined by `|`, so the tool can offer them
         // by their server-given names instead of by a number.
         out.append("mounts=").append(mountList()).append('\n');
-        out.append("guild=").append(cn.g.cP != null ? clean(cn.g.cP.c) : "").append('\n');
+        out.append("guild=").append(GameScreen.player.myClan != null ? clean(GameScreen.player.myClan.name) : "").append('\n');
         out.append("xprate=").append(xpPermillePerHour()).append('\n');
         // What the two active modules are actually doing. Without these there is no way to
         // tell a working module from a silent one without opening the game and watching.
-        out.append("atkphase=").append(bq.o).append('\n');
+        out.append("atkphase=").append(Player.isAutoFire).append('\n');
         out.append("ctl=").append(ctlState).append('\n');
         out.append("atkstate=").append(combatOwned ? atkState : -1).append('\n');
-        out.append("target=").append(cn.i != null && cn.i.cv == 1 && cn.i.bs > 0 ? 1 : 0)
+        out.append("target=").append(GameScreen.ObjFocus != null && GameScreen.ObjFocus.typeObject == 1 && GameScreen.ObjFocus.hp > 0 ? 1 : 0)
                 .append('\n');
         out.append("stuck=").append(stuckKind).append('\n');
         // Travel's own state and, when it stopped, why. A route that fails has to say so: "walking"
@@ -3182,18 +3245,18 @@ public final class Zeus {
         out.append("potions=").append(potionCount).append('\n');
         out.append("revives=").append(reviveCount).append('\n');
         // The pickup record actually in force, read back from the client rather than echoed from
-        // the settings file. co.b() and its read-back disagree about which byte carries which
+        // the settings file. MainRMS.setSaveAuto() and its read-back disagree about which byte carries which
         // value, so this is the only honest way to show the operator what took effect.
-        out.append("pkrank=").append(bq.q == null ? -1 : bq.q.a).append('\n');
-        out.append("pkmphp=").append(bq.q == null ? -1 : bq.q.c).append('\n');
-        out.append("pkgold=").append(bq.q == null ? -1 : bq.q.b).append('\n');
+        out.append("pkrank=").append(getAutoItemRank()).append('\n');
+        out.append("pkmphp=").append(getAutoItemPotion()).append('\n');
+        out.append("pkgold=").append(getAutoItemMoney()).append('\n');
         // Which buff slots the client will actually cast, after the learned check.
         out.append("buffs=").append(buffState()).append('\n');
         // Six characters, one per material: `-` never confirmed, `0` open, `1` closed. Read back
         // from the server's own confirmations, so a setting that never took effect shows as unknown
         // instead of as applied.
         out.append("drops=").append(dropStates()).append('\n');
-        // eh.h false or a loading map means the values are last-known, not current.
+        // LoadMapScreen.isNextMap false or a loading map means the values are last-known, not current.
         out.append("stale=").append(sceneReady() ? 0 : 1).append('\n');
         // ---- ENHANCE ----------------------------------------------------------
         // Enhance's own state and, when it stopped, why. Appended after every key that was
@@ -3227,7 +3290,7 @@ public final class Zeus {
      */
     private static boolean sceneReady() {
         try {
-            return fu.a == fu.c && eh.h && fu.q != null && cs.i != cs.j;
+            return GameCanvas.currentScreen == GameCanvas.game && LoadMapScreen.isNextMap && GameCanvas.loadmap != null && LoadMap.isShowEffAuto != LoadMap.EFF_PHOBANG_END;
         } catch (Throwable t) {
             return false;
         }
@@ -3288,15 +3351,15 @@ public final class Zeus {
     // ---- HEALTH SIDECAR (R1A) ------------------------------------------------
     /**
      * Observational runtime health sidecar (zeus-health.txt, contract v1).
-     * Proves game-loop progress across login/reconnect states even when fu.a == null or cn.g == null.
-     * Publishes ~1000ms cadence against dx.a() to zeus-health.txt via temp file and atomic replace.
+     * Proves game-loop progress across login/reconnect states even when GameCanvas.currentScreen == null or GameScreen.player == null.
+     * Publishes ~1000ms cadence against mSystem.currentTimeMillis() to zeus-health.txt via temp file and atomic replace.
      */
     private static void healthSidecarTick() {
         try {
             if (healthPath == null) {
                 return;
             }
-            long now = dx.a();
+            long now = mSystem.currentTimeMillis();
             if (now < lastHealthPublishedAt) {
                 // Defensive wall-clock rollback handling
                 lastHealthPublishedAt = now;
@@ -3308,22 +3371,22 @@ public final class Zeus {
             healthSeq++;
 
             String screen;
-            if (fu.a == null) {
+            if (GameCanvas.currentScreen == null) {
                 screen = "none";
-            } else if (fu.a == fu.b && fu.t == fu.g) {
+            } else if (GameCanvas.currentScreen == GameCanvas.login && GameCanvas.subDialog == GameCanvas.msgchat) {
                 screen = "server";
-            } else if (fu.a == fu.b) {
+            } else if (GameCanvas.currentScreen == GameCanvas.login) {
                 screen = "login";
-            } else if (fu.a == fu.i) {
+            } else if (GameCanvas.currentScreen == GameCanvas.selectChar) {
                 screen = "character";
-            } else if (fu.a == fu.c) {
+            } else if (GameCanvas.currentScreen == GameCanvas.game) {
                 screen = "world";
             } else {
                 screen = "other";
             }
 
-            int dialog = fu.s != null ? 1 : 0;
-            int disconnect = bv.a ? 1 : 0;
+            int dialog = GameCanvas.currentDialog != null ? 1 : 0;
+            int disconnect = GlobalLogicHandler.isDisConect ? 1 : 0;
 
             StringBuffer sb = new StringBuffer(128);
             sb.append("v=1\n");
@@ -3369,7 +3432,7 @@ public final class Zeus {
 
     /**
      * Observational reconnect status sidecar (zeus-reconnect.txt, contract v1).
-     * Publishes ~1000ms cadence against dx.a() to zeus-reconnect.txt via temp file and atomic replace.
+     * Publishes ~1000ms cadence against mSystem.currentTimeMillis() to zeus-reconnect.txt via temp file and atomic replace.
      * Strictly observe-only: zero mutations to reconnect state machine or game loop.
      */
     private static void reconnectStatusSidecarTick() {
@@ -3377,7 +3440,7 @@ public final class Zeus {
             if (reconnectStatusPath == null) {
                 return;
             }
-            long now = dx.a();
+            long now = mSystem.currentTimeMillis();
             if (now < lastReconnectStatusPublishedAt) {
                 // Defensive wall-clock rollback handling
                 lastReconnectStatusPublishedAt = now;
@@ -3456,64 +3519,64 @@ public final class Zeus {
 
     // ---- INVENTORY TELEMETRY (ENHANCE-01) -------------------------------------
     /**
-     * Serializes the current bag inventory (bw.V) in stable slot order.
-     * Zero-mutation: reads fields, sends no packets, never mutates bw.V items.
+     * Serializes the current bag inventory (Item.VecInvetoryPlayer) in stable slot order.
+     * Zero-mutation: reads fields, sends no packets, never mutates Item.VecInvetoryPlayer items.
      */
     public static String formatInventoryCatalogJson() {
         StringBuffer out = new StringBuffer(512);
-        int capacity = bq.x > 0 ? bq.x : 0;
+        int capacity = Player.maxInven > 0 ? Player.maxInven : 0;
         out.append("{\n");
         out.append("  \"version\": 1,\n");
         out.append("  \"bag_capacity\": ").append(capacity).append(",\n");
         out.append("  \"items\": [");
-        if (bw.V != null && bw.V.c() > 0) {
+        if (Item.VecInvetoryPlayer != null && Item.VecInvetoryPlayer.size() > 0) {
             boolean first = true;
-            for (int slot = 0; slot < bw.V.c(); slot++) {
-                Object entry = bw.V.a(slot);
-                if (entry == null || !(entry instanceof bw)) {
+            for (int slot = 0; slot < Item.VecInvetoryPlayer.size(); slot++) {
+                Object entry = Item.VecInvetoryPlayer.elementAt(slot);
+                if (entry == null || !(entry instanceof Item)) {
                     continue;
                 }
-                bw it = (bw) entry;
+                Item it = (Item) entry;
                 if (!first) {
                     out.append(",");
                 }
                 first = false;
                 out.append("\n    {\n");
                 out.append("      \"slot\": ").append(slot).append(",\n");
-                out.append("      \"template_id\": ").append(it.O).append(",\n");
-                out.append("      \"category\": ").append(it.u).append(",\n");
+                out.append("      \"template_id\": ").append(it.Id).append(",\n");
+                out.append("      \"category\": ").append(it.ItemCatagory).append(",\n");
                 out.append("      \"base_name\": ");
-                String baseName = (it.i != null && it.i.length() > 0) ? it.i : (it.g != null ? it.g : "");
+                String baseName = (it.itemNameExcludeLv != null && it.itemNameExcludeLv.length() > 0) ? it.itemNameExcludeLv : (it.itemName != null ? it.itemName : "");
                 escapeJsonString(baseName, out);
                 out.append(",\n");
                 out.append("      \"display_name\": ");
-                escapeJsonString(it.g != null ? it.g : "", out);
+                escapeJsonString(it.itemName != null ? it.itemName : "", out);
                 out.append(",\n");
-                out.append("      \"level\": ").append((int) it.z).append(",\n");
-                out.append("      \"tier\": ").append(it.N).append(",\n");
-                out.append("      \"count\": ").append(it.K > 0 ? it.K : 1).append(",\n");
+                out.append("      \"level\": ").append((int) it.tier).append(",\n");
+                out.append("      \"tier\": ").append(it.colorNameItem).append(",\n");
+                out.append("      \"count\": ").append(it.numPotion > 0 ? it.numPotion : 1).append(",\n");
                 out.append("      \"durability\": ");
-                if (it.v >= 0) {
-                    out.append(it.v);
+                if (it.IdTem >= 0) {
+                    out.append(it.IdTem);
                 } else {
                     out.append("null");
                 }
                 out.append(",\n");
                 out.append("      \"bind\": ");
-                if (it.B >= 0) {
-                    out.append((int) it.B);
+                if (it.isLock >= 0) {
+                    out.append((int) it.isLock);
                 } else {
                     out.append("null");
                 }
                 out.append(",\n");
                 out.append("      \"icon\": ");
-                if (it.t >= 0) {
-                    out.append(it.t);
+                if (it.imageId >= 0) {
+                    out.append(it.imageId);
                 } else {
                     out.append("null");
                 }
                 out.append(",\n");
-                out.append("      \"candidate_for_enhancement\": ").append(it.u == 3 ? "true" : "false").append("\n");
+                out.append("      \"candidate_for_enhancement\": ").append(it.ItemCatagory == 3 ? "true" : "false").append("\n");
                 out.append("    }");
             }
             if (!first) {
@@ -3528,25 +3591,25 @@ public final class Zeus {
     /** Fast deterministic hash for change suppression. */
     public static long computeInventoryHash() {
         long hash = 17L;
-        hash = 31L * hash + (long) (bq.x > 0 ? bq.x : 0);
-        int count = bw.V != null ? bw.V.c() : 0;
+        hash = 31L * hash + (long) (Player.maxInven > 0 ? Player.maxInven : 0);
+        int count = Item.VecInvetoryPlayer != null ? Item.VecInvetoryPlayer.size() : 0;
         hash = 31L * hash + (long) count;
-        if (bw.V != null) {
+        if (Item.VecInvetoryPlayer != null) {
             for (int i = 0; i < count; i++) {
-                Object entry = bw.V.a(i);
-                if (entry instanceof bw) {
-                    bw it = (bw) entry;
+                Object entry = Item.VecInvetoryPlayer.elementAt(i);
+                if (entry instanceof Item) {
+                    Item it = (Item) entry;
                     hash = 31L * hash + (long) i;
-                    hash = 31L * hash + (long) it.O;
-                    hash = 31L * hash + (long) it.u;
-                    hash = 31L * hash + (long) it.z;
-                    hash = 31L * hash + (long) it.N;
-                    hash = 31L * hash + (long) it.K;
-                    hash = 31L * hash + (long) it.v;
-                    hash = 31L * hash + (long) it.B;
-                    hash = 31L * hash + (long) it.t;
-                    if (it.g != null) {
-                        hash = 31L * hash + (long) it.g.hashCode();
+                    hash = 31L * hash + (long) it.Id;
+                    hash = 31L * hash + (long) it.ItemCatagory;
+                    hash = 31L * hash + (long) it.tier;
+                    hash = 31L * hash + (long) it.colorNameItem;
+                    hash = 31L * hash + (long) it.numPotion;
+                    hash = 31L * hash + (long) it.IdTem;
+                    hash = 31L * hash + (long) it.isLock;
+                    hash = 31L * hash + (long) it.imageId;
+                    if (it.itemName != null) {
+                        hash = 31L * hash + (long) it.itemName.hashCode();
                     }
                 }
             }
@@ -3556,7 +3619,7 @@ public final class Zeus {
 
     /** Publishes inventory sidecar with change suppression. */
     private static void publishInventory(long now) {
-        if (inventoryPath == null || bw.V == null) {
+        if (inventoryPath == null || Item.VecInvetoryPlayer == null) {
             return;
         }
         try {
@@ -3602,32 +3665,32 @@ public final class Zeus {
 
     // ---- GUARDS ---------------------------------------------------------------
     //
-    // docs/core/08-module-attack.md §10. Two of these — eh.h and cs.i != cs.j — are the
+    // docs/core/08-module-attack.md §10. Two of these — LoadMapScreen.isNextMap and LoadMap.isShowEffAuto != LoadMap.EFF_PHOBANG_END — are the
     // ones KnightMod never reads, which is how it ends up acting on the previous map's
     // coordinates while a new map loads.
 
     /** In the world screen, not a menu. */
     private static boolean inGame() {
-        return fu.a != null && fu.a == fu.c;
+        return GameCanvas.currentScreen != null && GameCanvas.currentScreen == GameCanvas.game;
     }
 
     /** No dialog is up. Acting behind one sends input the operator cannot see. */
     private static boolean noDialog() {
-        return fu.s == null && fu.t == null && (fu.p == null || !fu.p.a);
+        return GameCanvas.currentDialog == null && GameCanvas.subDialog == null && (GameCanvas.menu2 == null || !GameCanvas.menu2.isShowMenu);
     }
 
     private static boolean alive() {
-        return cn.g != null && cn.g.cG != 4;
+        return GameScreen.player != null && GameScreen.player.Action != 4;
     }
 
     /** Free to move: neither our own path nor the client's movement lock is held. */
     private static boolean canMove() {
-        return !bq.m && cn.g != null && cn.g.cO == null;
+        return !Player.isLockKey && GameScreen.player != null && GameScreen.player.posTransRoad == null;
     }
 
     /** The captcha monster ("Con Ma") outranks everything; never fight through it. */
     private static boolean captcha() {
-        return cn.i != null && cn.i.cy == 2;
+        return GameScreen.ObjFocus != null && GameScreen.ObjFocus.typeBoss == 2;
     }
 
     /** Everything Attack and Item both need before touching a field. */
@@ -3657,8 +3720,8 @@ public final class Zeus {
 
     /** True when the client has observed one stable authoritative map for the consecutive threshold. */
     public static boolean mapStable() {
-        return inGame() && sceneReady() && fu.q != null && fu.q.d >= 0
-                && fu.q.d == stableMapId && mapStableTicks >= MAP_STABLE_TICKS;
+        return inGame() && sceneReady() && GameCanvas.loadmap != null && GameCanvas.loadmap.idMap >= 0
+                && GameCanvas.loadmap.idMap == stableMapId && mapStableTicks >= MAP_STABLE_TICKS;
     }
 
     public static void mapStableReset() {
@@ -3672,7 +3735,7 @@ public final class Zeus {
      */
     public static boolean gameReady() {
         if (!inGame() || !sceneReady() || !alive() || captcha() || !noDialog()
-                || cn.g == null || cn.g.cx < 0 || cn.g.cy < 0 || fu.q == null || fu.q.d < 0) {
+                || GameScreen.player == null || GameScreen.player.typePk < 0 || GameScreen.player.typeBoss < 0 || GameCanvas.loadmap == null || GameCanvas.loadmap.idMap < 0) {
             return false;
         }
         return readySettleTicks >= GAME_READY_SETTLE_TICKS;
@@ -3697,7 +3760,7 @@ public final class Zeus {
     }
 
     private static void sessionTick() {
-        int screenId = (fu.a == null) ? -1 : ((fu.a == fu.i) ? 1 : ((fu.a == fu.c) ? 2 : 0));
+        int screenId = (GameCanvas.currentScreen == null) ? -1 : ((GameCanvas.currentScreen == GameCanvas.selectChar) ? 1 : ((GameCanvas.currentScreen == GameCanvas.game) ? 2 : 0));
         if (screenId != lastScreenId) {
             if (screenId == 1 || screenId == 2) {
                 sessionReset();
@@ -3709,8 +3772,8 @@ public final class Zeus {
             if (readySettleTicks < GAME_READY_SETTLE_TICKS) {
                 ++readySettleTicks;
             }
-            if (fu.q != null && fu.q.d >= 0) {
-                int curMap = fu.q.d;
+            if (GameCanvas.loadmap != null && GameCanvas.loadmap.idMap >= 0) {
+                int curMap = GameCanvas.loadmap.idMap;
                 if (curMap == stableMapId) {
                     if (mapStableTicks < MAP_STABLE_TICKS) {
                         ++mapStableTicks;
@@ -3850,14 +3913,14 @@ public final class Zeus {
 
     /**
      * Conservative observer-only classifier for strong transport/disconnect evidence.
-     * Evaluates bv.a and strongly recognized disconnect phrases in modal dialogs.
+     * Evaluates GlobalLogicHandler.isDisConect and strongly recognized disconnect phrases in modal dialogs.
      */
     private static String detectStrongDisconnectReason() {
-        if (bv.a) {
+        if (GlobalLogicHandler.isDisConect) {
             return "NATIVE_BV_A";
         }
-        if (fu.s != null && (fu.s instanceof ah)) {
-            String text = norm(dialogText(fu.s));
+        if (GameCanvas.currentDialog != null && (GameCanvas.currentDialog instanceof MsgDialog)) {
+            String text = norm(dialogText(GameCanvas.currentDialog));
             if (text.indexOf("mat ket noi") >= 0) {
                 return "MODAL_DISCONNECT_MAT_KET_NOI";
             }
@@ -3872,25 +3935,25 @@ public final class Zeus {
     }
 
     /**
-     * Inspects a live ah modal dialog and finds the exact reconnect OK button.
-     * Candidate must be a bt object, candidate command id bt.e must equal 0,
+     * Inspects a live MsgDialog modal dialog and finds the exact reconnect OK button.
+     * Candidate must be a iCommand object, candidate command id iCommand.e must equal 0,
      * and candidate caption must normalize to an explicitly OK-like caption ("ok" or "o k").
      * Returns null if no exact command can be proven.
      */
-    private static bt findReconnectOkButton(ah dialog) {
+    private static iCommand findReconnectOkButton(MsgDialog dialog) {
         if (dialog == null) {
             return null;
         }
-        et buttons = dialog.C;
+        mVector buttons = dialog.cmdList;
         if (buttons == null) {
             return null;
         }
-        for (int i = 0; i < buttons.c(); i++) {
-            Object obj = buttons.a(i);
-            if (obj instanceof bt) {
-                bt btn = (bt) obj;
-                if (btn.e == 0) {
-                    String cap = norm(btn.a).trim();
+        for (int i = 0; i < buttons.size(); i++) {
+            Object obj = buttons.elementAt(i);
+            if (obj instanceof iCommand) {
+                iCommand btn = (iCommand) obj;
+                if (btn.indexMenu == 0) {
+                    String cap = norm(btn.caption).trim();
                     if (cap.equals("ok") || cap.equals("o k")) {
                         return btn;
                     }
@@ -3906,10 +3969,10 @@ public final class Zeus {
      * reconnectState == RC_NATIVE_WAIT, and reconnectWorldSeenBeforeEpisode == true.
      */
     private static void evaluateReconnectRecoveryAction(long now) {
-        if (fu.s == null || !(fu.s instanceof ah)) {
+        if (GameCanvas.currentDialog == null || !(GameCanvas.currentDialog instanceof MsgDialog)) {
             return;
         }
-        ah dialog = (ah) fu.s;
+        MsgDialog dialog = (MsgDialog) GameCanvas.currentDialog;
         String rawText = dialogText(dialog);
         String text = norm(rawText);
 
@@ -3926,14 +3989,14 @@ public final class Zeus {
             return;
         }
 
-        bt okBtn = findReconnectOkButton(dialog);
+        iCommand okBtn = findReconnectOkButton(dialog);
         if (okBtn == null) {
             return;
         }
 
-        // Native deadline & grace policy: wait for native bv.b deadline + 5000 ms grace
-        if (bv.a && bv.b > 0L) {
-            if (now < bv.b + RC_NATIVE_GRACE_MS) {
+        // Native deadline & grace policy: wait for native GlobalLogicHandler.timeReconnect deadline + 5000 ms grace
+        if (GlobalLogicHandler.isDisConect && GlobalLogicHandler.timeReconnect > 0L) {
+            if (now < GlobalLogicHandler.timeReconnect + RC_NATIVE_GRACE_MS) {
                 return;
             }
         }
@@ -3964,10 +4027,10 @@ public final class Zeus {
         }
 
         // Final live dialog and button revalidation before accounting and dispatch
-        if (fu.s != dialog || !(fu.s instanceof ah)) {
+        if (GameCanvas.currentDialog != dialog || !(GameCanvas.currentDialog instanceof MsgDialog)) {
             return;
         }
-        ah liveDialog = (ah) fu.s;
+        MsgDialog liveDialog = (MsgDialog) GameCanvas.currentDialog;
         String liveRawText = dialogText(liveDialog);
         String liveText = norm(liveRawText);
         boolean liveProvenDisconnect = (liveText.indexOf("mat ket noi") >= 0
@@ -3980,15 +4043,15 @@ public final class Zeus {
                 || liveText.indexOf("cho ket noi") >= 0) {
             return;
         }
-        bt liveOkBtn = findReconnectOkButton(liveDialog);
+        iCommand liveOkBtn = findReconnectOkButton(liveDialog);
         if (liveOkBtn == null || liveOkBtn != okBtn) {
             return;
         }
 
         // Diagnostics fingerprint (deduplicated tracing)
-        et btns = liveDialog.C;
-        int btnCount = (btns != null) ? btns.c() : 0;
-        reconnectRecoveryLastFingerprint = liveText + "|" + btnCount + "|" + okBtn.e + ":" + norm(okBtn.a).trim();
+        mVector btns = liveDialog.cmdList;
+        int btnCount = (btns != null) ? btns.size() : 0;
+        reconnectRecoveryLastFingerprint = liveText + "|" + btnCount + "|" + okBtn.indexMenu + ":" + norm(okBtn.caption).trim();
 
         // Increment and arm action accounting BEFORE dispatch (mandatory ordering)
         reconnectRecoveryAttempts++;
@@ -3999,12 +4062,12 @@ public final class Zeus {
 
         trace("RECONNECT recovery action try=" + reconnectRecoveryAttempts
                 + " max=" + RC_RECOVERY_MAX_ACTIONS
-                + " btn=" + clean(okBtn.a)
-                + " cmd=" + okBtn.e
+                + " btn=" + clean(okBtn.caption)
+                + " cmd=" + okBtn.indexMenu
                 + (reconnectRecoveryBackoffUntil > 0L ? " backoffMs=" + RC_RECOVERY_BACKOFF_MS : ""));
 
         // Dispatch exact live native OK command
-        okBtn.a();
+        okBtn.perform();
     }
 
     /**
@@ -4021,35 +4084,35 @@ public final class Zeus {
         }
 
         // Clean UI routing checks
-        if (fu.a == null || fu.a != fu.b || fu.b == null) {
+        if (GameCanvas.currentScreen == null || GameCanvas.currentScreen != GameCanvas.login || GameCanvas.login == null) {
             return;
         }
-        if (fu.s != null || fu.t != null) {
+        if (GameCanvas.currentDialog != null || GameCanvas.subDialog != null) {
             return;
         }
-        if (fu.p == null || fu.p.a) {
+        if (GameCanvas.menu2 == null || GameCanvas.menu2.isShowMenu) {
             return;
         }
-        if (d.b) {
+        if (ChatTextField.isShow) {
             return;
         }
 
         // Live center command slot check
-        bt loginBtn = fu.b.ab;
-        if (loginBtn == null || loginBtn.e != 0 || loginBtn.a == null) {
+        iCommand loginBtn = GameCanvas.login.right;
+        if (loginBtn == null || loginBtn.indexMenu != 0 || loginBtn.caption == null) {
             return;
         }
-        String caption = norm(loginBtn.a).trim();
+        String caption = norm(loginBtn.caption).trim();
         if (!caption.equals("choi tiep")) {
             return;
         }
 
-        // Normal textbox credentials check (bs.g is username, bs.h is password)
-        if (bs.g == null || bs.h == null) {
+        // Normal textbox credentials check (LoginScreen.tfusername is username, LoginScreen.tfpassword is password)
+        if (LoginScreen.tfusername == null || LoginScreen.tfpassword == null) {
             return;
         }
-        String user = bs.g.j();
-        String pass = bs.h.j();
+        String user = LoginScreen.tfusername.getText();
+        String pass = LoginScreen.tfpassword.getText();
         if (user == null || user.trim().length() == 0 || pass == null || pass.trim().length() == 0) {
             // Special credential mode or empty normal fields: FAIL_CLOSED
             return;
@@ -4081,24 +4144,24 @@ public final class Zeus {
         }
 
         // Final complete live LoginScreen routing and credential revalidation before accounting and dispatch
-        if (fu.a != fu.b || fu.b == null || fu.s != null || fu.t != null
-                || fu.p == null || fu.p.a || d.b
-                || fu.b.ab != loginBtn || loginBtn.e != 0 || loginBtn.a == null
-                || !norm(loginBtn.a).trim().equals("choi tiep")
-                || bs.g == null || bs.h == null) {
+        if (GameCanvas.currentScreen != GameCanvas.login || GameCanvas.login == null || GameCanvas.currentDialog != null || GameCanvas.subDialog != null
+                || GameCanvas.menu2 == null || GameCanvas.menu2.isShowMenu || ChatTextField.isShow
+                || GameCanvas.login.right != loginBtn || loginBtn.indexMenu != 0 || loginBtn.caption == null
+                || !norm(loginBtn.caption).trim().equals("choi tiep")
+                || LoginScreen.tfusername == null || LoginScreen.tfpassword == null) {
             return;
         }
-        String liveUser = bs.g.j();
-        String livePass = bs.h.j();
+        String liveUser = LoginScreen.tfusername.getText();
+        String livePass = LoginScreen.tfpassword.getText();
         if (liveUser == null || liveUser.trim().length() == 0
                 || livePass == null || livePass.trim().length() == 0) {
             return;
         }
 
         // Deduplicated diagnostics fingerprint (non-sensitive action identity only: no username/password)
-        reconnectLoginLastFingerprint = caption + "|" + loginBtn.e;
+        reconnectLoginLastFingerprint = caption + "|" + loginBtn.indexMenu;
 
-        // Action accounting MUST be armed before loginBtn.a() dispatch
+        // Action accounting MUST be armed before loginBtn.perform() dispatch
         reconnectLoginAttempts++;
         reconnectLoginLastActionAt = now;
         if (reconnectLoginAttempts >= RC_LOGIN_MAX_ACTIONS) {
@@ -4107,11 +4170,11 @@ public final class Zeus {
 
         trace("RECONNECT login action try=" + reconnectLoginAttempts
                 + " max=" + RC_LOGIN_MAX_ACTIONS
-                + " btn=" + clean(loginBtn.a)
-                + " cmd=" + loginBtn.e
+                + " btn=" + clean(loginBtn.caption)
+                + " cmd=" + loginBtn.indexMenu
                 + (reconnectLoginBackoffUntil > 0L ? " backoffMs=" + RC_LOGIN_BACKOFF_MS : ""));
 
-        loginBtn.a();
+        loginBtn.perform();
     }
 
     /**
@@ -4120,16 +4183,16 @@ public final class Zeus {
      * Does NOT require alive(), absence of captcha, or absence of non-disconnect dialog.
      */
     private static boolean reconnectWorldReady() {
-        return fu.a == fu.c && cn.g != null && mapStable();
+        return GameCanvas.currentScreen == GameCanvas.game && GameScreen.player != null && mapStable();
     }
 
     /**
      * Ticked from tick() after sessionTick() and before auth().
-     * A transient fu.a == null pauses observation without resetting the active episode.
+     * A transient GameCanvas.currentScreen == null pauses observation without resetting the active episode.
      */
     private static void reconnectSupervisorTick() {
         try {
-            long now = dx.a();
+            long now = mSystem.currentTimeMillis();
 
             // Clock rollback defensive re-anchor
             if (now < reconnectStartedAt) {
@@ -4191,7 +4254,7 @@ public final class Zeus {
             }
 
             // ACTIVE EPISODE HANDLING
-            if (fu.a == null) {
+            if (GameCanvas.currentScreen == null) {
                 // Transient null-screen pauses observation; does NOT reset episode
                 return;
             }
@@ -4230,15 +4293,15 @@ public final class Zeus {
             int targetState;
             if (strongDisconnect) {
                 targetState = RC_NATIVE_WAIT;
-            } else if (fu.a == fu.d) {
+            } else if (GameCanvas.currentScreen == GameCanvas.load) {
                 targetState = RC_LOADING;
-            } else if (fu.a == fu.b && fu.t == fu.g) {
+            } else if (GameCanvas.currentScreen == GameCanvas.login && GameCanvas.subDialog == GameCanvas.msgchat) {
                 targetState = RC_SERVER;
-            } else if (fu.a == fu.b) {
+            } else if (GameCanvas.currentScreen == GameCanvas.login) {
                 targetState = RC_LOGIN;
-            } else if (fu.a == fu.i) {
+            } else if (GameCanvas.currentScreen == GameCanvas.selectChar) {
                 targetState = RC_CHARACTER;
-            } else if (fu.a == fu.c) {
+            } else if (GameCanvas.currentScreen == GameCanvas.game) {
                 targetState = RC_WORLD_SETTLE;
             } else {
                 targetState = RC_OTHER;
@@ -4303,18 +4366,18 @@ public final class Zeus {
      * Validates that the dialog has exactly one button and that it is an acknowledge/close button.
      * Never confirms single buttons with "Đồng ý" (dong y) or multi-button choice dialogs.
      */
-    private static bt findDismissButton(et buttons) {
-        if (buttons == null || buttons.c() != 1) {
+    private static iCommand findDismissButton(mVector buttons) {
+        if (buttons == null || buttons.size() != 1) {
             return null;
         }
-        Object entry = buttons.a(0);
-        if (!(entry instanceof bt)) {
+        Object entry = buttons.elementAt(0);
+        if (!(entry instanceof iCommand)) {
             return null;
         }
-        bt btn = (bt) entry;
-        String cap = norm(btn.a).trim();
+        iCommand btn = (iCommand) entry;
+        String cap = norm(btn.caption).trim();
         if (cap.equals("dong") || cap.equals("ok") || cap.equals("dong tab nay")
-                || cap.equals("tro ve") || cap.equals("da hieu")) {
+                || cap.equals("tro ve") || cap.equals("MainDialog hieu")) {
             return btn;
         }
         return null;
@@ -4326,20 +4389,20 @@ public final class Zeus {
      * Unknown or dangerous dialogs fail closed, remain untouched, and emit deduplicated trace evidence.
      */
     private static void dialogRecovery() {
-        if (fu.s == null) {
+        if (GameCanvas.currentDialog == null) {
             if (dialogStableTicks > 0 || dialogLastFingerprint.length() > 0) {
                 dialogLastFingerprint = "";
                 dialogStableTicks = 0;
                 dialogTries = 0;
             }
             if (enhOwnsResultDialog && enhOwnsForgeScreen && isForgeScreenOpen()
-                    && fu.p != null && fu.p.a && fr.d == 1) {
+                    && GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu && Menu2.isNPCMenu == 1) {
                 if (dialogTries < DIALOG_MAX_TRIES) {
                     ++dialogTries;
-                    trace("DIALOG owned enhancement fu.p notification dismissed try=" + dialogTries);
-                    fu.p.f();
+                    trace("DIALOG owned enhancement GameCanvas.menu2 notification dismissed try=" + dialogTries);
+                    GameCanvas.menu2.doCloseMenu();
                     enhOwnsResultDialog = false;
-                    fu.m();
+                    GameCanvas.clearKeyHold();
                     if (isEnhancementStateTerminal(enhState)) {
                         cleanEnhancementRouting();
                     }
@@ -4347,14 +4410,14 @@ public final class Zeus {
             }
             return;
         }
-        if (!(fu.s instanceof ah)) {
+        if (!(GameCanvas.currentDialog instanceof MsgDialog)) {
             return;
         }
-        ah dialog = (ah) fu.s;
+        MsgDialog dialog = (MsgDialog) GameCanvas.currentDialog;
         String rawText = dialogText(dialog);
         String text = norm(rawText);
-        et buttons = dialog.C;
-        int btnCount = (buttons != null) ? buttons.c() : 0;
+        mVector buttons = dialog.cmdList;
+        int btnCount = (buttons != null) ? buttons.size() : 0;
 
         String fingerprint = text + "|" + btnCount;
         if (fingerprint.equals(dialogLastFingerprint)) {
@@ -4371,13 +4434,13 @@ public final class Zeus {
         }
 
         boolean allowlisted = isAllowlistedInformational(text);
-        bt dismissBtn = allowlisted ? findDismissButton(buttons) : null;
+        iCommand dismissBtn = allowlisted ? findDismissButton(buttons) : null;
 
         if (dismissBtn != null) {
             if (dialogTries < DIALOG_MAX_TRIES) {
                 ++dialogTries;
                 trace("DIALOG dismissed try=" + dialogTries + " text=" + clean(text));
-                dismissBtn.a();
+                dismissBtn.perform();
             }
         } else {
             // Unknown or non-dismissible dialog: fail closed and emit deduplicated diagnostic trace
@@ -4385,11 +4448,11 @@ public final class Zeus {
                 dialogLastTracedFingerprint = fingerprint;
                 StringBuffer caps = new StringBuffer();
                 if (buttons != null) {
-                    for (int i = 0; i < buttons.c(); i++) {
-                        Object b = buttons.a(i);
-                        if (b instanceof bt) {
+                    for (int i = 0; i < buttons.size(); i++) {
+                        Object b = buttons.elementAt(i);
+                        if (b instanceof iCommand) {
                             if (caps.length() > 0) caps.append(',');
-                            caps.append(clean(((bt) b).a));
+                            caps.append(clean(((iCommand) b).caption));
                         }
                     }
                 }
@@ -4408,11 +4471,11 @@ public final class Zeus {
     //
     //   1. A teleport stone. Server does not distance-check opcode 23 — 618 px and 882 px both
     //      returned a menu — so this never walks to the stone. It sends the same opcode the
-    //      client's own ez.k() sends, reads the destinations the server itself names, and picks
+    //      client's own ez.GiaoTiep() sends, reads the destinations the server itself names, and picks
     //      the one that leaves the least walking. KnightMod's approach loop and its lag counters
     //      are not ported: they solved a problem that turned out not to exist.
     //   2. Walking out through a map exit. The client is handed every exit of the current map,
-    //      with the destination map's NAME, in the map-load packet (cs.a). So the only surveyed
+    //      with the destination map's NAME, in the map-load packet (LoadMap.vecPointChange). So the only surveyed
     //      data this needs is which maps border which — the client has no such table.
     //
     // Everything else is refused rather than guessed: an unroutable destination stops and says so
@@ -4492,9 +4555,9 @@ public final class Zeus {
         travelWait = 0;
         travelWhy = 0;
         travelState = (goal() >= 0) ? TV_IDLE : TV_OFF;
-        bq.m = false;
-        if (cn.g != null) {
-            cn.g.cO = null;
+        Player.isLockKey = false;
+        if (GameScreen.player != null) {
+            GameScreen.player.posTransRoad = null;
         }
     }
 
@@ -4533,7 +4596,7 @@ public final class Zeus {
                 return;
             }
             if (!inGame() || !sceneReady() || !alive() || captcha()
-                    || cn.g == null || fu.q == null) {
+                    || GameScreen.player == null || GameCanvas.loadmap == null) {
                 return;             // keep the intent; a load screen is not a failure
             }
             // Deliberately NOT ready(): that requires no dialog, and an open menu is exactly the
@@ -4542,7 +4605,7 @@ public final class Zeus {
             if (travelState != TV_STONE_WAIT && (!gameReady() || !mapStable())) {
                 return;
             }
-            int here = fu.q.d;
+            int here = GameCanvas.loadmap.idMap;
             if (here != travelMapSeen) {
                 // A new map resets the per-map attempts, and counts a hop. The hop cap is what
                 // stops a two-map loop from running until the operator notices.
@@ -4560,9 +4623,9 @@ public final class Zeus {
                 travelLastY = Integer.MIN_VALUE;
                 // Any route from the previous map is void, and the movement lock outlives it. Left
                 // set, canMove() stays false forever and both travel and attack silently stop.
-                bq.m = false;
-                if (cn.g != null) {
-                    cn.g.cO = null;
+                Player.isLockKey = false;
+                if (GameScreen.player != null) {
+                    GameScreen.player.posTransRoad = null;
                 }
                 if (!isInitialSessionMap && travelState != TV_OFF && travelState != TV_ARRIVED) {
                     ++travelHops;
@@ -4617,12 +4680,12 @@ public final class Zeus {
             // would sit in TV_WALK forever on a map whose exit the pathfinder cannot reach, and the
             // tool would show "travelling" with nothing happening.
             if (travelState == TV_WALK) {
-                if (cn.g.aZ == travelLastX && cn.g.ba == travelLastY) {
+                if (GameScreen.player.x == travelLastX && GameScreen.player.y == travelLastY) {
                     ++travelStallTicks;
                 } else {
                     travelStallTicks = 0;
-                    travelLastX = cn.g.aZ;
-                    travelLastY = cn.g.ba;
+                    travelLastX = GameScreen.player.x;
+                    travelLastY = GameScreen.player.y;
                 }
                 if (travelStallTicks > 150) {
                     travelStop(2, "stalled walking on map " + here);
@@ -4671,22 +4734,22 @@ public final class Zeus {
             }
             return false;
         }
-        if (cn.j == null) {
+        if (GameScreen.Vecplayers == null) {
             return false;
         }
-        fa stone = null;
-        for (int i = 0; i < cn.j.c(); i++) {
-            Object entry = cn.j.a(i);
-            if (!(entry instanceof fa)) {
+        MainObject stone = null;
+        for (int i = 0; i < GameScreen.Vecplayers.size(); i++) {
+            Object entry = GameScreen.Vecplayers.elementAt(i);
+            if (!(entry instanceof MainObject)) {
                 continue;
             }
-            fa candidate = (fa) entry;
+            MainObject candidate = (MainObject) entry;
             // Matched by name: a map can carry more than one stone and their cu differs per region,
             // so cu identifies which stone this is rather than what it is.
-            if (candidate.cv != 2 || norm(candidate.cC).indexOf("dich chuyen") < 0) {
+            if (candidate.typeObject != 2 || norm(candidate.name).indexOf("dich chuyen") < 0) {
                 continue;
             }
-            if (candidate.cu == travelStoneAsked) {
+            if (candidate.ID == travelStoneAsked) {
                 continue;           // already asked this one on this map; try the other
             }
             stone = candidate;
@@ -4695,18 +4758,18 @@ public final class Zeus {
         if (stone == null) {
             return false;
         }
-        travelStoneAsked = stone.cu;
+        travelStoneAsked = stone.ID;
         ++travelStoneTried;
         travelMenu = null;
         travelMenuNpc = Integer.MIN_VALUE;
         try {
-            q.a().a((byte) stone.cu);
+            GlobalService.gI().chat_npc((byte) stone.ID);
         } catch (Throwable t) {
             return false;
         }
         travelState = TV_STONE_WAIT;
         travelWait = 20;            // ~20 ticks for the reply; the menu usually lands well inside
-        trace("TRAVEL asked stone cu=" + stone.cu + " on map " + here);
+        trace("TRAVEL asked stone cu=" + stone.ID + " on map " + here);
         return true;
     }
 
@@ -4736,7 +4799,7 @@ public final class Zeus {
         travelMenu = null;
         travelMenuNpc = Integer.MIN_VALUE;
         int dest = goal();
-        int hereScore = mapDistance(fu.q.d, dest);
+        int hereScore = mapDistance(GameCanvas.loadmap.idMap, dest);
         int best = -1;
         int bestScore = Integer.MAX_VALUE;
         for (int i = 0; i < labels.length; i++) {
@@ -4764,8 +4827,8 @@ public final class Zeus {
                 + " -> " + bestScore);
         try {
             // The idNPC/idMenu pair the server itself sent, not an assumed zero: this is the same
-            // packet fr.a(2, _) builds when the operator taps the row.
-            q.a().b((short) npc, (byte) menuId, (byte) best);
+            // packet Menu2.a(2, _) builds when the operator taps the row.
+            GlobalService.gI().Dynamic_Menu((short) npc, (byte) menuId, (byte) best);
         } catch (Throwable t) {
             travelCloseMenu();
             travelStop(3, "stone select failed");
@@ -4781,8 +4844,8 @@ public final class Zeus {
     /** Dismisses a menu the way its own Back button does. */
     private static void travelCloseMenu() {
         try {
-            if (fu.p != null && fu.p.a) {
-                fu.p.f();
+            if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
+                GameCanvas.menu2.doCloseMenu();
             }
         } catch (Throwable t) {
             // A menu that will not close is not worth stalling travel over.
@@ -4797,7 +4860,7 @@ public final class Zeus {
      * Walks out through the exit that leads to the next map on the route.
      *
      * The exit list and the destination names in it are the server's, delivered with the map
-     * (cs.a, "LoadMap vecPointChange"), so no exit coordinates are surveyed here. The one surveyed
+     * (LoadMap.vecPointChange, "LoadMap vecPointChange"), so no exit coordinates are surveyed here. The one surveyed
      * thing is which maps border which, because the client carries no such table.
      */
     private static void travelWalk(int here) {
@@ -4813,24 +4876,24 @@ public final class Zeus {
             return;
         }
         String needle = norm(want);
-        if (cs.a == null) {
+        if (LoadMap.vecPointChange == null) {
             return;
         }
-        for (int i = 0; i < cs.a.c(); i++) {
-            Object entry = cs.a.a(i);
-            if (!(entry instanceof eo)) {
+        for (int i = 0; i < LoadMap.vecPointChange.size(); i++) {
+            Object entry = LoadMap.vecPointChange.elementAt(i);
+            if (!(entry instanceof Point)) {
                 continue;
             }
-            eo gate = (eo) entry;
-            if (gate.t == null || norm(gate.t).indexOf(needle) < 0) {
+            Point gate = (Point) entry;
+            if (gate.name == null || norm(gate.name).indexOf(needle) < 0) {
                 continue;
             }
             if (travelState != TV_WALK) {
-                trace("TRAVEL walk to map " + hop + " via " + clean(gate.t)
-                        + " at " + gate.a + "," + gate.b);
+                trace("TRAVEL walk to map " + hop + " via " + clean(gate.name)
+                        + " at " + gate.x + "," + gate.y);
             }
             travelState = TV_WALK;
-            travelMove(here, gate.a, gate.b);
+            travelMove(here, gate.x, gate.y);
             return;
         }
         travelStop(2, "map " + here + " has no exit named " + clean(want));
@@ -4916,20 +4979,20 @@ public final class Zeus {
             return;
         }
         try {
-            short[] path = fu.c.a(goX / 24, goY / 24, cn.g.aZ / 24, cn.g.ba / 24, 500);
+            short[] path = GameCanvas.game.updateFindRoad(goX / 24, goY / 24, GameScreen.player.x / 24, GameScreen.player.y / 24, 500);
             if (path == null || path.length > 500) {
                 travelStallTicks += 4;
                 return;
             }
-            cn.g.cO = path;
-            cn.g.cJ = 0;
-            cn.g.cm = 0;
-            cn.g.cn = 0;
-            cn.g.bg = cn.g.aZ;
-            cn.g.bh = cn.g.ba;
-            bq.m = true;
+            GameScreen.player.posTransRoad = path;
+            GameScreen.player.countAutoMove = 0;
+            GameScreen.player.xStopMove = 0;
+            GameScreen.player.yStopMove = 0;
+            GameScreen.player.toX = GameScreen.player.x;
+            GameScreen.player.toY = GameScreen.player.y;
+            Player.isLockKey = true;
         } catch (Throwable t) {
-            bq.m = false;
+            Player.isLockKey = false;
             travelStallTicks += 4;
         }
     }
@@ -4937,7 +5000,7 @@ public final class Zeus {
     /**
      * Declares the walk over and clears every field that means "still moving".
      *
-     * `cO` alone is not enough. `au.java:187` only drops `cG` back to 0 once **both** `bc` and `bd`
+     * `cO` alone is not enough. `MainMonster.java:187` only drops `cG` back to 0 once **both** `bc` and `bd`
      * are zero, so a leftover pixel offset keeps the client in its walking state and every later step
      * is refused in silence — no error, nothing in a trace, just a character that never moves again.
      * `bg`/`bh` are pinned to where the character actually is for the same reason: a stale step target
@@ -4947,18 +5010,18 @@ public final class Zeus {
      * "arrived" at a distance the client still considers travelling.
      */
     private static boolean travelArrive(int x, int y, int tolerance) {
-        if (cn.g == null) {
+        if (GameScreen.player == null) {
             return false;
         }
-        if (abs(cn.g.aZ - x) + abs(cn.g.ba - y) > tolerance) {
+        if (abs(GameScreen.player.x - x) + abs(GameScreen.player.y - y) > tolerance) {
             return false;
         }
-        bq.m = false;
-        cn.g.cO = null;
-        cn.g.bg = cn.g.aZ;
-        cn.g.bh = cn.g.ba;
-        cn.g.bc = 0;
-        cn.g.bd = 0;
+        Player.isLockKey = false;
+        GameScreen.player.posTransRoad = null;
+        GameScreen.player.toX = GameScreen.player.x;
+        GameScreen.player.toY = GameScreen.player.y;
+        GameScreen.player.vx = 0;
+        GameScreen.player.vy = 0;
         return true;
     }
 
@@ -5122,8 +5185,8 @@ public final class Zeus {
     /** The client's own map-name table, plus the eight ids it does not cover. */
     private static String mapName(int id) {
         try {
-            if (id >= 0 && df.gE != null && id < df.gE.length) {
-                String name = df.gE[id];
+            if (id >= 0 && T.mapName != null && id < T.mapName.length) {
+                String name = T.mapName[id];
                 return name != null && name.length() > 0 ? name : null;
             }
         } catch (Throwable t) {
@@ -5145,7 +5208,7 @@ public final class Zeus {
     /**
      * Resolves a menu label to a map id, or −1.
      *
-     * Exact-after-normalising first, then containment, because the stone's labels and `df.gE` differ
+     * Exact-after-normalising first, then containment, because the stone's labels and `T.mapName` differ
      * in case and diacritics but not in wording. Two labels the stone offers — "Chợ nguyên liệu" and
      * "Khu mua bán đặc biệt" — are in no name table this client ships, so −1 is a real answer here
      * and not a bug: those destinations simply cannot be scored, and are skipped.
@@ -5264,11 +5327,11 @@ public final class Zeus {
         enhBlacksmithScanTicks = 0;
         enhForgeOpenTries = 0;
         try {
-            if (enhOwnsResultDialog && enhOwnsForgeScreen && isForgeScreenOpen() && fu.p != null && fu.p.a) {
-                fu.p.f();
+            if (enhOwnsResultDialog && enhOwnsForgeScreen && isForgeScreenOpen() && GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
+                GameCanvas.menu2.doCloseMenu();
             }
             if (enhOwnsForgeScreen && isForgeScreenOpen()) {
-                fu.c.c();
+                GameCanvas.game.Show();
             }
         } catch (Throwable ignored) {
         }
@@ -5365,22 +5428,22 @@ public final class Zeus {
     }
 
     public static void validateEnhancementTarget() {
-        if (bw.V == null) {
+        if (Item.VecInvetoryPlayer == null) {
             enhState = 20; // ITEM_MISSING_OR_CHANGED
             enhErrorMessage = "Bag is empty or null";
             return;
         }
         int matchCount = 0;
-        j matchedItem = null;
+        MainItem matchedItem = null;
         int matchedSlot = -1;
-        int bagCount = bw.V.c();
+        int bagCount = Item.VecInvetoryPlayer.size();
         for (int i = 0; i < bagCount; i++) {
-            Object obj = bw.V.a(i);
-            if (!(obj instanceof j)) {
+            Object obj = Item.VecInvetoryPlayer.elementAt(i);
+            if (!(obj instanceof MainItem)) {
                 continue;
             }
-            j item = (j) obj;
-            if (item.O == enhTemplateId && item.u == enhCategory) {
+            MainItem item = (MainItem) obj;
+            if (item.Id == enhTemplateId && item.ItemCatagory == enhCategory) {
                 matchCount++;
                 if (matchedItem == null) {
                     matchedItem = item;
@@ -5401,23 +5464,23 @@ public final class Zeus {
             return;
         }
         // Exactly 1 match: validate fingerprint and level
-        if (enhBaseName != null && enhBaseName.trim().length() > 0 && matchedItem.i != null) {
-            if (!enhBaseName.equals(matchedItem.i)) {
+        if (enhBaseName != null && enhBaseName.trim().length() > 0 && matchedItem.itemNameExcludeLv != null) {
+            if (!enhBaseName.equals(matchedItem.itemNameExcludeLv)) {
                 enhState = 20; // ITEM_MISSING_OR_CHANGED
-                enhErrorMessage = "Item base name changed: expected " + enhBaseName + ", got " + matchedItem.i;
+                enhErrorMessage = "Item base name changed: expected " + enhBaseName + ", got " + matchedItem.itemNameExcludeLv;
                 enhActiveTargetSlot = -1;
                 return;
             }
         }
-        if (matchedItem.N != enhTier) {
+        if (matchedItem.colorNameItem != enhTier) {
             enhState = 20; // ITEM_MISSING_OR_CHANGED
-            enhErrorMessage = "Item tier changed: expected " + enhTier + ", got " + matchedItem.N;
+            enhErrorMessage = "Item tier changed: expected " + enhTier + ", got " + matchedItem.colorNameItem;
             enhActiveTargetSlot = -1;
             return;
         }
-        if (matchedItem.z != enhExpectedLevel) {
+        if (matchedItem.tier != enhExpectedLevel) {
             enhState = 20; // ITEM_MISSING_OR_CHANGED
-            enhErrorMessage = "Item level changed: expected " + enhExpectedLevel + ", got " + matchedItem.z;
+            enhErrorMessage = "Item level changed: expected " + enhExpectedLevel + ", got " + matchedItem.tier;
             enhActiveTargetSlot = -1;
             return;
         }
@@ -5427,8 +5490,8 @@ public final class Zeus {
             enhActiveTargetSlot = -1;
             return;
         }
-        enhCurrentLevel = matchedItem.z;
-        enhStartLevel = matchedItem.z;
+        enhCurrentLevel = matchedItem.tier;
+        enhStartLevel = matchedItem.tier;
         enhActiveTargetSlot = matchedSlot;
         enhState = 4; // LOCATING_BLACKSMITH
     }
@@ -5444,24 +5507,24 @@ public final class Zeus {
             enhState = 10; // VERIFYING_RESOURCES
             return;
         }
-        if (bw.V == null) {
+        if (Item.VecInvetoryPlayer == null) {
             enhState = 24; // CHARM_MISSING
             enhErrorMessage = "Bag is empty; charm missing";
             return;
         }
-        int bagCount = bw.V.c();
+        int bagCount = Item.VecInvetoryPlayer.size();
         java.util.Vector charmTemplates = new java.util.Vector();
-        j chosenCharm = null;
+        MainItem chosenCharm = null;
         for (int i = 0; i < bagCount; i++) {
-            Object obj = bw.V.a(i);
-            if (!(obj instanceof j)) {
+            Object obj = Item.VecInvetoryPlayer.elementAt(i);
+            if (!(obj instanceof MainItem)) {
                 continue;
             }
-            j item = (j) obj;
-            if (item.u == 7 && item.A == 11) {
-                boolean matchesMode = isSemanticCharm(item.g, item.i, desiredMode);
+            MainItem item = (MainItem) obj;
+            if (item.ItemCatagory == 7 && item.typeMaterial == 11) {
+                boolean matchesMode = isSemanticCharm(item.itemName, item.itemNameExcludeLv, desiredMode);
                 if (matchesMode) {
-                    Integer idObj = new Integer(item.O);
+                    Integer idObj = new Integer(item.Id);
                     if (!charmTemplates.contains(idObj)) {
                         charmTemplates.addElement(idObj);
                     }
@@ -5482,19 +5545,19 @@ public final class Zeus {
             return;
         }
         enhResolvedCharmMode = desiredMode;
-        snapSelectedCharmTemplateId = chosenCharm.O;
+        snapSelectedCharmTemplateId = chosenCharm.Id;
         enhState = 9; // INSERTING_CHARM
     }
 
     public static void verifyEnhancementResources() {
-        int targetLv = (c.l != null) ? c.l.z : enhCurrentLevel;
+        int targetLv = (TabRebuildItem.itemRe != null) ? TabRebuildItem.itemRe.tier : enhCurrentLevel;
         long quotedGold = 0L;
         long quotedGems = 0L;
         byte[] reqMats = null;
-        if (c.k != null && targetLv >= 0 && targetLv < c.k.length && c.k[targetLv] != null) {
-            quotedGold = c.k[targetLv].c;
-            quotedGems = c.k[targetLv].d;
-            reqMats = c.k[targetLv].e;
+        if (TabRebuildItem.dataRebuild != null && targetLv >= 0 && targetLv < TabRebuildItem.dataRebuild.length && TabRebuildItem.dataRebuild[targetLv] != null) {
+            quotedGold = TabRebuildItem.dataRebuild[targetLv].priceCoin;
+            quotedGems = TabRebuildItem.dataRebuild[targetLv].priceGold;
+            reqMats = TabRebuildItem.dataRebuild[targetLv].mValue;
         }
         enhQuotedGoldCost = quotedGold;
         enhQuotedGemCost = quotedGems;
@@ -5506,21 +5569,21 @@ public final class Zeus {
                 enhQuotedMaterialRequirements[i] = reqMats[i];
             }
         }
-        if (cn.g == null) {
+        if (GameScreen.player == null) {
             enhState = 25;
             enhErrorMessage = "Player hero is null";
             return;
         }
         if (enhPaymentType == 0) { // Gold mode
-            if (cn.g.bD < quotedGold) {
+            if (GameScreen.player.coin < quotedGold) {
                 enhState = 25; // INSUFFICIENT_GOLD
-                enhErrorMessage = "Insufficient gold: have " + cn.g.bD + ", need " + quotedGold;
+                enhErrorMessage = "Insufficient gold: have " + GameScreen.player.coin + ", need " + quotedGold;
                 return;
             }
         } else if (enhPaymentType == 1) { // Gem mode
-            if (cn.g.bC < quotedGems) {
+            if (GameScreen.player.gold < quotedGems) {
                 enhState = 26; // INSUFFICIENT_GEMS
-                enhErrorMessage = "Insufficient gems: have " + cn.g.bC + ", need " + quotedGems;
+                enhErrorMessage = "Insufficient gems: have " + GameScreen.player.gold + ", need " + quotedGems;
                 return;
             }
         }
@@ -5528,7 +5591,7 @@ public final class Zeus {
             for (int i = 0; i < reqMats.length; i++) {
                 int required = reqMats[i] & 0xFF;
                 if (required > 0) {
-                    int available = (c.p != null && i < c.p.length) ? c.p[i] : 0;
+                    int available = (TabRebuildItem.numMaterialInven != null && i < TabRebuildItem.numMaterialInven.length) ? TabRebuildItem.numMaterialInven[i] : 0;
                     if (available < required) {
                         enhState = 27; // INSUFFICIENT_MATERIALS
                         enhErrorMessage = "Missing required material index " + i + ": have " + available + ", need " + required;
@@ -5546,20 +5609,20 @@ public final class Zeus {
             enhErrorMessage = "Attempt limit " + enhMaxAttempts + " reached";
             return;
         }
-        if (cn.g != null) {
-            snapGoldBefore = cn.g.bD;
-            snapGemBefore = cn.g.bC;
+        if (GameScreen.player != null) {
+            snapGoldBefore = GameScreen.player.coin;
+            snapGemBefore = GameScreen.player.gold;
         }
-        snapTargetLevelBefore = (c.l != null) ? c.l.z : enhCurrentLevel;
-        if (snapSelectedCharmTemplateId > 0 && bw.V != null) {
+        snapTargetLevelBefore = (TabRebuildItem.itemRe != null) ? TabRebuildItem.itemRe.tier : enhCurrentLevel;
+        if (snapSelectedCharmTemplateId > 0 && Item.VecInvetoryPlayer != null) {
             snapCharmBefore = countItemInBag(snapSelectedCharmTemplateId);
         } else {
             snapCharmBefore = 0L;
         }
-        if (c.p != null) {
+        if (TabRebuildItem.numMaterialInven != null) {
             if (snapMaterialsBefore == null) snapMaterialsBefore = new long[4];
-            for (int i = 0; i < c.p.length && i < snapMaterialsBefore.length; i++) {
-                snapMaterialsBefore[i] = c.p[i];
+            for (int i = 0; i < TabRebuildItem.numMaterialInven.length && i < snapMaterialsBefore.length; i++) {
+                snapMaterialsBefore[i] = TabRebuildItem.numMaterialInven[i];
             }
         }
 
@@ -5598,7 +5661,7 @@ public final class Zeus {
         enhInFlightExecute = true;
 
         try {
-            q.a().b((byte) 2, (short) 0, (byte) enhPaymentType);
+            GlobalService.gI().Rebuild_Item((byte) 2, (short) 0, (byte) enhPaymentType);
             enhState = 13; // WAITING_RESULT
             long now = System.currentTimeMillis();
             enhExecuteStartedAt = now;
@@ -5611,40 +5674,40 @@ public final class Zeus {
     }
 
     public static void settleEnhancementResult() {
-        if (cn.g != null) {
-            long goldDelta = Math.max(0L, snapGoldBefore - cn.g.bD);
+        if (GameScreen.player != null) {
+            long goldDelta = Math.max(0L, snapGoldBefore - GameScreen.player.coin);
             enhActualGoldSpent += goldDelta;
-            snapGoldBefore = cn.g.bD;
+            snapGoldBefore = GameScreen.player.coin;
 
-            long gemDelta = Math.max(0L, snapGemBefore - cn.g.bC);
+            long gemDelta = Math.max(0L, snapGemBefore - GameScreen.player.gold);
             enhActualGemSpent += gemDelta;
-            snapGemBefore = cn.g.bC;
+            snapGemBefore = GameScreen.player.gold;
         }
-        if (snapSelectedCharmTemplateId > 0 && bw.V != null) {
+        if (snapSelectedCharmTemplateId > 0 && Item.VecInvetoryPlayer != null) {
             long charmsLeft = countItemInBag(snapSelectedCharmTemplateId);
             long charmDelta = Math.max(0L, snapCharmBefore - charmsLeft);
             enhActualCharmsSpent += charmDelta;
             snapCharmBefore = charmsLeft;
         }
-        if (c.p != null && snapMaterialsBefore != null) {
+        if (TabRebuildItem.numMaterialInven != null && snapMaterialsBefore != null) {
             if (enhActualMaterialsSpent == null) enhActualMaterialsSpent = new long[4];
-            for (int i = 0; i < c.p.length && i < snapMaterialsBefore.length; i++) {
-                long matDelta = Math.max(0L, snapMaterialsBefore[i] - c.p[i]);
+            for (int i = 0; i < TabRebuildItem.numMaterialInven.length && i < snapMaterialsBefore.length; i++) {
+                long matDelta = Math.max(0L, snapMaterialsBefore[i] - TabRebuildItem.numMaterialInven[i]);
                 enhActualMaterialsSpent[i] += matDelta;
-                snapMaterialsBefore[i] = c.p[i];
+                snapMaterialsBefore[i] = TabRebuildItem.numMaterialInven[i];
             }
         }
         enhAccountingStatus = "SETTLED";
         enhInFlightExecute = false;
 
-        j currentTarget = null;
-        if (bw.V != null) {
-            int bagCount = bw.V.c();
+        MainItem currentTarget = null;
+        if (Item.VecInvetoryPlayer != null) {
+            int bagCount = Item.VecInvetoryPlayer.size();
             for (int i = 0; i < bagCount; i++) {
-                Object obj = bw.V.a(i);
-                if (obj instanceof j) {
-                    j item = (j) obj;
-                    if (item.O == enhTemplateId && item.u == enhCategory) {
+                Object obj = Item.VecInvetoryPlayer.elementAt(i);
+                if (obj instanceof MainItem) {
+                    MainItem item = (MainItem) obj;
+                    if (item.Id == enhTemplateId && item.ItemCatagory == enhCategory) {
                         currentTarget = item;
                         enhActiveTargetSlot = i;
                         break;
@@ -5660,7 +5723,7 @@ public final class Zeus {
             return;
         }
 
-        int newLevel = currentTarget.z;
+        int newLevel = currentTarget.tier;
         enhCurrentLevel = newLevel;
 
         if ("STATE_RECONCILED_SUCCESS".equals(enhSettlementProvenance)) {
@@ -5681,7 +5744,7 @@ public final class Zeus {
             return;
         }
 
-        if (c.C == 3) {
+        if (TabRebuildItem.isNextRebuild == 3) {
             enhLastResult = "SUCCESS";
             if (enhAttemptCount >= enhMaxAttempts) {
                 enhState = 18; // ATTEMPT_LIMIT_REACHED
@@ -5691,7 +5754,7 @@ public final class Zeus {
             return;
         }
 
-        if (c.C == 4) {
+        if (TabRebuildItem.isNextRebuild == 4) {
             if (newLevel == snapTargetLevelBefore) {
                 enhLastResult = "FAILURE_PROTECTED";
                 enhSettlementProvenance = "FAILURE_PROTECTED";
@@ -5720,23 +5783,23 @@ public final class Zeus {
         if (!enhInFlightExecute) {
             return false;
         }
-        if (c.C == 3 || c.C == 4 || c.C == 1 || c.C == 2 || c.C >= 5) {
+        if (TabRebuildItem.isNextRebuild == 3 || TabRebuildItem.isNextRebuild == 4 || TabRebuildItem.isNextRebuild == 1 || TabRebuildItem.isNextRebuild == 2 || TabRebuildItem.isNextRebuild >= 5) {
             return false;
         }
         if (enhRequestId == null || enhRequestId.length() == 0 || !enhRequestId.equals(snapRequestId)) {
             return false;
         }
-        if (bw.V == null) {
+        if (Item.VecInvetoryPlayer == null) {
             return false;
         }
-        int bagCount = bw.V.c();
+        int bagCount = Item.VecInvetoryPlayer.size();
         int matchCount = 0;
-        j matchedItem = null;
+        MainItem matchedItem = null;
         for (int i = 0; i < bagCount; i++) {
-            Object obj = bw.V.a(i);
-            if (obj instanceof j) {
-                j it = (j) obj;
-                if (it.O == snapTemplateId && it.u == snapCategory) {
+            Object obj = Item.VecInvetoryPlayer.elementAt(i);
+            if (obj instanceof MainItem) {
+                MainItem it = (MainItem) obj;
+                if (it.Id == snapTemplateId && it.ItemCatagory == snapCategory) {
                     matchCount++;
                     matchedItem = it;
                 }
@@ -5745,28 +5808,28 @@ public final class Zeus {
         if (matchCount != 1 || matchedItem == null) {
             return false;
         }
-        if (matchedItem.N != snapTier) {
+        if (matchedItem.colorNameItem != snapTier) {
             return false;
         }
-        if (snapBaseName != null && snapBaseName.trim().length() > 0 && matchedItem.i != null) {
-            if (!snapBaseName.equals(matchedItem.i)) {
+        if (snapBaseName != null && snapBaseName.trim().length() > 0 && matchedItem.itemNameExcludeLv != null) {
+            if (!snapBaseName.equals(matchedItem.itemNameExcludeLv)) {
                 return false;
             }
         }
-        if (matchedItem.z != snapTargetLevel) {
+        if (matchedItem.tier != snapTargetLevel) {
             return false;
         }
         if (snapTargetLevelBefore != snapExpectedLevel) {
             return false;
         }
-        if (matchedItem.z != snapExpectedLevel + 1) {
+        if (matchedItem.tier != snapExpectedLevel + 1) {
             return false;
         }
-        if (cn.g == null) {
+        if (GameScreen.player == null) {
             return false;
         }
-        long liveGoldDelta = Math.max(0L, snapGoldBefore - cn.g.bD);
-        long liveGemDelta = Math.max(0L, snapGemBefore - cn.g.bC);
+        long liveGoldDelta = Math.max(0L, snapGoldBefore - GameScreen.player.coin);
+        long liveGemDelta = Math.max(0L, snapGemBefore - GameScreen.player.gold);
 
         if (snapPaymentType == 0) {
             if (liveGoldDelta != snapRecipeGoldCost) {
@@ -5786,10 +5849,10 @@ public final class Zeus {
             return false;
         }
 
-        if (snapRecipeMaterials != null && c.p != null && snapMaterialsBefore != null) {
+        if (snapRecipeMaterials != null && TabRebuildItem.numMaterialInven != null && snapMaterialsBefore != null) {
             for (int i = 0; i < snapRecipeMaterials.length && i < 4; i++) {
                 long required = snapRecipeMaterials[i];
-                long actualAvailable = (i < c.p.length) ? c.p[i] : 0L;
+                long actualAvailable = (i < TabRebuildItem.numMaterialInven.length) ? TabRebuildItem.numMaterialInven[i] : 0L;
                 long actualBefore = (i < snapMaterialsBefore.length) ? snapMaterialsBefore[i] : 0L;
                 long actualMatDelta = Math.max(0L, actualBefore - actualAvailable);
                 if (actualMatDelta != required) {
@@ -5836,36 +5899,36 @@ public final class Zeus {
         return enhState > 0 && enhState < 17 && enhActiveTargetSlot >= 0;
     }
 
-    private static void paintEnhancementHighlight(bx canvas) {
+    private static void paintEnhancementHighlight(mGraphics canvas) {
         if (canvas == null || !isEnhancementHighlightActive()) return;
         try {
-            canvas.a(0xFFCC00); // Amber highlight
+            canvas.setColor(0xFFCC00); // Amber highlight
         } catch (Throwable ignored) {
         }
     }
 
     private static long countItemInBag(int templateId) {
-        if (bw.V == null) return 0L;
+        if (Item.VecInvetoryPlayer == null) return 0L;
         long total = 0L;
-        for (int i = 0; i < bw.V.c(); i++) {
-            Object obj = bw.V.a(i);
-            if (obj instanceof j) {
-                j it = (j) obj;
-                if (it.O == templateId) {
-                    total += it.K > 0 ? it.K : 1;
+        for (int i = 0; i < Item.VecInvetoryPlayer.size(); i++) {
+            Object obj = Item.VecInvetoryPlayer.elementAt(i);
+            if (obj instanceof MainItem) {
+                MainItem it = (MainItem) obj;
+                if (it.Id == templateId) {
+                    total += it.numPotion > 0 ? it.numPotion : 1;
                 }
             }
         }
         return total;
     }
 
-    private static j findBagItem(int templateId, int category) {
-        if (bw.V == null) return null;
-        for (int i = 0; i < bw.V.c(); i++) {
-            Object obj = bw.V.a(i);
-            if (obj instanceof j) {
-                j it = (j) obj;
-                if (it.O == templateId && it.u == category) {
+    private static MainItem findBagItem(int templateId, int category) {
+        if (Item.VecInvetoryPlayer == null) return null;
+        for (int i = 0; i < Item.VecInvetoryPlayer.size(); i++) {
+            Object obj = Item.VecInvetoryPlayer.elementAt(i);
+            if (obj instanceof MainItem) {
+                MainItem it = (MainItem) obj;
+                if (it.Id == templateId && it.ItemCatagory == category) {
                     return it;
                 }
             }
@@ -5873,26 +5936,26 @@ public final class Zeus {
         return null;
     }
 
-    private static fa findBlacksmithNpc() {
-        if (cn.j == null || cn.g == null) {
+    private static MainObject findBlacksmithNpc() {
+        if (GameScreen.Vecplayers == null || GameScreen.player == null) {
             return null;
         }
-        fa best = null;
+        MainObject best = null;
         int bestDistance = Integer.MAX_VALUE;
-        for (int i = 0; i < cn.j.c(); i++) {
-            Object entry = cn.j.a(i);
-            if (!(entry instanceof fa)) {
+        for (int i = 0; i < GameScreen.Vecplayers.size(); i++) {
+            Object entry = GameScreen.Vecplayers.elementAt(i);
+            if (!(entry instanceof MainObject)) {
                 continue;
             }
-            fa candidate = (fa) entry;
-            if (candidate.cv != 2) {
+            MainObject candidate = (MainObject) entry;
+            if (candidate.typeObject != 2) {
                 continue;
             }
-            if (candidate.cC != null) {
-                String n = norm(candidate.cC);
+            if (candidate.name != null) {
+                String n = norm(candidate.name);
                 if (n.indexOf("phap su") >= 0) {
-                    int distance = abs(cn.g.aZ - candidate.aZ) + abs(cn.g.ba - candidate.ba);
-                    if (candidate.cu == -36) {
+                    int distance = abs(GameScreen.player.x - candidate.x) + abs(GameScreen.player.y - candidate.y);
+                    if (candidate.ID == -36) {
                         distance -= 10000;
                     }
                     if (distance < bestDistance) {
@@ -5906,13 +5969,13 @@ public final class Zeus {
     }
 
     private static boolean isForgeScreenOpen() {
-        if (fu.a instanceof ev) {
-            ev pop = (ev) fu.a;
-            if (pop.b != null) {
-                for (int i = 0; i < pop.b.c(); i++) {
-                    Object tab = pop.b.a(i);
-                    if (tab instanceof c) {
-                        return pop.a == i;
+        if (GameCanvas.currentScreen instanceof TabScreenNew) {
+            TabScreenNew pop = (TabScreenNew) GameCanvas.currentScreen;
+            if (pop.VecTabScreen != null) {
+                for (int i = 0; i < pop.VecTabScreen.size(); i++) {
+                    Object tab = pop.VecTabScreen.elementAt(i);
+                    if (tab instanceof TabRebuildItem) {
+                        return pop.selectTab == i;
                     }
                 }
             }
@@ -6347,7 +6410,7 @@ public final class Zeus {
                     break;
 
                 case 2: // WAITING_GAME_READY
-                    if (!inGame() || cn.g == null || cn.j == null) {
+                    if (!inGame() || GameScreen.player == null || GameScreen.Vecplayers == null) {
                         return;
                     }
                     enhState = 3; // VALIDATING_TARGET
@@ -6360,7 +6423,7 @@ public final class Zeus {
                     break;
 
                 case 4: // LOCATING_BLACKSMITH
-                    int here = fu.q != null ? fu.q.d : -1;
+                    int here = GameCanvas.loadmap != null ? GameCanvas.loadmap.idMap : -1;
                     if (here != BLACKSMITH_MAP) {
                         int hop = mapNextHop(here, BLACKSMITH_MAP);
                         if (hop < 0 || mapDistance(here, BLACKSMITH_MAP) < 0 || travelState == TV_BLOCKED) {
@@ -6381,7 +6444,7 @@ public final class Zeus {
                     if (!mapStable() || !gameReady()) {
                         return;
                     }
-                    fa blacksmith = findBlacksmithNpc();
+                    MainObject blacksmith = findBlacksmithNpc();
                     if (blacksmith == null) {
                         enhBlacksmithScanTicks++;
                         if (enhBlacksmithScanTicks > MAX_BLACKSMITH_SCANS) {
@@ -6396,16 +6459,16 @@ public final class Zeus {
                         return;
                     }
                     enhBlacksmithScanTicks = 0;
-                    int dist = abs(cn.g.aZ - blacksmith.aZ) + abs(cn.g.ba - blacksmith.ba);
+                    int dist = abs(GameScreen.player.x - blacksmith.x) + abs(GameScreen.player.y - blacksmith.y);
                     if (dist > 45) {
-                        travelMove(here, blacksmith.aZ, blacksmith.ba);
+                        travelMove(here, blacksmith.x, blacksmith.y);
                         enhState = 5; // APPROACHING_BLACKSMITH
                     } else {
                         enhState = 6; // OPENING_FORGE
                         enhWait = 20;
                         enhForgeOpenTries = 1;
                         try {
-                            q.a().a((byte) blacksmith.cu);
+                            GlobalService.gI().chat_npc((byte) blacksmith.ID);
                         } catch (Throwable t) {
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
@@ -6417,7 +6480,7 @@ public final class Zeus {
                     break;
 
                 case 5: // APPROACHING_BLACKSMITH
-                    fa bs = findBlacksmithNpc();
+                    MainObject bs = findBlacksmithNpc();
                     if (bs == null) {
                         enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                         enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
@@ -6426,13 +6489,13 @@ public final class Zeus {
                         publishEnhancementStatus();
                         return;
                     }
-                    int d = abs(cn.g.aZ - bs.aZ) + abs(cn.g.ba - bs.ba);
+                    int d = abs(GameScreen.player.x - bs.x) + abs(GameScreen.player.y - bs.y);
                     if (d <= 45) {
                         enhState = 6; // OPENING_FORGE
                         enhWait = 20;
                         enhForgeOpenTries = 1;
                         try {
-                            q.a().a((byte) bs.cu);
+                            GlobalService.gI().chat_npc((byte) bs.ID);
                         } catch (Throwable t) {
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
@@ -6441,8 +6504,8 @@ public final class Zeus {
                         }
                         publishEnhancementStatus();
                     } else {
-                        int curMap = fu.q != null ? fu.q.d : 0;
-                        travelMove(curMap, bs.aZ, bs.ba);
+                        int curMap = GameCanvas.loadmap != null ? GameCanvas.loadmap.idMap : 0;
+                        travelMove(curMap, bs.x, bs.y);
                     }
                     break;
 
@@ -6475,12 +6538,12 @@ public final class Zeus {
                         publishEnhancementStatus();
                         return;
                     }
-                    fa bsRetry = findBlacksmithNpc();
+                    MainObject bsRetry = findBlacksmithNpc();
                     if (bsRetry != null) {
                         enhForgeOpenTries++;
                         enhWait = 20;
                         try {
-                            q.a().a((byte) bsRetry.cu);
+                            GlobalService.gI().chat_npc((byte) bsRetry.ID);
                         } catch (Throwable t) {
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
@@ -6508,18 +6571,18 @@ public final class Zeus {
                         publishEnhancementStatus();
                         return;
                     }
-                    if (c.l != null && c.l.O == enhTemplateId) {
+                    if (TabRebuildItem.itemRe != null && TabRebuildItem.itemRe.Id == enhTemplateId) {
                         enhState = 8; // RESOLVING_CHARM
                         publishEnhancementStatus();
                         return;
                     }
-                    j targetItem = findBagItem(enhTemplateId, enhCategory);
+                    MainItem targetItem = findBagItem(enhTemplateId, enhCategory);
                     if (targetItem == null) {
                         enhState = 20;
                         publishEnhancementStatus();
                         return;
                     }
-                    q.a().b((byte) 0, (short) targetItem.O, (byte) targetItem.u);
+                    GlobalService.gI().Rebuild_Item((byte) 0, (short) targetItem.Id, (byte) targetItem.ItemCatagory);
                     enhState = 8; // RESOLVING_CHARM
                     publishEnhancementStatus();
                     break;
@@ -6543,18 +6606,18 @@ public final class Zeus {
                         publishEnhancementStatus();
                         return;
                     }
-                    if (c.m != null && c.m.O == snapSelectedCharmTemplateId) {
+                    if (TabRebuildItem.itemPlus != null && TabRebuildItem.itemPlus.Id == snapSelectedCharmTemplateId) {
                         enhState = 10; // VERIFYING_RESOURCES
                         publishEnhancementStatus();
                         return;
                     }
-                    j charmItem = findBagItem(snapSelectedCharmTemplateId, 7);
+                    MainItem charmItem = findBagItem(snapSelectedCharmTemplateId, 7);
                     if (charmItem == null) {
                         enhState = 24;
                         publishEnhancementStatus();
                         return;
                     }
-                    q.a().b((byte) 0, (short) charmItem.O, (byte) 7);
+                    GlobalService.gI().Rebuild_Item((byte) 0, (short) charmItem.Id, (byte) 7);
                     enhState = 10; // VERIFYING_RESOURCES
                     publishEnhancementStatus();
                     break;
@@ -6574,7 +6637,7 @@ public final class Zeus {
                     break;
 
                 case 13: // WAITING_RESULT
-                    if (c.C == 3) {
+                    if (TabRebuildItem.isNextRebuild == 3) {
                         enhOwnsResultDialog = true;
                         enhResultCode = 3;
                         enhSettlementSource = "RESULT_CODE";
@@ -6585,7 +6648,7 @@ public final class Zeus {
                         publishEnhancementStatus();
                         return;
                     }
-                    if (c.C == 4) {
+                    if (TabRebuildItem.isNextRebuild == 4) {
                         enhOwnsResultDialog = true;
                         enhResultCode = 4;
                         enhSettlementSource = "RESULT_CODE";
@@ -6594,11 +6657,11 @@ public final class Zeus {
                         publishEnhancementStatus();
                         return;
                     }
-                    if (c.C == 1 || c.C == 2 || c.C >= 5) {
+                    if (TabRebuildItem.isNextRebuild == 1 || TabRebuildItem.isNextRebuild == 2 || TabRebuildItem.isNextRebuild >= 5) {
                         enhState = 28; // SERVER_REJECTED
                         enhErrorCode = "SERVER_REJECTED";
-                        enhErrorMessage = "Server rejected enhancement attempt (code=" + c.C + ")";
-                        enhResultCode = c.C;
+                        enhErrorMessage = "Server rejected enhancement attempt (code=" + TabRebuildItem.isNextRebuild + ")";
+                        enhResultCode = TabRebuildItem.isNextRebuild;
                         enhSettlementSource = "RESULT_CODE";
                         enhInFlightExecute = false;
                         cleanEnhancementRouting();
@@ -6695,11 +6758,11 @@ public final class Zeus {
     // changed rather than a second convention beside it.
     //
     // Two facts about server menus drive the whole engine, both recorded above at
-    // {@link #serverMenu}: the selection is `q.a().b(idNPC, idMenu, index)` quoting the pair the
+    // {@link #serverMenu}: the selection is `GlobalService.gI().b(idNPC, idMenu, index)` quoting the pair the
     // SERVER sent, because a server menu's buttons carry no command of their own; and pressing a
-    // button selects whatever is highlighted (`fr.h`), which is private in this build. The second
+    // button selects whatever is highlighted (`Menu2.h`), which is private in this build. The second
     // is why nothing here sets a cursor: the index travels in the packet instead, which is the same
-    // thing the client's own `fr.a(2, _)` sends.
+    // thing the client's own `Menu2.a(2, _)` sends.
 
     /**
      * The nearest NPC whose name matches, or the one carrying the fallback template id.
@@ -6709,32 +6772,32 @@ public final class Zeus {
      * stones' do, so the name is what survives a client update. Nearest by Manhattan, because the
      * client's own reach checks are Manhattan and a mixed metric would call a farther NPC nearer.
      */
-    private static fa dungeonNpc() {
-        if (cn.j == null || cn.g == null) {
+    private static MainObject dungeonNpc() {
+        if (GameScreen.Vecplayers == null || GameScreen.player == null) {
             return null;
         }
-        fa best = null;
-        fa fallback = null;
+        MainObject best = null;
+        MainObject fallback = null;
         int bestDistance = Integer.MAX_VALUE;
-        for (int i = 0; i < cn.j.c(); i++) {
-            Object entry = cn.j.a(i);
-            if (!(entry instanceof fa)) {
+        for (int i = 0; i < GameScreen.Vecplayers.size(); i++) {
+            Object entry = GameScreen.Vecplayers.elementAt(i);
+            if (!(entry instanceof MainObject)) {
                 continue;
             }
-            fa candidate = (fa) entry;
+            MainObject candidate = (MainObject) entry;
             // cv == 2 is an NPC; 0 is a player and 1 a monster.
-            if (candidate.cv != 2) {
+            if (candidate.typeObject != 2) {
                 continue;
             }
-            if (candidate.cC != null && norm(candidate.cC).indexOf(DUNGEON_NPC_NAME) >= 0) {
-                int distance = abs(cn.g.aZ - candidate.aZ) + abs(cn.g.ba - candidate.ba);
+            if (candidate.name != null && norm(candidate.name).indexOf(DUNGEON_NPC_NAME) >= 0) {
+                int distance = abs(GameScreen.player.x - candidate.x) + abs(GameScreen.player.y - candidate.y);
                 if (distance < bestDistance) {
                     bestDistance = distance;
                     best = candidate;
                 }
                 continue;
             }
-            if (fallback == null && candidate.cu == DUNGEON_NPC_CU) {
+            if (fallback == null && candidate.ID == DUNGEON_NPC_CU) {
                 fallback = candidate;
             }
         }
@@ -6744,15 +6807,15 @@ public final class Zeus {
     /**
     /**
      * Source-proven native interaction eligibility from cf.g:2028-2037:
-     * fa.c(npc.aZ, npc.ba, cn.g.aZ, cn.g.ba) <= cn.g.bi
+     * MainObject.getDistance(npc.x, npc.y, GameScreen.player.x, GameScreen.player.y) <= GameScreen.player.wFocus
      * Uses Euclidean distance and player's reach/scan radius bi (default 140px).
      */
-    public static boolean dungeonNpcEligible(fa npc) {
-        if (npc == null || cn.g == null) {
+    public static boolean dungeonNpcEligible(MainObject npc) {
+        if (npc == null || GameScreen.player == null) {
             return false;
         }
-        int reach = cn.g.bi > 0 ? cn.g.bi : 140;
-        return fa.c(npc.aZ, npc.ba, cn.g.aZ, cn.g.ba) <= reach;
+        int reach = GameScreen.player.wFocus > 0 ? GameScreen.player.wFocus : 140;
+        return MainObject.getDistance(npc.x, npc.y, GameScreen.player.x, GameScreen.player.y) <= reach;
     }
 
     /**
@@ -6762,24 +6825,24 @@ public final class Zeus {
      * tick, so this never polls for it — it records the NPC's id, so the ask can be repeated
      * without the entity still being in the scene stream, and hands the tick back.
      */
-    private static boolean dungeonClickNpc(fa npc) {
-        dungeonNpcCu = npc.cu;
+    private static boolean dungeonClickNpc(MainObject npc) {
+        dungeonNpcCu = npc.ID;
         dungeonState = DN_PREPARATION;
         dungeonStep = 0;
         dungeonMenuId = Integer.MIN_VALUE;
         dungeonMenu = null;
         dungeonMenuNpc = Integer.MIN_VALUE;
-        cn.i = npc;
+        GameScreen.ObjFocus = npc;
         try {
-            fa.a(cn.g, npc);
+            MainObject.resetDirection(GameScreen.player, npc);
         } catch (Throwable t) {
         }
         try {
-            cn.g.N();
+            GameScreen.player.resetAction();
         } catch (Throwable t) {
         }
         try {
-            npc.k();
+            npc.GiaoTiep();
         } catch (Throwable t) {
             dungeonState = DN_ROUTING;
             return false;
@@ -6787,7 +6850,7 @@ public final class Zeus {
         dungeonTried = 0;
         dungeonStallTicks = 0;
         dungeonWait = 40;
-        trace("DUNGEON asked NPC cu=" + npc.cu + " at " + npc.aZ + "," + npc.ba);
+        trace("DUNGEON asked NPC cu=" + npc.ID + " at " + npc.x + "," + npc.y);
         return true;
     }
 
@@ -6796,16 +6859,16 @@ public final class Zeus {
         if (dungeonNpcCu == -1) {
             return false;
         }
-        fa npc = dungeonNpc();
-        if (npc != null && cn.g != null) {
-            cn.i = npc;
+        MainObject npc = dungeonNpc();
+        if (npc != null && GameScreen.player != null) {
+            GameScreen.ObjFocus = npc;
             try {
-                fa.a(cn.g, npc);
-                cn.g.N();
+                MainObject.resetDirection(GameScreen.player, npc);
+                GameScreen.player.resetAction();
             } catch (Throwable t) {
             }
             try {
-                npc.k();
+                npc.GiaoTiep();
                 dungeonMenu = null;
                 dungeonMenuNpc = Integer.MIN_VALUE;
                 dungeonWait = 40;
@@ -6843,70 +6906,53 @@ public final class Zeus {
         return -1;
     }
 
-    static int getFrIndex(fr menu) {
+    static int getFrIndex(Menu2 menu) {
         if (menu == null) {
             return -1;
         }
-        try {
-            java.lang.reflect.Field f = fr.class.getDeclaredField("h");
-            f.setAccessible(true);
-            return f.getInt(menu);
-        } catch (Throwable t) {
-            return -1;
-        }
+        return menu.menuSelectedItem;
     }
 
-    static void setFrIndex(fr menu, int index) {
+    static void setFrIndex(Menu2 menu, int index) {
         if (menu == null) {
             return;
         }
-        try {
-            java.lang.reflect.Field f = fr.class.getDeclaredField("h");
-            f.setAccessible(true);
-            f.setInt(menu, index);
-        } catch (Throwable t) {
-        }
+        menu.menuSelectedItem = index;
     }
 
-    static et getFrItems(fr menu) {
+    static mVector getFrItems(Menu2 menu) {
         if (menu == null) {
             return null;
         }
-        try {
-            java.lang.reflect.Field f = fr.class.getDeclaredField("g");
-            f.setAccessible(true);
-            return (et) f.get(menu);
-        } catch (Throwable t) {
-            return null;
-        }
+        return menu.menuItems;
     }
 
-    static bt findGiaoTiepInDialog(da dialog) {
+    static iCommand findGiaoTiepInDialog(MainDialog dialog) {
         if (dialog == null) {
             return null;
         }
         try {
-            if (dialog.ab != null && dialog.ab.a != null) {
-                String s = norm(dialog.ab.a);
+            if (dialog.right != null && dialog.right.caption != null) {
+                String s = norm(dialog.right.caption);
                 if (s.indexOf("giao tiep") >= 0 && s.indexOf("giao dich") < 0) {
-                    return dialog.ab;
+                    return dialog.right;
                 }
             }
-            if (dialog.Z != null && dialog.Z.a != null) {
-                String s = norm(dialog.Z.a);
+            if (dialog.left != null && dialog.left.caption != null) {
+                String s = norm(dialog.left.caption);
                 if (s.indexOf("giao tiep") >= 0 && s.indexOf("giao dich") < 0) {
-                    return dialog.Z;
+                    return dialog.left;
                 }
             }
-            if (dialog instanceof ah) {
-                et buttons = ((ah) dialog).C;
+            if (dialog instanceof MsgDialog) {
+                mVector buttons = ((MsgDialog) dialog).cmdList;
                 if (buttons != null) {
-                    for (int i = 0; i < buttons.c(); i++) {
-                        Object entry = buttons.a(i);
-                        if (entry instanceof bt) {
-                            bt btn = (bt) entry;
-                            if (btn.a != null) {
-                                String s = norm(btn.a);
+                    for (int i = 0; i < buttons.size(); i++) {
+                        Object entry = buttons.elementAt(i);
+                        if (entry instanceof iCommand) {
+                            iCommand btn = (iCommand) entry;
+                            if (btn.caption != null) {
+                                String s = norm(btn.caption);
                                 if (s.indexOf("giao tiep") >= 0 && s.indexOf("giao dich") < 0) {
                                     return btn;
                                 }
@@ -6921,10 +6967,10 @@ public final class Zeus {
     }
 
     /**
-     * Identifies whether a dialog in fu.s is an active NPC conversation/story dialog for Pho Chi Huy,
+     * Identifies whether a dialog in GameCanvas.currentDialog is an active NPC conversation/story dialog for Pho Chi Huy,
      * matching the KnightMod V2 bytecode contract (v2_dungeon.java:369).
      */
-    static boolean isNpcSpeechDialog(da dialog) {
+    static boolean isNpcSpeechDialog(MainDialog dialog) {
         if (dialog == null) {
             return false;
         }
@@ -6950,9 +6996,9 @@ public final class Zeus {
     /**
      * Picks a row of the captured menu and forgets the capture.
      *
-     * Invokes native server menu action handler fr.a(2, 0) when the active client menu is open,
+     * Invokes native server menu action handler Menu2.a(2, 0) when the active client menu is open,
      * allowing the native client to manage network dispatch and panel closing side-effects.
-     * Falls back to raw network dispatch if fr is not active (mocked test harness).
+     * Falls back to raw network dispatch if Menu2 is not active (mocked test harness).
      */
     private static boolean dungeonSelect(int index) {
         int npc = dungeonMenuNpc;
@@ -6961,13 +7007,13 @@ public final class Zeus {
         dungeonMenuItems = null;
         dungeonMenuNpc = Integer.MIN_VALUE;
         try {
-            if (fu.p != null && fu.p.a) {
-                setFrIndex(fu.p, index);
-                fu.p.a(2, 0);
+            if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
+                setFrIndex(GameCanvas.menu2, index);
+                GameCanvas.menu2.commandPointer(2, 0);
                 return true;
             }
             // Fallback for mocked test harness
-            q.a().b((short) npc, (byte) menuId, (byte) index);
+            GlobalService.gI().Dynamic_Menu((short) npc, (byte) menuId, (byte) index);
         } catch (Throwable t) {
             return false;
         }
@@ -6977,8 +7023,8 @@ public final class Zeus {
     /** Drops the panel this module opened. A menu left up blocks every module that gates on ready(). */
     private static void dungeonCloseMenu() {
         try {
-            if (fu.p != null && fu.p.a) {
-                fu.p.f();
+            if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
+                GameCanvas.menu2.doCloseMenu();
             }
         } catch (Throwable t) {
             // A menu that will not close is not worth stalling the trip over.
@@ -6992,16 +7038,16 @@ public final class Zeus {
      * Whether the character is inside the dungeon.
      *
      * The map id first and the client's own name as confirmation, because the id is survey data
-     * about this server while the name comes from `df.gE` — index 48 is "Ngã tư tử thần", which
+     * about this server while the name comes from `T.mapName` — index 48 is "Ngã tư tử thần", which
      * {@link #norm} reduces to "nga tu tu than". No other map in that table normalises to contain
      * "nga tu", so the name cannot false-positive onto a different map.
      */
     private static boolean dungeonInDungeon() {
-        if (fu.q == null) {
+        if (GameCanvas.loadmap == null) {
             return false;
         }
-        return fu.q.d == DUNGEON_MAP
-                || norm(mapName(fu.q.d)).indexOf(DUNGEON_NAME) >= 0;
+        return GameCanvas.loadmap.idMap == DUNGEON_MAP
+                || norm(mapName(GameCanvas.loadmap.idMap)).indexOf(DUNGEON_NAME) >= 0;
     }
 
     /** Time zone identifier explicitly used for all dungeon scheduling calculations. */
@@ -7115,16 +7161,16 @@ public final class Zeus {
     // Two things this module deliberately does NOT do, so the gaps are stated rather than implied:
     //
     //   - It does not fight inside the dungeon and does not widen the scan radius. `attack()`
-    //     releases the combat fields whenever `fu.q.d != atkMap`, and `combatOn()` writes
-    //     `cn.g.bi = atkRadius` on every tick while combat is armed — so a radius set here would be
+    //     releases the combat fields whenever `GameCanvas.loadmap.idMap != atkMap`, and `combatOn()` writes
+    //     `GameScreen.player.wFocus = atkRadius` on every tick while combat is armed — so a radius set here would be
     //     overwritten later in the same tick, and making ATTACK fight on map 48 would mean editing
     //     another module's map gate. Fighting in the dungeon is therefore the operator arming a
     //     spot on map 48 with `atk.radius` set wide, which already works and needs no new code.
     //   - It does not exclude the "thien thach" monsters. Zeus never selects a target: `combatOn()`
-    //     sets `bq.W`, a one-shot "catch the nearest target" flag the CLIENT consumes, and `cn.i`
+    //     sets `Player.isCurAutoFire`, a one-shot "catch the nearest target" flag the CLIENT consumes, and `GameScreen.ObjFocus`
     //     is client-owned — the only place this file writes it is `combatOff()`, nulling it to
     //     release. Honouring the exclusion would mean intercepting the client's own pick, which
-    //     would fight `bq.W` rather than serve it. Recorded here as a known gap.
+    //     would fight `Player.isCurAutoFire` rather than serve it. Recorded here as a known gap.
 
     /** Dungeon states. The same discipline as {@link #TV_OFF}: anything else is a reason to stop. */
     public static final int DN_OFF = 0;
@@ -7223,7 +7269,7 @@ public final class Zeus {
 
     /** Labels and item collection of the server menu currently open, captured by {@link #serverMenu}. Its own trio: never TRAVEL's. */
     static String[] dungeonMenu = null;
-    static et dungeonMenuItems = null;
+    static mVector dungeonMenuItems = null;
     static int dungeonMenuNpc = Integer.MIN_VALUE;
     static int dungeonMenuId = 0;
 
@@ -7260,31 +7306,31 @@ public final class Zeus {
             atkFarmOnArrival = dungeonUserAtkFarmOnArrival;
             dungeonCombatBackedUp = false;
         }
-        if (cn.g != null) {
-            cn.g.bi = NATIVE_RADIUS;
+        if (GameScreen.player != null) {
+            GameScreen.player.wFocus = NATIVE_RADIUS;
         }
-        bq.o = (byte) -1;
-        bq.Y = false;
-        bq.W = false;
-        cn.i = null;
+        Player.isAutoFire = (byte) -1;
+        Player.isAutoHPMP = false;
+        Player.isCurAutoFire = false;
+        GameScreen.ObjFocus = null;
     }
 
     /**
      * Normalizes entity name and checks whether it contains 'thien thach'.
      */
-    public static boolean isMeteorTarget(fa target) {
-        if (target == null || target.cC == null) {
+    public static boolean isMeteorTarget(MainObject target) {
+        if (target == null || target.name == null) {
             return false;
         }
-        String name = normSemantic(target.cC);
+        String name = normSemantic(target.name);
         return name.indexOf("thien thach") >= 0;
     }
 
     /**
      * Validates whether an entity is a live, valid non-meteor monster target.
      */
-    public static boolean isValidDungeonTarget(fa target) {
-        if (target == null || target.cv != 1 || target.bs <= 0 || target.cG == 4) {
+    public static boolean isValidDungeonTarget(MainObject target) {
+        if (target == null || target.typeObject != 1 || target.hp <= 0 || target.Action == 4) {
             return false;
         }
         return !isMeteorTarget(target);
@@ -7293,22 +7339,22 @@ public final class Zeus {
     /**
      * Finds the nearest valid live non-meteor monster entity relative to the dungeon center anchor.
      */
-    public static fa findBestDungeonTarget() {
-        if (cn.j == null) {
+    public static MainObject findBestDungeonTarget() {
+        if (GameScreen.Vecplayers == null) {
             return null;
         }
-        fa best = null;
+        MainObject best = null;
         int minDistance = Integer.MAX_VALUE;
-        for (int i = 0; i < cn.j.c(); i++) {
-            Object entry = cn.j.a(i);
-            if (!(entry instanceof fa)) {
+        for (int i = 0; i < GameScreen.Vecplayers.size(); i++) {
+            Object entry = GameScreen.Vecplayers.elementAt(i);
+            if (!(entry instanceof MainObject)) {
                 continue;
             }
-            fa candidate = (fa) entry;
+            MainObject candidate = (MainObject) entry;
             if (!isValidDungeonTarget(candidate)) {
                 continue;
             }
-            int dist = Math.abs(DUNGEON_COMBAT_X - candidate.aZ) + Math.abs(DUNGEON_COMBAT_Y - candidate.ba);
+            int dist = Math.abs(DUNGEON_COMBAT_X - candidate.x) + Math.abs(DUNGEON_COMBAT_Y - candidate.y);
             if (dist < minDistance) {
                 minDistance = dist;
                 best = candidate;
@@ -7321,16 +7367,16 @@ public final class Zeus {
      * Counts live, valid non-meteor monster entities currently in the scene.
      */
     public static int countLiveDungeonMonsters() {
-        if (cn.j == null) {
+        if (GameScreen.Vecplayers == null) {
             return 0;
         }
         int count = 0;
-        for (int i = 0; i < cn.j.c(); i++) {
-            Object entry = cn.j.a(i);
-            if (!(entry instanceof fa)) {
+        for (int i = 0; i < GameScreen.Vecplayers.size(); i++) {
+            Object entry = GameScreen.Vecplayers.elementAt(i);
+            if (!(entry instanceof MainObject)) {
                 continue;
             }
-            fa candidate = (fa) entry;
+            MainObject candidate = (MainObject) entry;
             if (isValidDungeonTarget(candidate)) {
                 count++;
             }
@@ -7343,8 +7389,8 @@ public final class Zeus {
      */
     public static void checkDungeonCompletionDialog() {
         try {
-            if (fu.s instanceof ah) {
-                ah dialog = (ah) fu.s;
+            if (GameCanvas.currentDialog instanceof MsgDialog) {
+                MsgDialog dialog = (MsgDialog) GameCanvas.currentDialog;
                 String text = normSemantic(dialogText(dialog));
                 if (text.indexOf("hoan thanh") >= 0
                         || text.indexOf("chien thang") >= 0
@@ -7365,8 +7411,8 @@ public final class Zeus {
      */
     public static void dungeonCombat() {
         dungeonBackupCombat();
-        if (cn.g != null) {
-            cn.g.bi = DUNGEON_SCAN_RADIUS;
+        if (GameScreen.player != null) {
+            GameScreen.player.wFocus = DUNGEON_SCAN_RADIUS;
         }
         if (++dungeonRunTicks > DN_MAX_RUN_TICKS) {
             trace("DUNGEON run timed out after " + dungeonRunTicks + " ticks");
@@ -7377,32 +7423,32 @@ public final class Zeus {
         checkDungeonCompletionDialog();
 
         // Release meteor target immediately if held
-        if (cn.i != null && (isMeteorTarget(cn.i) || cn.i.cv != 1 || cn.i.bs <= 0 || cn.i.cG == 4)) {
-            cn.i = null;
+        if (GameScreen.ObjFocus != null && (isMeteorTarget(GameScreen.ObjFocus) || GameScreen.ObjFocus.typeObject != 1 || GameScreen.ObjFocus.hp <= 0 || GameScreen.ObjFocus.Action == 4)) {
+            GameScreen.ObjFocus = null;
         }
-        if (cn.i == null) {
-            cn.i = findBestDungeonTarget();
+        if (GameScreen.ObjFocus == null) {
+            GameScreen.ObjFocus = findBestDungeonTarget();
         }
 
-        if (cn.i != null) {
+        if (GameScreen.ObjFocus != null) {
             dungeonCombatEngaged = true;
             dungeonNoTargetTicks = 0;
             dungeonMonstersZeroTicks = 0;
-            bq.R = cn.i.aZ;
-            bq.S = cn.i.ba;
-            bq.o = (byte) 1;
-            bq.Y = true;
-            bq.W = true;
+            Player.xBeginAutoFire = GameScreen.ObjFocus.x;
+            Player.yBeginAutofire = GameScreen.ObjFocus.y;
+            Player.isAutoFire = (byte) 1;
+            Player.isAutoHPMP = true;
+            Player.isCurAutoFire = true;
             skills();
             potions();
         } else {
-            bq.o = (byte) -1;
-            bq.Y = false;
-            bq.W = false;
+            Player.isAutoFire = (byte) -1;
+            Player.isAutoHPMP = false;
+            Player.isCurAutoFire = false;
             ++dungeonNoTargetTicks;
             if (dungeonNoTargetTicks >= DUNGEON_IDLE_LEASH_TICKS) {
-                if (cn.g != null) {
-                    int drift = Math.abs(cn.g.aZ - DUNGEON_COMBAT_X) + Math.abs(cn.g.ba - DUNGEON_COMBAT_Y);
+                if (GameScreen.player != null) {
+                    int drift = Math.abs(GameScreen.player.x - DUNGEON_COMBAT_X) + Math.abs(GameScreen.player.y - DUNGEON_COMBAT_Y);
                     if (drift > DUNGEON_LEASH_RADIUS && canMove()) {
                         travelMove(DUNGEON_MAP, DUNGEON_COMBAT_X, DUNGEON_COMBAT_Y);
                     }
@@ -7452,11 +7498,11 @@ public final class Zeus {
         dungeonRunTicks = 0;
         dungeonConsecutiveFails = 0;
         dungeonAwaitingEntry = false;
-        if (fu.s != null && isDungeonConfirmDialog(fu.s)) {
-            dismissDungeonDialog(fu.s);
+        if (GameCanvas.currentDialog != null && isDungeonConfirmDialog(GameCanvas.currentDialog)) {
+            dismissDungeonDialog(GameCanvas.currentDialog);
         }
-        if (fu.t != null && isDungeonConfirmDialog(fu.t)) {
-            dismissDungeonDialog(fu.t);
+        if (GameCanvas.subDialog != null && isDungeonConfirmDialog(GameCanvas.subDialog)) {
+            dismissDungeonDialog(GameCanvas.subDialog);
         }
         dungeonRestoreCombat();
     }
@@ -7475,11 +7521,11 @@ public final class Zeus {
         dungeonWait = 0;
         dungeonTried = 0;
         dungeonAwaitingEntry = false;
-        if (fu.s != null && isDungeonConfirmDialog(fu.s)) {
-            dismissDungeonDialog(fu.s);
+        if (GameCanvas.currentDialog != null && isDungeonConfirmDialog(GameCanvas.currentDialog)) {
+            dismissDungeonDialog(GameCanvas.currentDialog);
         }
-        if (fu.t != null && isDungeonConfirmDialog(fu.t)) {
-            dismissDungeonDialog(fu.t);
+        if (GameCanvas.subDialog != null && isDungeonConfirmDialog(GameCanvas.subDialog)) {
+            dismissDungeonDialog(GameCanvas.subDialog);
         }
         dungeonRestoreCombat();
         trace("DUNGEON stopped (" + why + "): " + reason);
@@ -7535,7 +7581,7 @@ public final class Zeus {
         if (dungeonState == DN_PREPARATION || dungeonState == DN_ROUTING) {
             dungeonState = DN_IDLE;
         }
-        if (dungeonWasIn && (fu.q == null || fu.q.d != DUNGEON_MAP)) {
+        if (dungeonWasIn && (GameCanvas.loadmap == null || GameCanvas.loadmap.idMap != DUNGEON_MAP)) {
             dungeonWasIn = false;
             dungeonFailRun(8, "reconnect outside dungeon during active run");
         }
@@ -7554,11 +7600,11 @@ public final class Zeus {
                 return;
             }
             if (!inGame() || !sceneReady() || captcha()
-                    || cn.g == null || fu.q == null) {
+                    || GameScreen.player == null || GameCanvas.loadmap == null) {
                 return; // keep intent; loading screen is not a failure
             }
 
-            int here = fu.q.d;
+            int here = GameCanvas.loadmap.idMap;
             if (here != dungeonMapSeen) {
                 dungeonMapSeen = here;
                 dungeonWait = 12; // let the scene settle
@@ -7566,8 +7612,8 @@ public final class Zeus {
                 dungeonLastX = Integer.MIN_VALUE;
                 dungeonLastY = Integer.MIN_VALUE;
                 if (dungeonState == DN_ROUTING || dungeonState == DN_GOTO_NPC) {
-                    bq.m = false;
-                    cn.g.cO = null;
+                    Player.isLockKey = false;
+                    GameScreen.player.posTransRoad = null;
                 }
             }
 
@@ -7588,7 +7634,7 @@ public final class Zeus {
                 }
 
                 // Check death state inside dungeon
-                if (cn.g != null && cn.g.cG == 4) {
+                if (GameScreen.player != null && GameScreen.player.Action == 4) {
                     dungeonDiedInRun = true;
                     dungeonState = DN_DEATH;
                     return;
@@ -7771,48 +7817,48 @@ public final class Zeus {
             dungeonWhy = 0;
         }
 
-        fa npc = dungeonNpc();
+        MainObject npc = dungeonNpc();
         int x = DUNGEON_NPC_X;
         int y = DUNGEON_NPC_Y;
         if (npc != null) {
-            x = npc.aZ;
-            y = npc.ba;
+            x = npc.x;
+            y = npc.y;
         }
         if (npc == null || !dungeonNpcEligible(npc)) {
-            if (cn.g.aZ == dungeonLastX && cn.g.ba == dungeonLastY) {
+            if (GameScreen.player.x == dungeonLastX && GameScreen.player.y == dungeonLastY) {
                 if (++dungeonStallTicks > DN_STALL_TICKS) {
                     dungeonStop(3, "stalled walking to the dungeon NPC on map " + here);
                     return;
                 }
             } else {
                 dungeonStallTicks = 0;
-                dungeonLastX = cn.g.aZ;
-                dungeonLastY = cn.g.ba;
+                dungeonLastX = GameScreen.player.x;
+                dungeonLastY = GameScreen.player.y;
             }
             travelMove(here, x, y);
             return;
         }
 
         // Native interaction condition met: halt movement velocity before interaction
-        bq.m = false;
-        cn.g.cO = null;
-        cn.g.bg = cn.g.aZ;
-        cn.g.bh = cn.g.ba;
-        cn.g.bc = 0;
-        cn.g.bd = 0;
+        Player.isLockKey = false;
+        GameScreen.player.posTransRoad = null;
+        GameScreen.player.toX = GameScreen.player.x;
+        GameScreen.player.toY = GameScreen.player.y;
+        GameScreen.player.vx = 0;
+        GameScreen.player.vy = 0;
         try {
-            cn.g.N();
+            GameScreen.player.resetAction();
         } catch (Throwable t) {
         }
 
-        if (fu.s != null) {
-            if (isDungeonConfirmDialog(fu.s)) {
-                dismissDungeonDialog(fu.s);
+        if (GameCanvas.currentDialog != null) {
+            if (isDungeonConfirmDialog(GameCanvas.currentDialog)) {
+                dismissDungeonDialog(GameCanvas.currentDialog);
                 return;
             }
-            if (isBlockingDialog(fu.s)) {
+            if (isBlockingDialog(GameCanvas.currentDialog)) {
                 if (++dungeonTried >= DN_MAX_TRIES) {
-                    dungeonStop(5, "unrelated dialog blocking dungeon NPC interaction: " + clean(dialogText(fu.s)));
+                    dungeonStop(5, "unrelated dialog blocking dungeon NPC interaction: " + clean(dialogText(GameCanvas.currentDialog)));
                     return;
                 }
                 dungeonWait = 10;
@@ -7831,10 +7877,10 @@ public final class Zeus {
      * Drives the NPC's two menus and the confirmation dialog reactively:
      * 1. Check if already inside Map 48 -> DN_COMBAT.
      * 2. Unrelated dialog fail-closed safety check.
-     * 3. Submenu check: If active menu in fu.p contains "Ngã Tư", dispatch immediately via fu.p.a(2, 0).
-     * 4. Giao tiếp check: If actionable "Giao tiếp" command in fu.p/fu.s, invoke native bt.a().
-     * 5. Speech dialog check: If fu.s is active NPC story/speech dialog, advance it.
-     * 6. Confirmation check: If valid confirmation dialog in fu.s, confirm it (optional; direct teleport also succeeds).
+     * 3. Submenu check: If active menu in GameCanvas.menu2 contains "Ngã Tư", dispatch immediately via GameCanvas.menu2.commandPointer(2, 0).
+     * 4. Giao tiếp check: If actionable "Giao tiếp" command in GameCanvas.menu2/GameCanvas.currentDialog, invoke native iCommand.a().
+     * 5. Speech dialog check: If GameCanvas.currentDialog is active NPC story/speech dialog, advance it.
+     * 6. Confirmation check: If valid confirmation dialog in GameCanvas.currentDialog, confirm it (optional; direct teleport also succeeds).
      * 7. Bounded retry and wait countdown: decrement dungeonWait, retry ask NPC if wait expires up to DN_MAX_TRIES.
      */
     private static void dungeonInteract() {
@@ -7844,8 +7890,8 @@ public final class Zeus {
             return;
         }
 
-        // 1. Reactive check: Valid confirmation dialog in fu.s or fu.t (optional; direct teleport also succeeds)
-        da confirmDlg = dungeonConfirmDialogTarget();
+        // 1. Reactive check: Valid confirmation dialog in GameCanvas.currentDialog or GameCanvas.subDialog (optional; direct teleport also succeeds)
+        MainDialog confirmDlg = dungeonConfirmDialogTarget();
         if (confirmDlg != null) {
             trace("DUNGEON observed confirmation dialog: \"" + clean(dialogText(confirmDlg)) + "\"");
             if (!dungeonConfirmDialog(confirmDlg)) {
@@ -7864,7 +7910,7 @@ public final class Zeus {
         }
 
         // Unrelated modal safety check: fail closed on genuine blocking modals
-        da blockingDlg = (fu.s != null && isBlockingDialog(fu.s)) ? fu.s : ((fu.t != null && isBlockingDialog(fu.t)) ? fu.t : null);
+        MainDialog blockingDlg = (GameCanvas.currentDialog != null && isBlockingDialog(GameCanvas.currentDialog)) ? GameCanvas.currentDialog : ((GameCanvas.subDialog != null && isBlockingDialog(GameCanvas.subDialog)) ? GameCanvas.subDialog : null);
         if (blockingDlg != null) {
             if (++dungeonTried >= DN_MAX_TRIES) {
                 dungeonStop(5, "unrelated dialog blocking dungeon: " + clean(dialogText(blockingDlg)));
@@ -7875,18 +7921,18 @@ public final class Zeus {
         }
 
         // 2. Reactive check: Submenu ("Vào Ngã Tư Tử Thần")
-        et activeItems = (fu.p != null && fu.p.a) ? getFrItems(fu.p) : dungeonMenuItems;
+        mVector activeItems = (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) ? getFrItems(GameCanvas.menu2) : dungeonMenuItems;
         if (activeItems == null && dungeonMenuItems != null) {
             activeItems = dungeonMenuItems;
         }
         int ngaTuRow = -1;
         if (activeItems != null) {
-            for (int i = 0; i < activeItems.c(); i++) {
-                Object entry = activeItems.a(i);
-                if (entry instanceof bt) {
-                    bt btn = (bt) entry;
-                    if (btn.a != null) {
-                        String label = norm(btn.a);
+            for (int i = 0; i < activeItems.size(); i++) {
+                Object entry = activeItems.elementAt(i);
+                if (entry instanceof iCommand) {
+                    iCommand btn = (iCommand) entry;
+                    if (btn.caption != null) {
+                        String label = norm(btn.caption);
                         if (label.indexOf("nga tu") >= 0 || label.indexOf("tu than") >= 0 || label.indexOf("vao nga tu") >= 0) {
                             ngaTuRow = i;
                             break;
@@ -7921,16 +7967,16 @@ public final class Zeus {
             dungeonAwaitingEntry = true;
             trace("DUNGEON invoked native second-menu action for row " + ngaTuRow + ", waiting on confirmation dialog or teleport");
 
-            if (fu.p != null && fu.p.a) {
-                setFrIndex(fu.p, ngaTuRow);
+            if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
+                setFrIndex(GameCanvas.menu2, ngaTuRow);
                 try {
-                    fu.p.a(2, 0);
+                    GameCanvas.menu2.commandPointer(2, 0);
                 } catch (Throwable t) {
                     dungeonStop(2, "native server menu action failed: " + t);
                 }
             } else {
                 try {
-                    q.a().b((short) npc, (byte) menuId, (byte) ngaTuRow);
+                    GlobalService.gI().Dynamic_Menu((short) npc, (byte) menuId, (byte) ngaTuRow);
                 } catch (Throwable t) {
                     dungeonStop(2, "selecting dungeon row " + ngaTuRow + " failed");
                 }
@@ -7939,15 +7985,15 @@ public final class Zeus {
         }
 
         // 3. Reactive check: Actionable "Giao tiếp" command
-        bt giaoTiepCmd = null;
+        iCommand giaoTiepCmd = null;
         int giaoTiepIndex = -1;
         if (activeItems != null) {
-            for (int i = 0; i < activeItems.c(); i++) {
-                Object entry = activeItems.a(i);
-                if (entry instanceof bt) {
-                    bt btn = (bt) entry;
-                    if (btn.a != null) {
-                        String label = norm(btn.a);
+            for (int i = 0; i < activeItems.size(); i++) {
+                Object entry = activeItems.elementAt(i);
+                if (entry instanceof iCommand) {
+                    iCommand btn = (iCommand) entry;
+                    if (btn.caption != null) {
+                        String label = norm(btn.caption);
                         if (label.indexOf("giao tiep") >= 0 && label.indexOf("giao dich") < 0) {
                             giaoTiepCmd = btn;
                             giaoTiepIndex = i;
@@ -7957,8 +8003,8 @@ public final class Zeus {
                 }
             }
         }
-        if (giaoTiepCmd == null && fu.s != null) {
-            giaoTiepCmd = findGiaoTiepInDialog(fu.s);
+        if (giaoTiepCmd == null && GameCanvas.currentDialog != null) {
+            giaoTiepCmd = findGiaoTiepInDialog(GameCanvas.currentDialog);
         }
         int legacyPick = -1;
         if (giaoTiepCmd == null && dungeonMenu != null) {
@@ -7966,8 +8012,8 @@ public final class Zeus {
         }
 
         if (dungeonStep == 0 && (giaoTiepCmd != null || legacyPick >= 0)) {
-            if (fu.p != null && fu.p.a && giaoTiepIndex >= 0) {
-                setFrIndex(fu.p, giaoTiepIndex);
+            if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu && giaoTiepIndex >= 0) {
+                setFrIndex(GameCanvas.menu2, giaoTiepIndex);
             }
             dungeonStep = 1;
             dungeonTried = 0;
@@ -7978,7 +8024,7 @@ public final class Zeus {
             trace("DUNGEON invoked native 'Giao tiếp' command, waiting on second menu");
 
             if (giaoTiepCmd != null) {
-                giaoTiepCmd.a();
+                giaoTiepCmd.perform();
             } else {
                 if (!dungeonSelect(legacyPick)) {
                     dungeonStop(2, "selecting \"giao tiếp\" failed");
@@ -7987,22 +8033,22 @@ public final class Zeus {
             return;
         }
 
-        // 4. Reactive check: Relevant NPC / story speech dialog in fu.s
-        if (fu.s != null && isNpcSpeechDialog(fu.s)) {
+        // 4. Reactive check: Relevant NPC / story speech dialog in GameCanvas.currentDialog
+        if (GameCanvas.currentDialog != null && isNpcSpeechDialog(GameCanvas.currentDialog)) {
             dungeonStep = (dungeonStep < 1) ? 1 : dungeonStep;
             dungeonTried = 0;
             dungeonWait = 60;
             dungeonMenu = null;
             dungeonMenuItems = null;
             dungeonMenuNpc = Integer.MIN_VALUE;
-            trace("DUNGEON advancing Pho Chi Huy speech dialog in fu.s");
-            if (fu.s.ab != null) {
-                fu.s.ab.a();
-            } else if (fu.s.Z != null) {
-                fu.s.Z.a();
+            trace("DUNGEON advancing Pho Chi Huy speech dialog in GameCanvas.currentDialog");
+            if (GameCanvas.currentDialog.right != null) {
+                GameCanvas.currentDialog.right.perform();
+            } else if (GameCanvas.currentDialog.left != null) {
+                GameCanvas.currentDialog.left.perform();
             } else {
-                fu.al[5] = true;
-                fu.am[5] = true;
+                GameCanvas.keyMyPressed[5] = true;
+                GameCanvas.keyMyHold[5] = true;
             }
             return;
         }
@@ -8040,57 +8086,57 @@ public final class Zeus {
      * Finds and activates the affirmative button ("Có", "Đồng ý", "OK", "Vào", "Chấp nhận", "Chọn").
      * Never activates negative buttons ("Không", "Hủy", "Bỏ qua").
      */
-    private static boolean dungeonConfirmDialog(da dialog) {
+    private static boolean dungeonConfirmDialog(MainDialog dialog) {
         if (dialog == null) {
             return false;
         }
         try {
-            // 1. Search buttons in ah.C (command list)
-            if (dialog instanceof ah) {
-                et buttons = ((ah) dialog).C;
-                if (buttons != null && buttons.c() > 0) {
+            // 1. Search buttons in MsgDialog.cmdList (command list)
+            if (dialog instanceof MsgDialog) {
+                mVector buttons = ((MsgDialog) dialog).cmdList;
+                if (buttons != null && buttons.size() > 0) {
                     // Pass 1: explicit affirmative caption
-                    for (int i = 0; i < buttons.c(); i++) {
-                        Object entry = buttons.a(i);
-                        if (!(entry instanceof bt)) {
+                    for (int i = 0; i < buttons.size(); i++) {
+                        Object entry = buttons.elementAt(i);
+                        if (!(entry instanceof iCommand)) {
                             continue;
                         }
-                        bt btn = (bt) entry;
-                        String cap = norm(btn.a).trim();
+                        iCommand btn = (iCommand) entry;
+                        String cap = norm(btn.caption).trim();
                         if (isAffirmativeCaption(cap)) {
-                            trace("DUNGEON dialog confirming via ah.C button[" + i + "]=\"" + clean(btn.a) + "\"");
-                            btn.a();
+                            trace("DUNGEON dialog confirming via MsgDialog.cmdList button[" + i + "]=\"" + clean(btn.caption) + "\"");
+                            btn.perform();
                             return true;
                         }
                     }
                     // Pass 2: if 1 or 2 buttons, first button if not negative
-                    if (buttons.c() <= 2) {
-                        Object first = buttons.a(0);
-                        if (first instanceof bt) {
-                            bt btn = (bt) first;
-                            String cap = norm(btn.a).trim();
+                    if (buttons.size() <= 2) {
+                        Object first = buttons.elementAt(0);
+                        if (first instanceof iCommand) {
+                            iCommand btn = (iCommand) first;
+                            String cap = norm(btn.caption).trim();
                             if (!isNegativeCaption(cap)) {
-                                trace("DUNGEON dialog confirming via ah.C button[0]=\"" + clean(btn.a) + "\"");
-                                btn.a();
+                                trace("DUNGEON dialog confirming via MsgDialog.cmdList button[0]=\"" + clean(btn.caption) + "\"");
+                                btn.perform();
                                 return true;
                             }
                         }
                     }
                 }
-            } else if (dialog instanceof dz) {
+            } else if (dialog instanceof InputDialog) {
                 try {
-                    java.lang.reflect.Field fb = dz.class.getDeclaredField("b");
+                    java.lang.reflect.Field fb = InputDialog.class.getDeclaredField("b");
                     fb.setAccessible(true);
                     Object btn = fb.get(dialog);
-                    if (btn instanceof bt) {
-                        bt b = (bt) btn;
-                        String cap = (b.a == null) ? "" : norm(b.a).trim();
+                    if (btn instanceof iCommand) {
+                        iCommand b = (iCommand) btn;
+                        String cap = (b.caption == null) ? "" : norm(b.caption).trim();
                         if (cap.length() > 0 && isAffirmativeCaption(cap) && !isNegativeCaption(cap)) {
-                            trace("DUNGEON dialog confirming via dz.b=\"" + clean(b.a) + "\"");
-                            b.a();
+                            trace("DUNGEON dialog confirming via InputDialog.b=\"" + clean(b.caption) + "\"");
+                            b.perform();
                             return true;
                         } else {
-                            trace("DUNGEON dz.b caption blank, negative, or ambiguous: \"" + clean(b.a) + "\"");
+                            trace("DUNGEON InputDialog.b caption blank, negative, or ambiguous: \"" + clean(b.caption) + "\"");
                             return false;
                         }
                     }
@@ -8100,27 +8146,27 @@ public final class Zeus {
             }
 
             // 2. Check softkeys Z (left) and ab (right)
-            if (dialog.Z != null) {
-                String cap = norm(dialog.Z.a).trim();
-                if (isAffirmativeCaption(cap) || (!isNegativeCaption(cap) && dialog.Z.a != null)) {
-                    trace("DUNGEON dialog confirming via dialog.Z=\"" + clean(dialog.Z.a) + "\"");
-                    dialog.Z.a();
+            if (dialog.left != null) {
+                String cap = norm(dialog.left.caption).trim();
+                if (isAffirmativeCaption(cap) || (!isNegativeCaption(cap) && dialog.left.caption != null)) {
+                    trace("DUNGEON dialog confirming via dialog.left=\"" + clean(dialog.left.caption) + "\"");
+                    dialog.left.perform();
                     return true;
                 }
             }
-            if (dialog.ab != null) {
-                String cap = norm(dialog.ab.a).trim();
+            if (dialog.right != null) {
+                String cap = norm(dialog.right.caption).trim();
                 if (isAffirmativeCaption(cap)) {
-                    trace("DUNGEON dialog confirming via dialog.ab=\"" + clean(dialog.ab.a) + "\"");
-                    dialog.ab.a();
+                    trace("DUNGEON dialog confirming via dialog.right=\"" + clean(dialog.right.caption) + "\"");
+                    dialog.right.perform();
                     return true;
                 }
             }
 
-            // 3. Fallback: if dialog.Z exists and no other option, press Z
-            if (dialog.Z != null) {
-                trace("DUNGEON dialog confirming via fallback dialog.Z");
-                dialog.Z.a();
+            // 3. Fallback: if dialog.left exists and no other option, press Z
+            if (dialog.left != null) {
+                trace("DUNGEON dialog confirming via fallback dialog.left");
+                dialog.left.perform();
                 return true;
             }
         } catch (Throwable t) {
@@ -8158,7 +8204,7 @@ public final class Zeus {
                 || cap.indexOf("bo qua") >= 0;
     }
 
-    private static boolean isDungeonConfirmDialog(da dialog) {
+    private static boolean isDungeonConfirmDialog(MainDialog dialog) {
         if (dialog == null) {
             return false;
         }
@@ -8180,15 +8226,15 @@ public final class Zeus {
         }
     }
 
-    private static da dungeonConfirmDialogTarget() {
+    private static MainDialog dungeonConfirmDialogTarget() {
         if (dungeonStep != 2) {
             return null;
         }
-        if (isDungeonConfirmDialog(fu.s)) {
-            return fu.s;
+        if (isDungeonConfirmDialog(GameCanvas.currentDialog)) {
+            return GameCanvas.currentDialog;
         }
-        if (isDungeonConfirmDialog(fu.t)) {
-            return fu.t;
+        if (isDungeonConfirmDialog(GameCanvas.subDialog)) {
+            return GameCanvas.subDialog;
         }
         return null;
     }
@@ -8210,7 +8256,7 @@ public final class Zeus {
      * Determines whether an active dialog is a genuine blocking modal that prevents safe
      * automation interaction.
      *
-     * Non-blocking broadcast announcements (created via fu.a(String) with single dismiss button
+     * Non-blocking broadcast announcements (created via GameCanvas.currentScreen(String) with single dismiss button
      * f == -1, d == null, or dismiss caption) do not prevent native NPC menu interaction.
      *
      * Choice modals (>= 2 buttons), text inputs (j[]), active callbacks (d != null / f >= 0),
@@ -8219,7 +8265,7 @@ public final class Zeus {
      * The expected Dungeon confirmation dialog returns false so it is handled by the confirmation
      * step rather than treated as an unrelated blocker.
      */
-    public static boolean isBlockingDialog(da dialog) {
+    public static boolean isBlockingDialog(MainDialog dialog) {
         if (dialog == null) {
             return false;
         }
@@ -8229,78 +8275,78 @@ public final class Zeus {
         if (isNpcSpeechDialog(dialog)) {
             return false;
         }
-        if (!(dialog instanceof ah)) {
+        if (!(dialog instanceof MsgDialog)) {
             return true;
         }
-        ah ahDialog = (ah) dialog;
-        et buttons = ahDialog.C;
-        if (buttons == null || buttons.c() == 0) {
+        MsgDialog ahDialog = (MsgDialog) dialog;
+        mVector buttons = ahDialog.cmdList;
+        if (buttons == null || buttons.size() == 0) {
             return false;
         }
-        if (buttons.c() > 1) {
+        if (buttons.size() > 1) {
             return true;
         }
-        Object entry = buttons.a(0);
-        if (!(entry instanceof bt)) {
+        Object entry = buttons.elementAt(0);
+        if (!(entry instanceof iCommand)) {
             return true;
         }
-        bt btn = (bt) entry;
-        String cap = norm(btn.a).trim();
+        iCommand btn = (iCommand) entry;
+        String cap = norm(btn.caption).trim();
         if (isDangerousAffirmativeCaption(cap)) {
             return true;
         }
-        if (btn.c != null) {
+        if (btn.action != null) {
             return true;
         }
-        if (btn.d != null) {
+        if (btn.Pointer != null) {
             return true;
         }
-        if (btn.e != -1 || btn.f != -1) {
+        if (btn.indexMenu != -1 || btn.subIndex != -1) {
             return true;
         }
         return false;
     }
 
-    private static void dismissDungeonDialog(da dialog) {
+    private static void dismissDungeonDialog(MainDialog dialog) {
         if (dialog == null) {
             return;
         }
         try {
-            if (dialog instanceof ah) {
-                et buttons = ((ah) dialog).C;
+            if (dialog instanceof MsgDialog) {
+                mVector buttons = ((MsgDialog) dialog).cmdList;
                 if (buttons != null) {
-                    for (int i = 0; i < buttons.c(); i++) {
-                        Object entry = buttons.a(i);
-                        if (entry instanceof bt) {
-                            bt btn = (bt) entry;
-                            String cap = norm(btn.a).trim();
+                    for (int i = 0; i < buttons.size(); i++) {
+                        Object entry = buttons.elementAt(i);
+                        if (entry instanceof iCommand) {
+                            iCommand btn = (iCommand) entry;
+                            String cap = norm(btn.caption).trim();
                             if (isNegativeCaption(cap)) {
-                                trace("DUNGEON dismissing dialog via button \"" + clean(btn.a) + "\"");
-                                btn.a();
+                                trace("DUNGEON dismissing dialog via button \"" + clean(btn.caption) + "\"");
+                                btn.perform();
                                 return;
                             }
                         }
                     }
                 }
             }
-            if (dialog.ab != null) {
-                String cap = norm(dialog.ab.a).trim();
+            if (dialog.right != null) {
+                String cap = norm(dialog.right.caption).trim();
                 if (isNegativeCaption(cap)) {
-                    trace("DUNGEON dismissing dialog via dialog.ab \"" + clean(dialog.ab.a) + "\"");
-                    dialog.ab.a();
+                    trace("DUNGEON dismissing dialog via dialog.right \"" + clean(dialog.right.caption) + "\"");
+                    dialog.right.perform();
                     return;
                 }
             }
-            if (fu.s == dialog) {
-                fu.s = null;
-            } else if (fu.t == dialog) {
-                fu.t = null;
+            if (GameCanvas.currentDialog == dialog) {
+                GameCanvas.currentDialog = null;
+            } else if (GameCanvas.subDialog == dialog) {
+                GameCanvas.subDialog = null;
             }
         } catch (Throwable t) {
-            if (fu.s == dialog) {
-                fu.s = null;
-            } else if (fu.t == dialog) {
-                fu.t = null;
+            if (GameCanvas.currentDialog == dialog) {
+                GameCanvas.currentDialog = null;
+            } else if (GameCanvas.subDialog == dialog) {
+                GameCanvas.subDialog = null;
             }
         }
     }
@@ -8345,8 +8391,8 @@ public final class Zeus {
     // ---- ATTACK ---------------------------------------------------------------
     //
     // Zeus does not pick targets or swing. It sets the client's own auto fields and lets
-    // bq.q() choose and bq's loop attack, which is why this module is small. What it adds
-    // is the anchor: the spot the operator captured, written into bq.R/S so the client's
+    // Player.autoItem() choose and bq's loop attack, which is why this module is small. What it adds
+    // is the anchor: the spot the operator captured, written into Player.xBeginAutoFire/S so the client's
     // three uses of the anchor — pull back, retarget, repath — all serve that spot.
 
     /** State machine of docs/core/08 §7, reduced to the three states that stay on one map. */
@@ -8374,7 +8420,7 @@ public final class Zeus {
 
     /** True while this module owns the combat fields, so off() runs exactly once. */
     private static boolean combatOwned = false;
-    /** bq.l as it was before this module turned the native potion pump off. */
+    /** Player.isAutoHPMP as it was before this module turned the native potion pump off. */
     private static boolean nativePotionWas = false;
 
     /** 0 fine, 1 no monsters in range, 2 monsters but cannot reach or hit them. */
@@ -8394,11 +8440,11 @@ public final class Zeus {
     private static String buffState() {
         StringBuffer out = new StringBuffer(BUFF_SLOTS);
         for (int i = 0; i < BUFF_SLOTS; i++) {
-            boolean on = ah.f != null
-                    && i < ah.f.length
-                    && ah.f[i] != null
-                    && ah.f[i].length >= 2
-                    && ah.f[i][1] == 1;
+            boolean on = MsgDialog.Autobuff != null
+                    && i < MsgDialog.Autobuff.length
+                    && MsgDialog.Autobuff[i] != null
+                    && MsgDialog.Autobuff[i].length >= 2
+                    && MsgDialog.Autobuff[i][1] == 1;
             out.append(on ? '1' : '0');
         }
         return out.toString();
@@ -8406,7 +8452,7 @@ public final class Zeus {
 
     private static void attack() {
         try {
-            if (dungeonEnabled && fu.q != null && fu.q.d == DUNGEON_MAP) {
+            if (dungeonEnabled && GameCanvas.loadmap != null && GameCanvas.loadmap.idMap == DUNGEON_MAP) {
                 return;
             }
             if (atkMode == 0 || atkX < 0 || atkY < 0) {
@@ -8417,16 +8463,16 @@ public final class Zeus {
             // this, so it works whether or not a spot is armed. Bailing on ready() instead left
             // `combatOff()` unreached and the module went on claiming it owned those fields while
             // the character lay on the ground.
-            if (cn.g != null && cn.g.cG == 4) {
+            if (GameScreen.player != null && GameScreen.player.Action == 4) {
                 combatOff();
                 return;
             }
-            if (!gameReady() || cn.g == null) {
+            if (!gameReady() || GameScreen.player == null) {
                 return;             // keep the intent; just do nothing this tick
             }
             // A different map is out of scope this round: the character stays put rather
             // than being walked somewhere by a travel table nobody has driven yet.
-            if (fu.q == null || fu.q.d != atkMap) {
+            if (GameCanvas.loadmap == null || GameCanvas.loadmap.idMap != atkMap) {
                 combatOff();
                 return;
             }
@@ -8514,7 +8560,7 @@ public final class Zeus {
         // Alive: forget the death, so the next one starts from zero rather than from wherever the
         // last one left the counters. Held here rather than in a caller for the same reason the
         // module moved: a reset that only runs when auto is armed is a reset that usually does not.
-        if (cn.g == null || cn.g.cG != 4) {
+        if (GameScreen.player == null || GameScreen.player.Action != 4) {
             reviveReset();
             return;
         }
@@ -8544,13 +8590,13 @@ public final class Zeus {
         reviveWait = REVIVE_EVERY;
         try {
             if (reviveMode == 1 && !reviveNoTicket && reviveTries < REVIVE_TRIES) {
-                bw ticket = reviveTicket();
+                Item ticket = reviveTicket();
                 if (ticket != null) {
                     // Opcode -30 with the client's own virtual NPC id for reviving on the spot.
-                    q.a().b((short) -51, (byte) 0, (byte) 0);
+                    GlobalService.gI().Dynamic_Menu((short) -51, (byte) 0, (byte) 0);
                     ++reviveTries;
                     ++reviveCount;
-                    trace("REVIVE ticket id=" + ticket.O + " try=" + reviveTries
+                    trace("REVIVE ticket id=" + ticket.Id + " try=" + reviveTries
                             + " dead=" + reviveDead);
                     return;
                 }
@@ -8559,7 +8605,7 @@ public final class Zeus {
                 trace("REVIVE no ticket dead=" + reviveDead);
             }
             // Opcode 31: give up the corpse and wake in town.
-            q.a().b((byte) 0);
+            GlobalService.gI().gohome((byte) 0);
             ++reviveCount;
             trace("REVIVE town dead=" + reviveDead + " tries=" + reviveTries);
         } catch (Throwable t) {
@@ -8570,15 +8616,15 @@ public final class Zeus {
     /**
      * One line in the client's own message ticker.
      *
-     * `fu.b(String)` queues into `cn.k`, and `cf.c()` (cf.java:902) draws from that queue — which
-     * `fu.b()` pumps every tick, whatever screen is up. `fu.c(String)` would have been the wrong
+     * `GameCanvas.addInfoChar(String)` queues into `cn.k`, and `cf.c()` (cf.java:902) draws from that queue — which
+     * `GameCanvas.login()` pumps every tick, whatever screen is up. `GameCanvas.game(String)` would have been the wrong
      * call: it writes the single `cn.r.G` slot, so the next message overwrites this one before it
-     * has been read. It has one side effect: `fu.b` stamps `fu.au`, which the client's ten-minute
+     * has been read. It has one side effect: `GameCanvas.login` stamps `fu.MainMonster`, which the client's ten-minute
      * tip timer measures from (fu.java:296), so a notice postpones one tip. Cheap at this rate.
      */
     private static void note(String text) {
         try {
-            fu.b(text);
+            GameCanvas.addInfoCharServer(text);
         } catch (Throwable t) {
             // A message nobody can see is not worth failing a revive over.
         }
@@ -8587,10 +8633,10 @@ public final class Zeus {
     /**
      * Closes whatever UI is blocking, the way the client's own Back does.
      *
-     * NOT `fu.p = null`, which is what the mod this was compared against does: `fu.p` is assigned
-     * exactly once (fu.java:87) and `fu.b()` dereferences it bare every frame (fu.java:245, :279),
-     * as does the rest of the client — nulling it is an NPE in the paint loop. `fu.s` and `fu.t`
-     * are different: the client nulls those itself (ah.java:364, dz.java:36, fu.j()).
+     * NOT `GameCanvas.menu2 = null`, which is what the mod this was compared against does: `GameCanvas.menu2` is assigned
+     * exactly once (fu.java:87) and `GameCanvas.login()` dereferences it bare every frame (fu.java:245, :279),
+     * as does the rest of the client — nulling it is an NPE in the paint loop. `GameCanvas.currentDialog` and `GameCanvas.subDialog`
+     * are different: the client nulls those itself (MsgDialog.java:364, InputDialog.java:36, fu.j()).
      *
      * The dialog is dropped, not answered. `medalDialog()` presses a button only after matching the
      * text; a dialog that happened to be up when the character fell could be anything, and pressing
@@ -8598,12 +8644,12 @@ public final class Zeus {
      */
     private static void clearBlockingUi() {
         try {
-            if (fu.p != null && fu.p.a) {
-                fu.p.f();
-                fu.m();
+            if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
+                GameCanvas.menu2.doCloseMenu();
+                GameCanvas.clearKeyHold();
             }
-            fu.s = null;
-            fu.t = null;
+            GameCanvas.currentDialog = null;
+            GameCanvas.subDialog = null;
         } catch (Throwable t) {
             // UI that will not close is not worth failing the revive over.
         }
@@ -8616,17 +8662,17 @@ public final class Zeus {
      * fragile by nature — the server rewording it silently disables revival — so the name is the
      * one place this module accepts a string match, and the id it finds is traced when it is used.
      */
-    private static bw reviveTicket() {
-        if (bw.V == null) {
+    private static Item reviveTicket() {
+        if (Item.VecInvetoryPlayer == null) {
             return null;
         }
-        for (int index = 0; index < bw.V.c(); index++) {
-            Object entry = bw.V.a(index);
-            if (!(entry instanceof bw)) {
+        for (int index = 0; index < Item.VecInvetoryPlayer.size(); index++) {
+            Object entry = Item.VecInvetoryPlayer.elementAt(index);
+            if (!(entry instanceof Item)) {
                 continue;
             }
-            bw item = (bw) entry;
-            if (item.g != null && norm(item.g).indexOf("hoi sinh tai cho") >= 0) {
+            Item item = (Item) entry;
+            if (item.itemName != null && norm(item.itemName).indexOf("hoi sinh tai cho") >= 0) {
                 return item;
             }
         }
@@ -8635,14 +8681,14 @@ public final class Zeus {
 
     /** Manhattan drift from the spot, which is what both KnightMod thresholds measure. */
     private static int drift() {
-        return Math.abs(cn.g.aZ - atkX) + Math.abs(cn.g.ba - atkY);
+        return Math.abs(GameScreen.player.x - atkX) + Math.abs(GameScreen.player.y - atkY);
     }
 
     private static void fighting() {
         int limit = atkMode == 1 ? STAND_DRIFT : MOVE_DRIFT;
         if (drift() > limit) {
             combatOff();
-            cn.i = null;
+            GameScreen.ObjFocus = null;
             atkState = TO_SPOT;
             return;
         }
@@ -8650,12 +8696,12 @@ public final class Zeus {
             // Pin all six position fields. This makes bc/bd zero, which turns the client's
             // periodic resync into the only way the server learns the position — a
             // deliberate consequence, docs/core/08 §4.1.
-            cn.g.aZ = atkX;
-            cn.g.ba = atkY;
-            cn.g.bg = atkX;
-            cn.g.bh = atkY;
-            cn.g.bc = 0;
-            cn.g.bd = 0;
+            GameScreen.player.x = atkX;
+            GameScreen.player.y = atkY;
+            GameScreen.player.toX = atkX;
+            GameScreen.player.toY = atkY;
+            GameScreen.player.vx = 0;
+            GameScreen.player.vy = 0;
         }
         combatOn();
         skills();
@@ -8663,20 +8709,20 @@ public final class Zeus {
 
     /** Sets the client's own auto fields and anchors them on the captured spot. */
     private static void combatOn() {
-        bq.o = (byte) 1;
-        bq.Y = true;
+        Player.isAutoFire = (byte) 1;
+        Player.isAutoHPMP = true;
         // Not a counter: a one-shot "catch the nearest target" flag the client consumes.
         // Forcing it true every tick is how KnightMod keeps asking, and it is correct.
-        bq.W = true;
-        bq.R = atkX;
-        bq.S = atkY;
-        cn.g.bi = atkRadius;
+        Player.isCurAutoFire = true;
+        Player.xBeginAutoFire = atkX;
+        Player.yBeginAutofire = atkY;
+        GameScreen.player.wFocus = atkRadius;
         if (!combatOwned) {
             combatOwned = true;
-            // One pump, not two. The client's own gate is bq.l; with both running, which
+            // One pump, not two. The client's own gate is Player.isAutoHPMP; with both running, which
             // mechanism drank is unknowable. docs/core/08 §5.3 option (c).
-            nativePotionWas = bq.l;
-            bq.l = false;
+            nativePotionWas = Player.isAutoHPMP;
+            Player.isAutoHPMP = false;
             syncNativeSettings();
         }
     }
@@ -8687,14 +8733,14 @@ public final class Zeus {
             return;
         }
         combatOwned = false;
-        bq.o = (byte) -1;
-        bq.Y = false;
-        bq.W = false;
-        cn.i = null;
-        if (cn.g != null) {
-            cn.g.bi = NATIVE_RADIUS;
+        Player.isAutoFire = (byte) -1;
+        Player.isAutoHPMP = false;
+        Player.isCurAutoFire = false;
+        GameScreen.ObjFocus = null;
+        if (GameScreen.player != null) {
+            GameScreen.player.wFocus = NATIVE_RADIUS;
         }
-        bq.l = nativePotionWas;
+        Player.isAutoHPMP = nativePotionWas;
         syncNativeSettings();
         atkState = FIGHTING;
         stuckKind = 0;
@@ -8707,31 +8753,31 @@ public final class Zeus {
      *
      * Everything here is a field the client already owns and already syncs: thresholds, the potion
      * gate, the pickup record and the buff slots. Zeus writes them and calls the client's own
-     * `co.b()` — it does not keep a parallel copy, because two copies of a setting is how nobody can
+     * `MainRMS.setSaveAuto()` — it does not keep a parallel copy, because two copies of a setting is how nobody can
      * say which one collected an item or drank a potion.
      *
-     * The thresholds are server state: change `ah.e[]` without this call and the next server push
+     * The thresholds are server state: change `MsgDialog.mHPMP[]` without this call and the next server push
      * overwrites it (docs/core/08 §5.2). The native menu only moves in tens, so the free threshold
      * is rounded for display while the mod itself uses the exact one.
      */
     private static void syncNativeSettings() {
         try {
-            if (ah.e != null && ah.e.length >= 2) {
-                ah.e[0] = round10(atkHpPct);
-                ah.e[1] = round10(atkMpPct);
+            if (MsgDialog.mHPMP != null && MsgDialog.mHPMP.length >= 2) {
+                MsgDialog.mHPMP[0] = round10(atkHpPct);
+                MsgDialog.mHPMP[1] = round10(atkMpPct);
             }
             applyPickup();
             applyBuffs();
-            co.b();
+            MainRMS.setSaveAuto();
         } catch (Throwable t) {
-            // co.b() swallows its own failures; this guards the array accesses around it.
+            // MainRMS.setSaveAuto() swallows its own failures; this guards the array accesses around it.
         }
     }
 
     /**
      * Writes the pickup record exactly the way the game's own menu writes it.
      *
-     * `ah.java:213` is the model: `bq.q = new be((byte) rank, R[1], R[2])`, where option index 5 of
+     * `MsgDialog.java:213` is the model: `Player.autoItem = new AutoGetItem((byte) rank, R[1], R[2])`, where option index 5 of
      * the client's own equipment list means "don't pick equipment" and is stored as −1. Reproducing
      * that call rather than assembling the bytes by hand matters, because `be`'s constructor swaps
      * its last two arguments (`be.java:12-16`: `a=by2; b=by4; c=by3`). So the menu's layout is
@@ -8740,14 +8786,14 @@ public final class Zeus {
      * kinds on `q.c` against `be.e`/`be.f`.
      *
      * The client is inconsistent about this and Zeus deliberately does not try to be smarter. Going
-     * out, `co.b()` serialises `q.a, q.b, q.c` (co.java:118-124). Coming back, `co.java:52` rebuilds
-     * `new be(o[4], o[5], o[6])`, which lands byte 5 in `c` and byte 6 in `b` — the reverse. So a
+     * out, `MainRMS.setSaveAuto()` serialises `q.a, q.b, q.c` (co.java:118-124). Coming back, `co.java:52` rebuilds
+     * `new AutoGetItem(o[4], o[5], o[6])`, which lands byte 5 in `c` and byte 6 in `b` — the reverse. So a
      * server echo of the settings packet swaps MP/HP with gold, and the client's own summary text
      * (co.java:59-61) is written for the echoed layout while its filter is written for the menu's.
      * One of the two is wrong in vanilla.
      *
      * Zeus therefore writes the menu's layout, which is the one the filter honours, and publishes
-     * `bq.q` read back live in the snapshot. If an echo ever does swap them, the panel shows MP/HP
+     * `Player.autoItem` read back live in the snapshot. If an echo ever does swap them, the panel shows MP/HP
      * and gold exchanged relative to what was configured, rather than the tool quietly claiming a
      * setting the client is not using.
      */
@@ -8755,40 +8801,40 @@ public final class Zeus {
         // The client treats a null record as "collector off", so an all-off configuration is
         // expressed the same way rather than as three separate "don't" values.
         if (itemRank >= 5 && itemMpHp >= 3 && itemGold >= 1) {
-            bq.q = null;
+            Player.autoItem = null;
             return;
         }
         int rank = itemRank < 5 ? itemRank : -1;
-        bq.q = new be((byte) rank, (byte) itemMpHp, (byte) itemGold);
+        Player.autoItem = new AutoGetItem((byte) rank, (byte) itemMpHp, (byte) itemGold);
     }
 
     /**
      * Turns the client's own buff slots on or off.
      *
-     * The cast loop already exists at `bq.java:615-626`; it runs whenever `bq.p == 1` and uses the
+     * The cast loop already exists at `bq.java:615-626`; it runs whenever `Player.IndexFire == 1` and uses the
      * same `bq.j` predicate skill rotation uses. So there is nothing to write here beyond the
-     * flags. A slot the character has not learned is left alone: `ah.b` bounds the array and
-     * `bq.I[skill] > 0` is what the native menu itself checks before enabling one.
+     * flags. A slot the character has not learned is left alone: `MsgDialog.MaxSkillBuff` bounds the array and
+     * `Player.mCurentLvSkill[skill] > 0` is what the native menu itself checks before enabling one.
      */
     private static void applyBuffs() {
-        if (ah.f == null) {
+        if (MsgDialog.Autobuff == null) {
             return;
         }
-        int slots = Math.min(BUFF_SLOTS, Math.min(ah.b, ah.f.length));
+        int slots = Math.min(BUFF_SLOTS, Math.min(MsgDialog.MaxSkillBuff, MsgDialog.Autobuff.length));
         boolean any = false;
         for (int i = 0; i < slots; i++) {
-            if (ah.f[i] == null || ah.f[i].length < 2) {
+            if (MsgDialog.Autobuff[i] == null || MsgDialog.Autobuff[i].length < 2) {
                 continue;
             }
-            boolean learned = bq.I != null
-                    && ah.f[i][0] >= 0
-                    && ah.f[i][0] < bq.I.length
-                    && bq.I[ah.f[i][0]] > 0;
+            boolean learned = Player.mCurentLvSkill != null
+                    && MsgDialog.Autobuff[i][0] >= 0
+                    && MsgDialog.Autobuff[i][0] < Player.mCurentLvSkill.length
+                    && Player.mCurentLvSkill[MsgDialog.Autobuff[i][0]] > 0;
             boolean on = atkBuff[i] && learned;
-            ah.f[i][1] = on ? 1 : 0;
+            MsgDialog.Autobuff[i][1] = on ? 1 : 0;
             any |= on;
         }
-        bq.p = (byte) (any ? 1 : 0);
+        Player.IndexFire = (byte) (any ? 1 : 0);
     }
 
     private static int round10(int percent) {
@@ -8822,7 +8868,7 @@ public final class Zeus {
             return;             // a path is already running; let it finish
         }
         try {
-            short[] path = fu.c.a(atkX / 24, atkY / 24, cn.g.aZ / 24, cn.g.ba / 24, 500);
+            short[] path = GameCanvas.game.updateFindRoad(atkX / 24, atkY / 24, GameScreen.player.x / 24, GameScreen.player.y / 24, 500);
             if (path == null) {
                 arrived();      // already in the destination cell
                 return;
@@ -8830,26 +8876,26 @@ public final class Zeus {
             if (path.length > 500) {
                 return;         // pathfinding failed; do not walk a rubbish route
             }
-            cn.g.cO = path;
-            cn.g.cJ = 0;
-            cn.g.cm = 0;
-            cn.g.cn = 0;
-            cn.g.bg = cn.g.aZ;
-            cn.g.bh = cn.g.ba;
-            bq.m = true;
+            GameScreen.player.posTransRoad = path;
+            GameScreen.player.countAutoMove = 0;
+            GameScreen.player.xStopMove = 0;
+            GameScreen.player.yStopMove = 0;
+            GameScreen.player.toX = GameScreen.player.x;
+            GameScreen.player.toY = GameScreen.player.y;
+            Player.isLockKey = true;
         } catch (Throwable t) {
-            bq.m = false;
+            Player.isLockKey = false;
         }
     }
 
     /** Clears the movement lock. Leaving it set is how the operator loses manual control. */
     private static void arrived() {
-        bq.m = false;
-        cn.g.cO = null;
-        cn.g.bg = cn.g.aZ;
-        cn.g.bh = cn.g.ba;
-        cn.g.bc = 0;
-        cn.g.bd = 0;
+        Player.isLockKey = false;
+        GameScreen.player.posTransRoad = null;
+        GameScreen.player.toX = GameScreen.player.x;
+        GameScreen.player.toY = GameScreen.player.y;
+        GameScreen.player.vx = 0;
+        GameScreen.player.vy = 0;
         settleTicks = 15;
         atkState = SETTLE;
     }
@@ -8857,7 +8903,7 @@ public final class Zeus {
     /**
      * Separates "no monsters here" from "monsters I cannot reach".
      *
-     * cf.K is the client's own answer to "did the last scan find a target": false means the
+     * PaintInfoGameScreen.isPaintInfoFocus is the client's own answer to "did the last scan find a target": false means the
      * radius is empty, true with a character that never enters combat means terrain. The two
      * call for different fixes, and KnightMod conflates them into one town-charm reflex.
      * This round reports the diagnosis and acts on neither, because acting means travelling.
@@ -8867,9 +8913,9 @@ public final class Zeus {
             stuckKind = 0;
             return;
         }
-        if (cf.K) {
+        if (PaintInfoGameScreen.isPaintInfoFocus) {
             noTargetTicks = 0;
-            noFightTicks = cn.g.cG == 2 ? 0 : noFightTicks + 1;
+            noFightTicks = GameScreen.player.Action == 2 ? 0 : noFightTicks + 1;
         } else {
             noFightTicks = 0;
             ++noTargetTicks;
@@ -8893,27 +8939,27 @@ public final class Zeus {
      */
     private static void skills() {
         try {
-            if (cn.i == null || cn.i.cv != 1 || cn.i.bs <= 0 || cn.i.cG == 4) {
+            if (GameScreen.ObjFocus == null || GameScreen.ObjFocus.typeObject != 1 || GameScreen.ObjFocus.hp <= 0 || GameScreen.ObjFocus.Action == 4) {
                 return;             // no live monster held: never swing at a corpse
             }
             // bq.j prints a message when ef == 0, which would spam the client's log every
             // tick, so that state is filtered before asking.
-            if (cn.g.ef == 0) {
+            if (GameScreen.player.typeMount == 0) {
                 return;
             }
-            ao[] page = bq.w == null ? null : bq.w[bq.d];
+            HotKey[] page = Player.mhotkey == null ? null : Player.mhotkey[Player.levelTab];
             if (page == null) {
                 return;
             }
             for (int slot = 0; slot < page.length; slot++) {
-                ao entry = page[slot];
-                if (entry == null || entry.b != 0) {
+                HotKey entry = page[slot];
+                if (entry == null || entry.type != 0) {
                     continue;       // b != 0 means the slot holds an item, not a skill
                 }
-                if (!cn.g.j(entry.a, -1)) {
+                if (!GameScreen.player.setDelaySkill(entry.id, -1)) {
                     continue;
                 }
-                cn.g.a(slot, false);
+                GameScreen.player.setActionHotKey(slot, false);
                 return;             // one press per tick, like the client's own loop
             }
         } catch (Throwable t) {
@@ -8925,20 +8971,20 @@ public final class Zeus {
      *
      * The client's own pump reads two fixed hotkey slots and cannot refill them once the id
      * they hold runs out, which is why it silently stops forever (docs/core/08 §5.4). Scanning
-     * the bag by function code instead keeps working. bq.s[L] is the shared item cooldown:
+     * the bag by function code instead keeps working. Player.timeDelayPotion[L] is the shared item cooldown:
      * this module arms it after each send, exactly as the client's own three drink paths do
      * (bq.java:355-357, bq.java:1052-1055, fo.java:499-502). Each function code cools on
      * its own slot, so HP and MP never block each other.
      */
     private static void potions() {
-        if ((!atkHpOn && !atkMpOn) || cn.g == null || cn.g.cG == 4 || bw.V == null) {
+        if ((!atkHpOn && !atkMpOn) || GameScreen.player == null || GameScreen.player.Action == 4 || Item.VecInvetoryPlayer == null) {
             return;
         }
         try {
-            if (atkHpOn && cn.g.bt > 0 && cn.g.bs * 100 / cn.g.bt < atkHpPct && drink(0)) {
+            if (atkHpOn && GameScreen.player.maxHp > 0 && GameScreen.player.hp * 100 / GameScreen.player.maxHp < atkHpPct && drink(0)) {
                 return;
             }
-            if (atkMpOn && cn.g.bv > 0 && cn.g.bu * 100 / cn.g.bv < atkMpPct) {
+            if (atkMpOn && GameScreen.player.maxMp > 0 && GameScreen.player.mp * 100 / GameScreen.player.maxMp < atkMpPct) {
                 drink(1);
             }
         } catch (Throwable t) {
@@ -8947,24 +8993,24 @@ public final class Zeus {
     }
     /** Sends the first bag potion of one function code, if its cooldown has expired. */
     private static boolean drink(int function) {
-        if (bq.s == null || function >= bq.s.length || bq.s[function] == null
-                || bq.s[function].b > 0) {
+        if (Player.timeDelayPotion == null || function >= Player.timeDelayPotion.length || Player.timeDelayPotion[function] == null
+                || Player.timeDelayPotion[function].value > 0) {
             return false;
         }
-        for (int index = 0; index < bw.V.c(); index++) {
-            Object entry = bw.V.a(index);
-            if (!(entry instanceof bw)) {
+        for (int index = 0; index < Item.VecInvetoryPlayer.size(); index++) {
+            Object entry = Item.VecInvetoryPlayer.elementAt(index);
+            if (!(entry instanceof Item)) {
                 continue;
             }
-            bw item = (bw) entry;
-            if (item.u != 4 || item.L != function || item.K <= 0) {
+            Item item = (Item) entry;
+            if (item.ItemCatagory != 4 || item.numPotion != function || item.numPotion <= 0) {
                 continue;
             }
-            q.a().e((short) item.O);
-            // Same arm as the client's own paths: 2000 ms real time, clocked by dx.a().
-            bq.s[function].b = 2000;
-            bq.s[function].c = 2000;
-            bq.s[function].a = dx.a();
+            GlobalService.gI().Use_Potion((short) item.Id);
+            // Same arm as the client's own paths: 2000 ms real time, clocked by mSystem.currentTimeMillis().
+            Player.timeDelayPotion[function].value = 2000;
+            Player.timeDelayPotion[function].limit = 2000;
+            Player.timeDelayPotion[function].timebegin = mSystem.currentTimeMillis();
             ++potionCount;
             return true;
         }
@@ -8973,8 +9019,8 @@ public final class Zeus {
 
     // ---- ITEM -----------------------------------------------------------------
     //
-    // The client already collects drops itself, gated on the `bq.q` record and filtered by
-    // `fa.ct` at `bq.java:530-558`. So this module does not pick anything up: it writes that
+    // The client already collects drops itself, gated on the `Player.autoItem` record and filtered by
+    // `MainObject.ct` at `bq.java:530-558`. So this module does not pick anything up: it writes that
     // record (see `applyPickup`) and lets the collector work. An earlier revision had its own
     // loop, which meant two mechanisms racing — set "không nhặt" in the game's own menu and
     // Zeus kept collecting, with no way to tell which one had taken an item.
@@ -8982,8 +9028,8 @@ public final class Zeus {
     // What is left here is what the client has no automation for: riding, and pressing OK on
     // the server-worded material dialog.
     //
-    // `fa.dH[]` is the material-box table, not a mount list. Mounts are the five template ids
-    // {62..66} the client's own menu matches (`fr.java:591-614`).
+    // `MainObject.dH[]` is the material-box table, not a mount list. Mounts are the five template ids
+    // {62..66} the client's own menu matches (`Menu2.java:591-614`).
 
     private static void items() {
         try {
@@ -9018,7 +9064,7 @@ public final class Zeus {
      * Rides a mount from the bag: the chosen template id, or any of them.
      *
      * By id, not by name: the client's own menu matches `u == 4 && O in {62..66}`
-     * (`fr.java:591-614`, `bg.java:80-88`), while the mod it shipped matched seven display strings —
+     * (`Menu2.java:591-614`, `bg.java:80-88`), while the mod it shipped matched seven display strings —
      * two of which correspond to no id at all, and all of which break when the server rewords one.
      * The names still reach the operator, but as data published from the bag rather than as a table
      * this jar invents: see `mountList()`.
@@ -9035,27 +9081,27 @@ public final class Zeus {
             --mountWait;
             return;
         }
-        if (!mountOn || cn.g == null || bw.V == null) {
+        if (!mountOn || GameScreen.player == null || Item.VecInvetoryPlayer == null) {
             return;
         }
-        if (cn.g.ef != -1) {
+        if (GameScreen.player.typeMount != -1) {
             return;                 // already riding
         }
-        bw pick = null;
-        for (int index = 0; index < bw.V.c(); index++) {
-            Object entry = bw.V.a(index);
-            if (!(entry instanceof bw)) {
+        Item pick = null;
+        for (int index = 0; index < Item.VecInvetoryPlayer.size(); index++) {
+            Object entry = Item.VecInvetoryPlayer.elementAt(index);
+            if (!(entry instanceof Item)) {
                 continue;
             }
-            bw item = (bw) entry;
-            if (item.u != 4 || item.O < MOUNT_ID_MIN || item.O > MOUNT_ID_MAX) {
+            Item item = (Item) entry;
+            if (item.ItemCatagory != 4 || item.Id < MOUNT_ID_MIN || item.Id > MOUNT_ID_MAX) {
                 continue;
             }
             if (mountId == MOUNT_ANY) {
                 pick = item;
                 break;              // any will do: the first one found
             }
-            if (item.O == mountId) {
+            if (item.Id == mountId) {
                 pick = item;
                 break;
             }
@@ -9066,14 +9112,14 @@ public final class Zeus {
         }
         mountWait = MOUNT_EVERY;
         // Opcode 32, the same sender the client's own mount menu uses.
-        q.a().e((short) pick.O);
-        trace("MOUNT sent id=" + pick.O + " want=" + mountId);
+        GlobalService.gI().Use_Potion((short) pick.Id);
+        trace("MOUNT sent id=" + pick.Id + " want=" + mountId);
     }
 
     /**
      * The mounts in the bag, as `id:name` pairs, so the tool can offer them by name.
      *
-     * The names come from the server, per item (`bw.g`, assigned in `j`'s constructors), and there
+     * The names come from the server, per item (`Item.g`, assigned in `j`'s constructors), and there
      * is no id-to-name table anywhere in the client to read instead. So the honest list is the one
      * the bag actually holds: an operator carrying nothing sees nothing to choose, which is true,
      * rather than five invented labels.
@@ -9082,23 +9128,23 @@ public final class Zeus {
      * ships one in a display string would otherwise split the field.
      */
     private static String mountList() {
-        if (bw.V == null) {
+        if (Item.VecInvetoryPlayer == null) {
             return "";
         }
         StringBuffer out = new StringBuffer(64);
-        for (int index = 0; index < bw.V.c(); index++) {
-            Object entry = bw.V.a(index);
-            if (!(entry instanceof bw)) {
+        for (int index = 0; index < Item.VecInvetoryPlayer.size(); index++) {
+            Object entry = Item.VecInvetoryPlayer.elementAt(index);
+            if (!(entry instanceof Item)) {
                 continue;
             }
-            bw item = (bw) entry;
-            if (item.u != 4 || item.O < MOUNT_ID_MIN || item.O > MOUNT_ID_MAX) {
+            Item item = (Item) entry;
+            if (item.ItemCatagory != 4 || item.Id < MOUNT_ID_MIN || item.Id > MOUNT_ID_MAX) {
                 continue;
             }
             if (out.length() > 0) {
                 out.append('|');
             }
-            out.append(item.O).append(':').append(field(item.g));
+            out.append(item.Id).append(':').append(field(item.itemName));
         }
         return out.toString();
     }
@@ -9119,8 +9165,8 @@ public final class Zeus {
     /** Sends the client's own dismount command. Needed on maps that forbid riding. */
     public static void dismount() {
         try {
-            if (cn.g != null && cn.g.ef != -1) {
-                q.a().h((byte) -1);
+            if (GameScreen.player != null && GameScreen.player.typeMount != -1) {
+                GlobalService.gI().useMount((byte) -1);
             }
         } catch (Throwable t) {
             // nothing useful to do if the socket is gone
@@ -9137,16 +9183,16 @@ public final class Zeus {
      * reworded sentence and it goes quiet with no error. It is also why the dialog is
      * pressed rather than swallowed: swallowing would deny the server its acknowledgement.
      *
-     * The text is read from da.q, the wrapped body lines, and NOT from toString(): neither
-     * da nor its parent cg overrides toString(), so it returns "ah@1a2b3c" and no wording
-     * could ever match. The title lives in ah.r, which is private; q is package-private and
-     * this class is in the same (default) package, so it needs no bytecode patch. Every ah
-     * constructor fills q from the body text (ah.java:384,412,434,465,499,531,676,712,811),
-     * so a dialog with a body always has it; the one path that can leave it null (ah.java:770)
+     * The text is read from MainDialog.q, the wrapped body lines, and NOT from toString(): neither
+     * MainDialog nor its parent cg overrides toString(), so it returns "MsgDialog@1a2b3c" and no wording
+     * could ever match. The title lives in MsgDialog.r, which is private; q is package-private and
+     * this class is in the same (default) package, so it needs no bytecode patch. Every MsgDialog
+     * constructor fills q from the body text (MsgDialog.java:384,412,434,465,499,531,676,712,811),
+     * so a dialog with a body always has it; the one path that can leave it null (MsgDialog.java:770)
      * is guarded below.
      *
      * Both the field and the wording are what KnightMod's own reconnect module reads
-     * (modsrc3/MOD06.java:94, matching "nguyen lieu me day" or "me day" + "da duoc dong"),
+     * (modsrc3/MOD06.java:94, matching "nguyen lieu me day" or "me day" + "MainDialog duoc dong"),
      * which is what confirmed that the material close-drop notice is a server dialog and not
      * a client setting.
      */
@@ -9155,7 +9201,7 @@ public final class Zeus {
             --medalWait;
             return;
         }
-        if (!itemMedal || fu.s == null) {
+        if (!itemMedal || GameCanvas.currentDialog == null) {
             return;
         }
         // The material walk is waiting for exactly this kind of dialog and needs to read it first.
@@ -9163,7 +9209,7 @@ public final class Zeus {
             return;
         }
         try {
-            String text = norm(dialogText(fu.s));
+            String text = norm(dialogText(GameCanvas.currentDialog));
             // "Chức năng rớt ..." is the shared prefix of all six materials in both directions;
             // matching the ĐÓNG wording alone left the MỞ confirmation on screen, blocking.
             // Deliberately not a bare "nguyen lieu" match: df.u and df.gd are the crafting NPC's
@@ -9172,7 +9218,7 @@ public final class Zeus {
                 return;
             }
             medalWait = 15;         // KnightMod's delay before pressing
-            pressOk(fu.s);
+            pressOk(GameCanvas.currentDialog);
         } catch (Throwable t) {
             // A dialog whose text cannot be read is left alone.
         }
@@ -9181,46 +9227,46 @@ public final class Zeus {
     /**
      * Invokes the dialog's own OK button, the same call a tap on it makes.
      *
-     * `ah.C` is the dialog's button list and the patcher widens it to public for exactly this.
-     * The earlier revision called `fu.s.b(0, 0)` instead — a pointer press at the top-left
+     * `MsgDialog.cmdList` is the dialog's button list and the patcher widens it to public for exactly this.
+     * The earlier revision called `GameCanvas.currentDialog.b(0, 0)` instead — a pointer press at the top-left
      * corner, which lands on the button only by luck. Falls back to the first button when no
      * caption matches, because a dialog with buttons always has one that dismisses it.
      */
-    private static void pressOk(da dialog) {
-        if (!(dialog instanceof ah)) {
+    private static void pressOk(MainDialog dialog) {
+        if (!(dialog instanceof MsgDialog)) {
             return;
         }
-        et buttons = ((ah) dialog).C;
-        if (buttons == null || buttons.c() <= 0) {
+        mVector buttons = ((MsgDialog) dialog).cmdList;
+        if (buttons == null || buttons.size() <= 0) {
             return;
         }
-        for (int i = 0; i < buttons.c(); i++) {
-            Object entry = buttons.a(i);
-            if (!(entry instanceof bt)) {
+        for (int i = 0; i < buttons.size(); i++) {
+            Object entry = buttons.elementAt(i);
+            if (!(entry instanceof iCommand)) {
                 continue;
             }
-            bt button = (bt) entry;
-            String caption = norm(button.a);
+            iCommand button = (iCommand) entry;
+            String caption = norm(button.caption);
             if (caption.indexOf("ok") >= 0 || caption.indexOf("dong") >= 0) {
-                button.a();
+                button.perform();
                 return;
             }
         }
-        Object first = buttons.a(0);
-        if (first instanceof bt) {
-            ((bt) first).a();
+        Object first = buttons.elementAt(0);
+        if (first instanceof iCommand) {
+            ((iCommand) first).perform();
         }
     }
 
     /** Joins one dialog's wrapped body lines and title/caption fields, or "" when it has none. */
-    private static String dialogText(da dialog) {
+    private static String dialogText(MainDialog dialog) {
         if (dialog == null) {
             return "";
         }
         StringBuffer out = new StringBuffer(64);
-        if (dialog instanceof ah) {
+        if (dialog instanceof MsgDialog) {
             try {
-                java.lang.reflect.Field fr = ah.class.getDeclaredField("r");
+                java.lang.reflect.Field fr = MsgDialog.class.getDeclaredField("nameShow");
                 fr.setAccessible(true);
                 Object vr = fr.get(dialog);
                 if (vr instanceof String && ((String) vr).length() > 0) {
@@ -9229,7 +9275,7 @@ public final class Zeus {
             } catch (Throwable t) {
             }
             try {
-                java.lang.reflect.Field fs = ah.class.getDeclaredField("s");
+                java.lang.reflect.Field fs = MsgDialog.class.getDeclaredField("status");
                 fs.setAccessible(true);
                 Object vs = fs.get(dialog);
                 if (vs instanceof String && ((String) vs).length() > 0) {
@@ -9237,51 +9283,29 @@ public final class Zeus {
                 }
             } catch (Throwable t) {
             }
+        } else if (dialog instanceof InputDialog) {
             try {
-                java.lang.reflect.Field ft = ah.class.getDeclaredField("t");
-                ft.setAccessible(true);
-                Object vt = ft.get(dialog);
-                if (vt instanceof String && ((String) vt).length() > 0) {
-                    out.append((String) vt).append(' ');
-                }
-            } catch (Throwable t) {
-            }
-        } else if (dialog instanceof dz) {
-            try {
-                java.lang.reflect.Field fh = dz.class.getDeclaredField("h");
-                fh.setAccessible(true);
-                Object vh = fh.get(dialog);
-                if (vh instanceof String && ((String) vh).length() > 0) {
-                    out.append((String) vh).append(' ');
-                }
-            } catch (Throwable t) {
-            }
-            try {
-                java.lang.reflect.Field fi = dz.class.getDeclaredField("i");
-                fi.setAccessible(true);
-                Object vi = fi.get(dialog);
-                if (vi instanceof String && ((String) vi).length() > 0) {
-                    out.append((String) vi).append(' ');
-                }
-            } catch (Throwable t) {
-            }
-            try {
-                java.lang.reflect.Field fj = dz.class.getDeclaredField("j");
-                fj.setAccessible(true);
-                Object vj = fj.get(dialog);
-                if (vj instanceof String && ((String) vj).length() > 0) {
-                    out.append((String) vj).append(' ');
+                java.lang.reflect.Field fn = InputDialog.class.getDeclaredField("name");
+                fn.setAccessible(true);
+                Object vn = fn.get(dialog);
+                if (vn instanceof String && ((String) vn).length() > 0) {
+                    out.append((String) vn).append(' ');
                 }
             } catch (Throwable t) {
             }
         }
-        String[] lines = dialog.q;
-        if (lines != null) {
-            for (int i = 0; i < lines.length; i++) {
-                if (lines[i] != null) {
-                    out.append(lines[i]).append(' ');
+        try {
+            java.lang.reflect.Field fStr = MainDialog.class.getDeclaredField("strinfo");
+            fStr.setAccessible(true);
+            String[] lines = (String[]) fStr.get(dialog);
+            if (lines != null) {
+                for (int i = 0; i < lines.length; i++) {
+                    if (lines[i] != null) {
+                        out.append(lines[i]).append(' ');
+                    }
                 }
             }
+        } catch (Throwable t) {
         }
         return out.toString();
     }
