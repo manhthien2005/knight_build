@@ -700,10 +700,8 @@ mod windows_adapter {
                 .get(settings.dungeon_max as usize)
                 .copied()
                 .unwrap_or(-1),
-            dungeon_schedule: crate::model::DUNGEON_SCHEDULE_VALUES
-                .get(settings.dungeon_schedule as usize)
-                .copied()
-                .unwrap_or(-1),
+            dungeon_start_min: settings.dungeon_start_min,
+            dungeon_end_min: settings.dungeon_end_min,
             // ---- end DUNGEON ----
             // ---- QOL --------------------------------------------------------------
             effects: 1,
@@ -809,10 +807,8 @@ mod windows_adapter {
                 .iter()
                 .position(|candidate| *candidate == settings.dungeon_max)
                 .unwrap_or(0) as u8,
-            dungeon_schedule: crate::model::DUNGEON_SCHEDULE_VALUES
-                .iter()
-                .position(|candidate| *candidate == settings.dungeon_schedule)
-                .unwrap_or(0) as u8,
+            dungeon_start_min: settings.dungeon_start_min,
+            dungeon_end_min: settings.dungeon_end_min,
             // ---- end DUNGEON ----
         }
     }
@@ -1309,11 +1305,9 @@ mod windows_adapter {
                 // ---- end ENHANCE ----
                 // ---- DUNGEON ----
                 dungeon_on: true,
-                // Both pickers on an index past their sentinel, so a round trip that forgot to
-                // translate would land on the wrong value rather than accidentally agreeing at zero.
-                // Index 6 is 6 runs; index 33 is slot 32, which is 16:00.
                 dungeon_max: 6,
-                dungeon_schedule: 33,
+                dungeon_start_min: 1200,
+                dungeon_end_min: 1215,
                 // ---- end DUNGEON ----
             };
             // The name and the detect request are the tool's own: the engine stores where a spot is,

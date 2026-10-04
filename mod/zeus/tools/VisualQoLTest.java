@@ -74,7 +74,8 @@ public class VisualQoLTest {
         sb.append("enhance.charm=0\n");
         sb.append("dungeon.on=0\n");
         sb.append("dungeon.max=-1\n");
-        sb.append("dungeon.schedule=-1\n");
+        sb.append("dungeon.startMin=-1\n");
+        sb.append("dungeon.endMin=-1\n");
         if (effects >= 0) {
             sb.append("ui.effects=").append(effects).append("\n");
         }
@@ -90,33 +91,33 @@ public class VisualQoLTest {
     public static void main(String[] args) throws Exception {
         System.out.println("=== VisualQoLTest ===");
 
-        // Test 1: Canonical Control v14 with exactly 37 keys parses and succeeds
-        System.out.println("--- Test 1: Canonical Control v14 with 37 keys ---");
-        String v14Valid = buildPayload(14, 1, 0, null);
-        boolean ok1 = parseControl(v14Valid);
-        check("Control v14 accepts exactly 37 valid keys", ok1);
+        // Test 1: Canonical Control v15 with exactly 38 keys parses and succeeds
+        System.out.println("--- Test 1: Canonical Control v15 with 38 keys ---");
+        String v15Valid = buildPayload(15, 1, 0, null);
+        boolean ok1 = parseControl(v15Valid);
+        check("Control v15 accepts exactly 38 valid keys", ok1);
         check("ui.effects=1 maps to fa.ch=0", fa.ch == 0);
         check("ui.hidePlayers=0 maps to cn.aN=false", !cn.aN);
         check("ui.hidePlayers=0 maps to cn.aO=false", !cn.aO);
 
         // Test 2: ui.effects = 0 maps to fa.ch = 1
         System.out.println("--- Test 2: ui.effects=0 ---");
-        String v14Effects0 = buildPayload(14, 0, 0, null);
-        boolean ok2 = parseControl(v14Effects0);
+        String v15Effects0 = buildPayload(15, 0, 0, null);
+        boolean ok2 = parseControl(v15Effects0);
         check("parseControl succeeds for ui.effects=0", ok2);
         check("ui.effects=0 maps to fa.ch=1", fa.ch == 1);
 
         // Test 3: ui.effects = 1 maps to fa.ch = 0
         System.out.println("--- Test 3: ui.effects=1 ---");
-        String v14Effects1 = buildPayload(14, 1, 0, null);
-        boolean ok3 = parseControl(v14Effects1);
+        String v15Effects1 = buildPayload(15, 1, 0, null);
+        boolean ok3 = parseControl(v15Effects1);
         check("parseControl succeeds for ui.effects=1", ok3);
         check("ui.effects=1 maps to fa.ch=0", fa.ch == 0);
 
         // Test 4: ui.hidePlayers = 1 maps to cn.aN=true, cn.aO=false
         System.out.println("--- Test 4: ui.hidePlayers=1 ---");
-        String v14Hide1 = buildPayload(14, 1, 1, null);
-        boolean ok4 = parseControl(v14Hide1);
+        String v15Hide1 = buildPayload(15, 1, 1, null);
+        boolean ok4 = parseControl(v15Hide1);
         check("parseControl succeeds for ui.hidePlayers=1", ok4);
         check("ui.hidePlayers=1 maps to cn.aN=true", cn.aN);
         check("ui.hidePlayers=1 maps to cn.aO=false", !cn.aO);
@@ -124,8 +125,8 @@ public class VisualQoLTest {
 
         // Test 5: ui.hidePlayers = 2 maps to cn.aN=false, cn.aO=true
         System.out.println("--- Test 5: ui.hidePlayers=2 ---");
-        String v14Hide2 = buildPayload(14, 1, 2, null);
-        boolean ok5 = parseControl(v14Hide2);
+        String v15Hide2 = buildPayload(15, 1, 2, null);
+        boolean ok5 = parseControl(v15Hide2);
         check("parseControl succeeds for ui.hidePlayers=2", ok5);
         check("ui.hidePlayers=2 maps to cn.aN=false", !cn.aN);
         check("ui.hidePlayers=2 maps to cn.aO=true", cn.aO);
@@ -133,39 +134,40 @@ public class VisualQoLTest {
 
         // Test 6: Direct transition from mode 1 to mode 2 never produces true/true
         System.out.println("--- Test 6: Direct transition between hide modes ---");
-        parseControl(buildPayload(14, 1, 1, null));
+        parseControl(buildPayload(15, 1, 1, null));
         check("Pre-condition mode 1 cn.aN=true", cn.aN && !cn.aO);
-        parseControl(buildPayload(14, 1, 2, null));
+        parseControl(buildPayload(15, 1, 2, null));
         check("Post-transition mode 2 cn.aN=false", !cn.aN && cn.aO);
         check("Never true/true", !(cn.aN && cn.aO));
 
         // Test 7: Invalid ui.effects value is rejected (fails closed)
         System.out.println("--- Test 7: Invalid ui.effects ---");
-        String v14InvalidEffects = buildPayload(14, 2, 0, null);
-        boolean ok7 = parseControl(v14InvalidEffects);
+        String v15InvalidEffects = buildPayload(15, 2, 0, null);
+        boolean ok7 = parseControl(v15InvalidEffects);
         check("ui.effects=2 is rejected", !ok7);
 
         // Test 8: Invalid ui.hidePlayers value is rejected (fails closed)
         System.out.println("--- Test 8: Invalid ui.hidePlayers ---");
-        String v14InvalidHide = buildPayload(14, 1, 3, null);
-        boolean ok8 = parseControl(v14InvalidHide);
+        String v15InvalidHide = buildPayload(15, 1, 3, null);
+        boolean ok8 = parseControl(v15InvalidHide);
         check("ui.hidePlayers=3 is rejected", !ok8);
 
         // Test 9: Unknown key fails closed
         System.out.println("--- Test 9: Unknown key ---");
-        String v14Unknown = buildPayload(14, 1, 0, "unknown.key=1");
-        boolean ok9 = parseControl(v14Unknown);
+        String v15Unknown = buildPayload(15, 1, 0, "unknown.key=1");
+        boolean ok9 = parseControl(v15Unknown);
         check("Unknown key is rejected", !ok9);
 
-        // Test 10: Stale v13 payload (35 keys) fails closed on v14 Zeus
-        System.out.println("--- Test 10: Stale v13 payload fails closed ---");
-        String v13Payload = buildPayload(13, -1, -1, null);
-        boolean ok10 = parseControl(v13Payload);
-        check("Stale v13 payload is rejected by v14 Zeus", !ok10);
+        // Test 10: Stale v14 payload fails closed on v15 Zeus
+        System.out.println("--- Test 10: Stale v14 payload fails closed ---");
+        String v14Payload = buildPayload(14, 1, 0, null);
+        boolean ok10 = parseControl(v14Payload);
+        check("Stale v14 payload is rejected by v15 Zeus", !ok10);
 
         // Test 11: Reconnect / lifecycle reconciliation restores desired state
         System.out.println("--- Test 11: Lifecycle reconciliation preserves desired visual state ---");
-        parseControl(buildPayload(14, 0, 2, null));
+        boolean ok11 = parseControl(buildPayload(15, 0, 2, null));
+        check("parseControl succeeds for Test 11", ok11);
         check("Desired state set: fa.ch=1, cn.aO=true", fa.ch == 1 && cn.aO);
         // Simulate client reset on screen change or reconnect
         fa.ch = 0;

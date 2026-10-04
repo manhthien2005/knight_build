@@ -80,8 +80,8 @@ pub use crate::reconnect_status::RECONNECT_STATUS_FILE_NAME;
 // `../ZEUS-CORE-CHANGES.md` §4 asserts. The rule they encode: the version number is a
 // FUNCTION OF THE KEY SET. Change any key, bump the version, in the same commit.
 pub use crate::control::{
-    CONTROL_VERSION, CONTROL_VERSION_V13, CTL_KEY_COUNT, CTL_KEY_COUNT_V13, CTL_KEY_NAMES,
-    CTL_KEY_NAMES_V13, MAX_CONTROL_BYTES,
+    CONTROL_VERSION, CONTROL_VERSION_V13, CONTROL_VERSION_V14, CTL_KEY_COUNT, CTL_KEY_COUNT_V13,
+    CTL_KEY_COUNT_V14, CTL_KEY_NAMES, CTL_KEY_NAMES_V13, CTL_KEY_NAMES_V14, MAX_CONTROL_BYTES,
 };
 pub use crate::health::{HEALTH_VERSION, MAX_HEALTH_BYTES};
 pub use crate::player::{MAX_SNAPSHOT_BYTES, SUPPORTED_VERSION};
@@ -93,8 +93,8 @@ pub use crate::reconnect_status::{MAX_RECONNECT_STATUS_BYTES, RECONNECT_STATUS_V
 // hard-codes the same numbers in TypeScript (web/control-schema-v13.ts); this list is the
 // authority those numbers were copied from.
 pub use crate::control::{
-    DUNGEON_RUNS_MAX, DUNGEON_SCHEDULE_SLOTS, MAX_NAV_TARGET, MAX_RADIUS, MAX_ZONE_PICK,
-    MIN_RADIUS, MIN_ZONE_PICK,
+    DUNGEON_MAX_MINUTE, DUNGEON_MIN_MINUTE, DUNGEON_RUNS_MAX, DUNGEON_SCHEDULE_SLOTS,
+    DUNGEON_UNSCHEDULED, MAX_NAV_TARGET, MAX_RADIUS, MAX_ZONE_PICK, MIN_RADIUS, MIN_ZONE_PICK,
 };
 
 // ── types ────────────────────────────────────────────────────────────────────────
@@ -158,9 +158,11 @@ mod tests {
     /// compares. If any of these moves without the contract doc moving with it, this is the
     /// cheapest place to notice.
     #[test]
-    fn contract_numbers_match_the_documented_v14_v6() {
-        assert_eq!(CONTROL_VERSION, 14);
-        assert_eq!(CTL_KEY_COUNT, 37);
+    fn contract_numbers_match_the_documented_v15_v6() {
+        assert_eq!(CONTROL_VERSION, 15);
+        assert_eq!(CTL_KEY_COUNT, 38);
+        assert_eq!(CONTROL_VERSION_V14, 14);
+        assert_eq!(CTL_KEY_COUNT_V14, 37);
         assert_eq!(CONTROL_VERSION_V13, 13);
         assert_eq!(CTL_KEY_COUNT_V13, 35);
         assert_eq!(SUPPORTED_VERSION, 6);
@@ -172,7 +174,9 @@ mod tests {
         assert_eq!(MAX_RECONNECT_STATUS_BYTES, 1024);
         assert_eq!(CTL_KEY_NAMES.len(), CTL_KEY_COUNT);
         assert_eq!(CTL_KEY_NAMES[0], "v");
-        assert_eq!(CTL_KEY_NAMES[35], "ui.effects");
-        assert_eq!(CTL_KEY_NAMES[36], "ui.hidePlayers");
+        assert_eq!(CTL_KEY_NAMES[34], "dungeon.startMin");
+        assert_eq!(CTL_KEY_NAMES[35], "dungeon.endMin");
+        assert_eq!(CTL_KEY_NAMES[36], "ui.effects");
+        assert_eq!(CTL_KEY_NAMES[37], "ui.hidePlayers");
     }
 }

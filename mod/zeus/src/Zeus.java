@@ -551,9 +551,9 @@ public final class Zeus {
         "enhance.on", "enhance.maxLv", "enhance.charm",
         // ---- end ENHANCE ------------------------------------------------------
         // ---- DUNGEON ----------------------------------------------------------
-        "dungeon.on", "dungeon.max", "dungeon.schedule",
+        "dungeon.on", "dungeon.max", "dungeon.startMin", "dungeon.endMin",
         // ---- end DUNGEON ------------------------------------------------------
-        // ---- VISUAL QOL (v14) -------------------------------------------------
+        // ---- VISUAL QOL (v15) -------------------------------------------------
         "ui.effects", "ui.hidePlayers",
         // ---- end VISUAL QOL ---------------------------------------------------
     };
@@ -571,6 +571,7 @@ public final class Zeus {
     // sees, and a ring nobody asked for over a game they are watching is an imposition.
     private static final int K_RING = 24;
     // Arriving at the spot parks the character; fighting there is a second decision. Off by default on
+    // a fresh profile because a ring nobody asked for over a game they are watching is an imposition.
     private static final int K_FARM = 25;
     private static final int K_DETECT = 26;
     // The revive module's own three keys. It is not part of ATTACK and shares no field with it: a
@@ -590,26 +591,21 @@ public final class Zeus {
     private static final int K_ENHANCE_CHARM = 31;
     // ---- end ENHANCE ----------------------------------------------------------
     // ---- DUNGEON --------------------------------------------------------------
-    // The dungeon module's own three keys. Not part of ATTACK and sharing no field with it: a run
-    // is a trip to one NPC and back, so the switch has to work on a character that is not armed to
-    // hold a spot — the reason REVIVE and ENHANCE are their own modules too. `dungeon.on` is the
-    // switch, `dungeon.max` is how many runs to make before stopping, `dungeon.schedule` is the
-    // half-hour slot of day to leave at.
-    //
-    // Both of the last two take -1 as their off sentinel rather than 0, because 0 is a real value
-    // inside each range: zero runs would mean "stop before starting" and slot 0 is 00:00. -1 sits
-    // outside both, so it cannot be mistaken for a setting, and it is what every existing account
-    // is configured for — which is also what makes the module fail closed.
+    // `dungeon.on` is the switch, `dungeon.max` is how many runs to make before stopping,
+    // `dungeon.startMin` is the start minute of the daily UTC+7 window (inclusive, 0..1439),
+    // `dungeon.endMin` is the end minute of the daily UTC+7 window (exclusive, 0..1439).
+    // -1 for both startMin and endMin means unscheduled / immediate behavior.
     private static final int K_DUNGEON_ON = 32;
     private static final int K_DUNGEON_MAX = 33;
-    private static final int K_DUNGEON_SCHED = 34;
+    private static final int K_DUNGEON_START_MIN = 34;
+    private static final int K_DUNGEON_END_MIN = 35;
     // ---- end DUNGEON ----------------------------------------------------------
-    // ---- VISUAL QOL (v14) -----------------------------------------------------
-    private static final int K_UI_EFFECTS = 35;
-    private static final int K_UI_HIDE_PLAYERS = 36;
+    // ---- VISUAL QOL (v15) -----------------------------------------------------
+    private static final int K_UI_EFFECTS = 36;
+    private static final int K_UI_HIDE_PLAYERS = 37;
     // ---- end VISUAL QOL -------------------------------------------------------
     /** Format version this jar accepts. Bumped when the key set changed shape. */
-    private static final int CTL_VERSION = 14;
+    private static final int CTL_VERSION = 15;
 
     /** Desired state for ui.effects: 1 (enabled, default), 0 (disabled). */
     private static int desiredEffects = 1;
@@ -776,8 +772,13 @@ public final class Zeus {
         if (value[K_DUNGEON_MAX] < -1 || value[K_DUNGEON_MAX] > 10) {
             return false;
         }
-        // -1 is no timer, else a half-hour slot of day: 48 of them, 0 = 00:00 through 47 = 23:30.
-        if (value[K_DUNGEON_SCHED] < -1 || value[K_DUNGEON_SCHED] > 47) {
+        int startMin = value[K_DUNGEON_START_MIN];
+        int endMin = value[K_DUNGEON_END_MIN];
+        boolean unscheduled = (startMin == -1 && endMin == -1);
+        boolean validWindow = (startMin >= 0 && startMin <= 1439
+                && endMin >= 0 && endMin <= 1439
+                && startMin < endMin);
+        if (!unscheduled && !validWindow) {
             return false;
         }
         // ---- end DUNGEON ------------------------------------------------------
@@ -903,7 +904,8 @@ public final class Zeus {
             }
         }
         dungeonMaxRuns = value[K_DUNGEON_MAX];
-        dungeonSchedule = value[K_DUNGEON_SCHED];
+        dungeonStartMin = value[K_DUNGEON_START_MIN];
+        dungeonEndMin = value[K_DUNGEON_END_MIN];
         // ---- end DUNGEON ------------------------------------------------------
         for (int i = 0; i < BUFF_SLOTS; i++) {
             atkBuff[i] = buffs.charAt(i) == '1';
@@ -7002,53 +7004,78 @@ public final class Zeus {
                 || norm(mapName(fu.q.d)).indexOf(DUNGEON_NAME) >= 0;
     }
 
+    /** Time zone identifier explicitly used for all dungeon scheduling calculations. */
+    public static final String DUNGEON_TZ_ID = "GMT+07:00";
+
     /**
-     * The half-hour slot of day the wall clock is in, 0..47, or -1 when the clock is unreadable.
-     *
-     * `dx.a()` is the client's MONOTONIC clock and is useless here: a schedule is a time of day, so
-     * this needs a wall clock. Calendar is in the MIDP profile and this file already reaches into
-     * `java.io` by qualified name rather than by import, so the same style keeps the header alone.
+     * Minute of day in UTC+7 (0..1439), or -1 if the clock is unreadable.
+     * Computes hour * 60 + minute explicitly in GMT+07:00.
      */
-    private static int dungeonSlotNow() {
+    public static int dungeonMinuteOfDayUtc7(long epochMillis) {
         try {
-            java.util.Calendar clock = java.util.Calendar.getInstance();
-            return clock.get(java.util.Calendar.HOUR_OF_DAY) * 2
-                    + (clock.get(java.util.Calendar.MINUTE) >= 30 ? 1 : 0);
+            java.util.Calendar cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone(DUNGEON_TZ_ID));
+            cal.setTime(new java.util.Date(epochMillis));
+            return cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE);
         } catch (Throwable t) {
             return -1;
         }
     }
 
-    /** The day of year, or -1 when the clock is unreadable. What a fired schedule is stamped with. */
-    private static int dungeonDayNow() {
+    public static int dungeonMinuteOfDayUtc7() {
+        return dungeonMinuteOfDayUtc7(System.currentTimeMillis());
+    }
+
+    /**
+     * Date key in UTC+7 (year * 1000 + dayOfYear), or -1 if the clock is unreadable.
+     * Stamped on the active scheduled day to track daily quotas across calendar transitions.
+     */
+    public static int dungeonDateKeyUtc7(long epochMillis) {
         try {
-            return java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_YEAR);
+            java.util.Calendar cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone(DUNGEON_TZ_ID));
+            cal.setTime(new java.util.Date(epochMillis));
+            int year = cal.get(java.util.Calendar.YEAR);
+            int dayOfYear = cal.get(java.util.Calendar.DAY_OF_YEAR);
+            return year * 1000 + dayOfYear;
         } catch (Throwable t) {
             return -1;
         }
     }
 
+    public static int dungeonDateKeyUtc7() {
+        return dungeonDateKeyUtc7(System.currentTimeMillis());
+    }
+
+    /** True if a valid scheduled window is configured (0 <= startMin < endMin <= 1439). */
+    public static boolean isDungeonScheduled() {
+        return dungeonStartMin >= 0 && dungeonEndMin >= 0 && dungeonStartMin < dungeonEndMin;
+    }
+
     /**
-     * Whether a scheduled trip may start now.
-     *
-     * `slot >= dungeonSchedule` is the same test as comparing minutes against `schedule * 30`, and
-     * the day stamp is what makes it fire once: a slot is half an hour WIDE, so without the stamp a
-     * trip armed at 20:00 for slot 40 would start again on every tick until 20:30.
-     *
-     * An unreadable clock fails OPEN, deliberately. A character that never runs because the clock
-     * threw is worse than one that runs early — the schedule is a convenience, not a safety limit,
-     * and the alternative is a module that silently stops working with nothing in the trace to say
-     * why.
+     * Whether a scheduled trip may start at the given epoch timestamp.
+     * Start minute is inclusive, end minute is exclusive (startMin <= min < endMin).
+     * Unreadable clock or invalid conversion FAILS CLOSED (returns false).
+     * Does not catch up late if past endMin.
      */
-    private static boolean dungeonScheduleDue() {
-        int slot = dungeonSlotNow();
-        if (slot < 0) {
+    public static boolean dungeonScheduleDue(long epochMillis) {
+        if (!isDungeonScheduled()) {
             return true;
         }
-        if (dungeonDayNow() == dungeonScheduleDay) {
-            return false;           // today's trip already started
+        int min = dungeonMinuteOfDayUtc7(epochMillis);
+        int dateKey = dungeonDateKeyUtc7(epochMillis);
+        if (min < 0 || dateKey < 0) {
+            return false; // clock failure fails closed
         }
-        return slot >= dungeonSchedule;
+        if (min < dungeonStartMin || min >= dungeonEndMin) {
+            return false;
+        }
+        if (dateKey == dungeonScheduleDateKey && dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
+            return false;
+        }
+        return true;
+    }
+
+    public static boolean dungeonScheduleDue() {
+        return dungeonScheduleDue(System.currentTimeMillis());
     }
 
     // ---- end NPC ENGINE -------------------------------------------------------
@@ -7132,7 +7159,9 @@ public final class Zeus {
      */
     static boolean dungeonEnabled = false;
     static int dungeonMaxRuns = -1;
-    static int dungeonSchedule = -1;
+    static int dungeonStartMin = -1;
+    static int dungeonEndMin = -1;
+    static int dungeonScheduleDateKey = -1;
     static int dungeonState = DN_OFF;
     static int dungeonWhy = 0;
     static int dungeonRuns = 0;
@@ -7143,7 +7172,6 @@ public final class Zeus {
     static int dungeonStep = 0;
     static boolean dungeonWasIn = false;
     static int dungeonNpcCu = -1;
-    static int dungeonScheduleDay = -1;
     static boolean dungeonTripActive = false;
     static int dungeonStallTicks = 0;
     static int dungeonLastX = Integer.MIN_VALUE;
@@ -7380,7 +7408,7 @@ public final class Zeus {
         dungeonWasIn = false;
         dungeonTripActive = false;
         dungeonNpcCu = -1;
-        dungeonScheduleDay = -1;
+        dungeonScheduleDateKey = -1;
         dungeonStallTicks = 0;
         dungeonLastX = Integer.MIN_VALUE;
         dungeonLastY = Integer.MIN_VALUE;
@@ -7612,8 +7640,10 @@ public final class Zeus {
                     return;
                 case DN_FAILURE:
                     if (dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
-                        dungeonStop(4, "run limit reached");
-                        return;
+                        if (!isDungeonScheduled()) {
+                            dungeonStop(4, "run limit reached");
+                            return;
+                        }
                     }
                     dungeonState = DN_IDLE;
                     return;
@@ -7634,19 +7664,38 @@ public final class Zeus {
 
     /** Leaves IDLE when the run limit allows it and the schedule, if any, has come round. */
     private static void dungeonIdle() {
-        if (dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
-            dungeonStop(4, "run limit of " + dungeonMaxRuns + " already reached");
-            return;
-        }
-        if (!dungeonTripActive) {
-            if (dungeonSchedule >= 0) {
-                if (!dungeonScheduleDue()) {
-                    return;
-                }
-                dungeonScheduleDay = dungeonDayNow();
+        long now = System.currentTimeMillis();
+        boolean scheduled = isDungeonScheduled();
+        if (!scheduled) {
+            if (dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
+                dungeonStop(4, "run limit of " + dungeonMaxRuns + " already reached");
+                return;
             }
-            dungeonTripActive = true;
+        } else {
+            int dateKey = dungeonDateKeyUtc7(now);
+            int min = dungeonMinuteOfDayUtc7(now);
+            if (dateKey < 0 || min < 0) {
+                return; // clock failure fails closed
+            }
+            if (dateKey != dungeonScheduleDateKey) {
+                if (dungeonStartMin <= min && min < dungeonEndMin) {
+                    dungeonScheduleDateKey = dateKey;
+                    dungeonRuns = 0;
+                    dungeonConsecutiveFails = 0;
+                    trace("DUNGEON entered new scheduled UTC+7 day " + dateKey + "; reset daily quota");
+                } else {
+                    return; // outside window on new/un-stamped day; wait for window
+                }
+            } else {
+                if (min < dungeonStartMin || min >= dungeonEndMin) {
+                    return; // outside window today
+                }
+                if (dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
+                    return; // quota for today reached, remain idle waiting for next day
+                }
+            }
         }
+        dungeonTripActive = true;
         dungeonState = DN_ROUTING;
         dungeonTried = 0;
         dungeonStep = 0;
@@ -8240,10 +8289,18 @@ public final class Zeus {
         dungeonManualEscaped = false;
         trace("DUNGEON run " + dungeonRuns + " complete");
         if (dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
-            dungeonStop(4, "run limit of " + dungeonMaxRuns + " reached");
+            if (!isDungeonScheduled()) {
+                dungeonStop(4, "run limit of " + dungeonMaxRuns + " reached");
+                return;
+            }
+            dungeonState = DN_IDLE;
+            dungeonTripActive = false;
+            dungeonWait = DN_BETWEEN_RUNS;
+            trace("DUNGEON reached daily max runs of " + dungeonMaxRuns + " for UTC+7 day; waiting for next window");
             return;
         }
         dungeonState = DN_IDLE;
+        dungeonTripActive = false;
         dungeonWait = DN_BETWEEN_RUNS;
         dungeonTried = 0;
         dungeonStep = 0;

@@ -862,9 +862,9 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
         ],
     },
     RuntimeContract {
-        name: "AUTO_DUNGEON_V14",
+        name: "AUTO_DUNGEON_V15",
         jar_sha256: JarManifest::AUTO_DUNGEON_COMPATIBLE_JAR_SHA256,
-        ctl_version: 14,
+        ctl_version: 15,
         capabilities: &[
             JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
             JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
@@ -916,7 +916,7 @@ impl JarManifest {
     pub const ENHANCEMENT_RESILIENT_COMPATIBLE_JAR_SHA256: &'static str =
         "3999f6b674c1780ac3f26d47ad035f5a2d749ef38cea5b256dcd8e1aec3c3504";
     pub const AUTO_DUNGEON_COMPATIBLE_JAR_SHA256: &'static str =
-        "7540ae28a8df1b355c8a0fdf1843058cdfe13232ed70f28e39edf2f27747770c";
+        "41b83fd4d4d3c7cef52345803a17eed08da5ae772433dbd94c51d9d00b29e8d6";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -3500,8 +3500,8 @@ mod tests {
         // 7. Test loading actual repository zeus-jar.json
         if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
             assert_eq!(loaded_manifest.jar_sha256, JarManifest::AUTO_DUNGEON_COMPATIBLE_JAR_SHA256);
-            assert_eq!(loaded_manifest.ctl_version, 14);
-            assert_eq!(loaded_manifest.ctl_key_count, 37);
+            assert_eq!(loaded_manifest.ctl_version, 15);
+            assert_eq!(loaded_manifest.ctl_key_count, 38);
             assert!(loaded_manifest.is_character_slot_compatible());
             assert!(loaded_manifest.is_visual_qol_compatible());
             assert!(loaded_manifest.is_enhancement_queue_compatible());

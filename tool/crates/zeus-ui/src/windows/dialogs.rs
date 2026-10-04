@@ -69,7 +69,8 @@ pub const ID_CFG_ENHANCE_CHARM: u16 = 0x2052;
 /// base id from a plain one without checking each.
 pub const ID_CFG_DUNGEON_ON: u16 = 0x2060;
 pub const ID_CFG_DUNGEON_MAX: u16 = 0x2061;
-pub const ID_CFG_DUNGEON_SCHED: u16 = 0x2062;
+pub const ID_CFG_DUNGEON_START: u16 = 0x2062;
+pub const ID_CFG_DUNGEON_END: u16 = 0x2063;
 // ---- end DUNGEON ----
 /// Action button to immediately start traveling to the spot or destination map.
 pub const ID_CFG_TRAVEL_START: u16 = 0x2070;
@@ -441,9 +442,15 @@ pub const CONFIG_ROWS: &[ConfigRow] = &[
         group: ConfigGroup::Travel,
     },
     ConfigRow {
-        id: ID_CFG_DUNGEON_SCHED,
-        label: "Lịch phó bản",
-        control: ConfigControl::Choice(&crate::model::DUNGEON_SCHEDULE_OPTIONS),
+        id: ID_CFG_DUNGEON_START,
+        label: "Bắt đầu phó bản (UTC+7)",
+        control: ConfigControl::Text,
+        group: ConfigGroup::Travel,
+    },
+    ConfigRow {
+        id: ID_CFG_DUNGEON_END,
+        label: "Kết thúc khung (UTC+7)",
+        control: ConfigControl::Text,
         group: ConfigGroup::Travel,
     },
     // ---- end DUNGEON ----
@@ -547,6 +554,12 @@ pub enum FieldError {
     NotANumber,
     /// A config field held a number outside the range the client accepts.
     NumberOutOfRange,
+    /// A single dungeon time field was left blank while the other was filled.
+    DungeonTimeOnlyOneBlank,
+    /// A dungeon time string was not in HH:mm format (00:00 to 23:59).
+    DungeonTimeInvalid,
+    /// Start time was not strictly earlier than end time.
+    DungeonTimeOrderInvalid,
 }
 
 impl FieldError {
@@ -563,6 +576,59 @@ impl FieldError {
             Self::ConfirmationMismatch => "Nhập đúng XOA để xác nhận",
             Self::NotANumber => "Chỉ nhập số nguyên",
             Self::NumberOutOfRange => "Số nằm ngoài khoảng cho phép",
+            Self::DungeonTimeOnlyOneBlank => "Cần điền cả giờ bắt đầu và kết thúc (hoặc để trống cả hai)",
+            Self::DungeonTimeInvalid => "Định dạng giờ không hợp lệ (cần nhập đúng HH:mm, ví dụ 20:00)",
+            Self::DungeonTimeOrderInvalid => "Giờ bắt đầu phải trước giờ kết thúc",
+        }
+    }
+}
+
+/// Formats minute-of-day (0..=1439) into "HH:mm", or empty string if -1 / invalid.
+pub fn format_time_hhmm(minute: i16) -> String {
+    if !(0..=1439).contains(&minute) {
+        String::new()
+    } else {
+        format!("{:02}:{:02}", minute / 60, minute % 60)
+    }
+}
+
+/// Parses a time string in "HH:mm" format to minute-of-day (0..=1439).
+/// Returns Ok(None) if the trimmed input is empty.
+pub fn parse_time_hhmm(value: &str) -> Result<Option<i16>, FieldError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    if parts.len() != 2 || parts[0].len() != 2 || parts[1].len() != 2 {
+        return Err(FieldError::DungeonTimeInvalid);
+    }
+    let hour: i16 = parts[0].parse().map_err(|_| FieldError::DungeonTimeInvalid)?;
+    let min: i16 = parts[1].parse().map_err(|_| FieldError::DungeonTimeInvalid)?;
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&min) {
+        return Err(FieldError::DungeonTimeInvalid);
+    }
+    Ok(Some(hour * 60 + min))
+}
+
+/// Validates the pair of dungeon time strings.
+/// Both blank -> Ok((-1, -1)).
+/// One blank -> Err(DungeonTimeOnlyOneBlank).
+/// Invalid format -> Err(DungeonTimeInvalid).
+/// start >= end -> Err(DungeonTimeOrderInvalid).
+/// Otherwise -> Ok((start, end)).
+pub fn validate_dungeon_window(start_str: &str, end_str: &str) -> Result<(i16, i16), FieldError> {
+    let start_opt = parse_time_hhmm(start_str)?;
+    let end_opt = parse_time_hhmm(end_str)?;
+    match (start_opt, end_opt) {
+        (None, None) => Ok((-1, -1)),
+        (Some(_), None) | (None, Some(_)) => Err(FieldError::DungeonTimeOnlyOneBlank),
+        (Some(start), Some(end)) => {
+            if start >= end {
+                Err(FieldError::DungeonTimeOrderInvalid)
+            } else {
+                Ok((start, end))
+            }
         }
     }
 }
@@ -740,6 +806,9 @@ mod tests {
             FieldError::ConfirmationMismatch,
             FieldError::NotANumber,
             FieldError::NumberOutOfRange,
+            FieldError::DungeonTimeOnlyOneBlank,
+            FieldError::DungeonTimeInvalid,
+            FieldError::DungeonTimeOrderInvalid,
         ] {
             let label = error.label();
             assert!(!label.is_empty(), "{error:?} has no copy");
@@ -756,7 +825,7 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), count, "a config row id is used twice");
-        assert_eq!(count, 44);
+        assert_eq!(count, 45);
         for row in CONFIG_ROWS {
             assert!(!row.label.is_empty(), "row {:#x} has no label", row.id);
             assert!(
@@ -776,7 +845,7 @@ mod tests {
         // All groups are populated, so no column renders as an empty box.
         assert_eq!(config_rows(ConfigGroup::Combat).count(), 9);
         assert_eq!(config_rows(ConfigGroup::Recovery).count(), 12);
-        assert_eq!(config_rows(ConfigGroup::Travel).count(), 13);
+        assert_eq!(config_rows(ConfigGroup::Travel).count(), 14);
         assert_eq!(config_rows(ConfigGroup::Loot).count(), 10);
         assert!(!ConfigGroup::Combat.caption().is_empty());
         assert!(!ConfigGroup::Recovery.caption().is_empty());
@@ -848,6 +917,48 @@ mod tests {
         assert_eq!(
             validate_number("-1", 0, 32_767),
             Err(FieldError::NumberOutOfRange)
+        );
+    }
+
+    #[test]
+    fn dungeon_time_validation_enforces_utc7_window_rules() {
+        // HH:mm parsing and formatting
+        assert_eq!(parse_time_hhmm("00:00"), Ok(Some(0)));
+        assert_eq!(parse_time_hhmm("20:00"), Ok(Some(1200)));
+        assert_eq!(parse_time_hhmm("20:15"), Ok(Some(1215)));
+        assert_eq!(parse_time_hhmm("23:59"), Ok(Some(1439)));
+        assert_eq!(parse_time_hhmm(""), Ok(None));
+        assert_eq!(parse_time_hhmm("   "), Ok(None));
+        assert_eq!(parse_time_hhmm("24:00"), Err(FieldError::DungeonTimeInvalid));
+        assert_eq!(parse_time_hhmm("20:60"), Err(FieldError::DungeonTimeInvalid));
+        assert_eq!(parse_time_hhmm("20:5"), Err(FieldError::DungeonTimeInvalid));
+        assert_eq!(parse_time_hhmm("abc"), Err(FieldError::DungeonTimeInvalid));
+
+        assert_eq!(format_time_hhmm(0), "00:00");
+        assert_eq!(format_time_hhmm(1200), "20:00");
+        assert_eq!(format_time_hhmm(1215), "20:15");
+        assert_eq!(format_time_hhmm(1439), "23:59");
+        assert_eq!(format_time_hhmm(-1), "");
+
+        // Window validation
+        assert_eq!(validate_dungeon_window("", ""), Ok((-1, -1)));
+        assert_eq!(validate_dungeon_window("  ", ""), Ok((-1, -1)));
+        assert_eq!(validate_dungeon_window("20:00", "20:15"), Ok((1200, 1215)));
+        assert_eq!(
+            validate_dungeon_window("20:00", ""),
+            Err(FieldError::DungeonTimeOnlyOneBlank)
+        );
+        assert_eq!(
+            validate_dungeon_window("", "20:15"),
+            Err(FieldError::DungeonTimeOnlyOneBlank)
+        );
+        assert_eq!(
+            validate_dungeon_window("20:15", "20:00"),
+            Err(FieldError::DungeonTimeOrderInvalid)
+        );
+        assert_eq!(
+            validate_dungeon_window("20:00", "20:00"),
+            Err(FieldError::DungeonTimeOrderInvalid)
         );
     }
 }

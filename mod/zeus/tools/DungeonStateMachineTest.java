@@ -487,12 +487,13 @@ public class DungeonStateMachineTest {
         set("dungeonRuns", 0);
         set("dungeonMaxRuns", -1);
         set("dungeonState", Zeus.DN_IDLE);
-        set("dungeonSchedule", 25); // 12:30
+        set("dungeonStartMin", 1200);
+        set("dungeonEndMin", 1215);
         set("dungeonTripActive", false);
 
         // If schedule not due, remains IDLE
         call("dungeonIdle");
-        // Depending on current local time, it's either IDLE or ROUTING, but handles cleanly
+        // Depending on current UTC+7 time, it's either IDLE or ROUTING, but handles cleanly
         check("dungeonState is valid after schedule check", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE || ((Integer) get("dungeonState")).intValue() == Zeus.DN_ROUTING);
 
         // ---------------------------------------------------------------------
@@ -2495,6 +2496,242 @@ public class DungeonStateMachineTest {
         check("Test 75: fu.t is not used as source for Giao tiếp", test75Action[0] == 0);
         check("Test 75: Step remains 0", ((Integer) get("dungeonStep")).intValue() == 0);
         check("Test 75: Zero packets sent from fu.t Giao tiếp", getSentPackets().isEmpty());
+
+        // ---------------------------------------------------------------------
+        // Test 76: Exact UTC+7 Boundaries & 1-minute window boundaries
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 76: Exact UTC+7 Boundaries & 1-minute window ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonStartMin", 1200); // 20:00
+        set("dungeonEndMin", 1215);   // 20:15
+        set("dungeonMaxRuns", -1);
+        set("dungeonRuns", 0);
+        set("dungeonScheduleDateKey", -1);
+
+        java.util.Calendar cal76 = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"));
+        cal76.set(2026, java.util.Calendar.OCTOBER, 4, 13, 0, 0); // 13:00 UTC = 20:00 UTC+7
+        cal76.set(java.util.Calendar.MILLISECOND, 0);
+        long t20_00 = cal76.getTime().getTime();
+        long t19_59 = t20_00 - 60000L;
+        long t20_14 = t20_00 + 14 * 60000L;
+        long t20_15 = t20_00 + 15 * 60000L;
+        long t23_30 = t20_00 + 210 * 60000L;
+
+        check("Test 76: 19:59 (1 min before start) is rejected", !Zeus.dungeonScheduleDue(t19_59));
+        check("Test 76: 20:00 (exact start boundary) is accepted", Zeus.dungeonScheduleDue(t20_00));
+        check("Test 76: 20:14 (1 min before end) is accepted", Zeus.dungeonScheduleDue(t20_14));
+        check("Test 76: 20:15 (exact end boundary) is rejected", !Zeus.dungeonScheduleDue(t20_15));
+        check("Test 76: 23:30 (hours after window) does not catch up", !Zeus.dungeonScheduleDue(t23_30));
+
+        // ---------------------------------------------------------------------
+        // Test 77: Timezone Independence Under Varying Default JVM Timezones
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 77: Timezone Independence ---");
+        java.util.TimeZone origTz = java.util.TimeZone.getDefault();
+        try {
+            String[] testTzs = new String[] { "UTC", "GMT+08:00", "America/New_York", "Europe/London", "Asia/Tokyo" };
+            for (int i = 0; i < testTzs.length; i++) {
+                java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone(testTzs[i]));
+                int min = Zeus.dungeonMinuteOfDayUtc7(t20_00);
+                int dateKey = Zeus.dungeonDateKeyUtc7(t20_00);
+                check("Test 77: Minute is 1200 under JVM tz=" + testTzs[i], min == 1200);
+                check("Test 77: Date key is 2026277 under JVM tz=" + testTzs[i], dateKey == 2026277);
+            }
+        } finally {
+            java.util.TimeZone.setDefault(origTz);
+        }
+
+        // ---------------------------------------------------------------------
+        // Test 78: Daily Quota Reset & Next Day Auto-Rearm Without Toggling dungeon.on
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 78: Daily Quota Reset & Next Day Auto-Rearm ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonStartMin", 1200);
+        set("dungeonEndMin", 1215);
+        set("dungeonMaxRuns", 2);
+        set("dungeonRuns", 2);
+        set("dungeonScheduleDateKey", 2026277); // Stamped for Day 1
+
+        long t20_05_day1 = t20_00 + 5 * 60000L;
+        check("Test 78: Day 1 quota already reached refuses start", !Zeus.dungeonScheduleDue(t20_05_day1));
+
+        // Next UTC+7 day at 20:00 (Oct 5)
+        long t20_00_day2 = t20_00 + 24 * 3600000L;
+        int nextDayKey = Zeus.dungeonDateKeyUtc7(t20_00_day2);
+        check("Test 78: Next day dateKey advances", nextDayKey == 2026278);
+        check("Test 78: Next UTC+7 calendar day becomes eligible again", Zeus.dungeonScheduleDue(t20_00_day2));
+
+        // ---------------------------------------------------------------------
+        // Test 79: Reaching Max Today Stays in DN_IDLE Instead of Permanently Disabling
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 79: Reaching Max Today Stays in DN_IDLE ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonStartMin", 1200);
+        set("dungeonEndMin", 1215);
+        set("dungeonMaxRuns", 2);
+        set("dungeonRuns", 1);
+        set("dungeonState", Zeus.DN_COMBAT);
+        set("dungeonWasIn", true);
+
+        Zeus.dungeonDone();
+        check("Test 79: dungeonRuns reached max (2)", ((Integer) get("dungeonRuns")).intValue() == 2);
+        check("Test 79: State remains DN_IDLE (not DN_OFF)", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+        check("Test 79: dungeonWhy is 0 (not 4)", ((Integer) get("dungeonWhy")).intValue() == 0);
+
+        // ---------------------------------------------------------------------
+        // Test 80: Run Active at endMin Is Not Interrupted
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 80: Active Run At endMin Not Interrupted ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonStartMin", 1200);
+        set("dungeonEndMin", 1215);
+        set("dungeonMaxRuns", 5);
+        set("dungeonRuns", 0);
+        set("dungeonState", Zeus.DN_COMBAT);
+        set("dungeonWasIn", true);
+        set("dungeonCombatEngaged", true);
+        set("dungeonMonstersCleared", true);
+        fu.q.d = 48; // inside dungeon
+        cn.g.cG = 0; // alive
+
+        // Call tick while inside dungeon past endMin
+        call("dungeon");
+        check("Test 80: Dungeon not aborted while inside map 48", ((Integer) get("dungeonState")).intValue() == Zeus.DN_COMBAT);
+
+        // Client transitions back to Map 1 after run completed
+        fu.q.d = 1;
+        call("dungeon");
+        check("Test 80: Run successfully completed and accounted", ((Integer) get("dungeonRuns")).intValue() == 1);
+        check("Test 80: Returned to DN_IDLE for cooldown", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+
+        // ---------------------------------------------------------------------
+        // Test 81: Unscheduled Mode (-1/-1) Preserves Legacy Session Behavior
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 81: Unscheduled Mode Preserves Legacy Behavior ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonStartMin", -1);
+        set("dungeonEndMin", -1);
+        set("dungeonMaxRuns", 1);
+        set("dungeonRuns", 0);
+        set("dungeonState", Zeus.DN_COMBAT);
+        set("dungeonWasIn", true);
+
+        check("Test 81: isDungeonScheduled is false", !Zeus.isDungeonScheduled());
+        check("Test 81: dungeonScheduleDue is true for unscheduled", Zeus.dungeonScheduleDue());
+        Zeus.dungeonDone();
+        check("Test 81: dungeonRuns is 1", ((Integer) get("dungeonRuns")).intValue() == 1);
+        check("Test 81: Unscheduled mode stops with DN_OFF", ((Integer) get("dungeonState")).intValue() == Zeus.DN_OFF);
+        check("Test 81: Unscheduled mode stops with why=4", ((Integer) get("dungeonWhy")).intValue() == 4);
+
+        // ---------------------------------------------------------------------
+        // Test 82: Configuration Validation & Fail-Closed Safety
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 82: Configuration Validation ---");
+        Method acceptControlMethod = Zeus.class.getDeclaredMethod("acceptControl", int[].class, String.class, String.class);
+        acceptControlMethod.setAccessible(true);
+
+        int[] validVals = new int[38];
+        validVals[0] = 15; // CTL_VERSION
+        validVals[1] = 0;  // atk.mode
+        validVals[2] = 0;  // atk.map
+        validVals[3] = 0;  // atk.zone
+        validVals[4] = -1; // atk.x
+        validVals[5] = -1; // atk.y
+        validVals[6] = 120;// atk.radius
+        validVals[7] = 1;  // atk.hpOn
+        validVals[8] = 50; // atk.hpPct
+        validVals[9] = 1;  // atk.mpOn
+        validVals[10] = 50;// atk.mpPct
+        validVals[11] = 1; // revive.mode
+        validVals[13] = 0; // atk.zoneMode
+        validVals[14] = 1; // atk.zonePick
+        validVals[15] = 0; // item.rank
+        validVals[16] = 0; // item.mphp
+        validVals[17] = 1; // item.gold
+        validVals[18] = 0; // mount.on
+        validVals[19] = 0; // mount.id
+        validVals[20] = 0; // item.medalDialog
+        validVals[21] = 0; // item.dropsOn
+        validVals[23] = -1;// nav.target
+        validVals[24] = 0; // ui.ring
+        validVals[25] = 0; // atk.farmOnArrival
+        validVals[26] = 0; // nav.detectSpots
+        validVals[27] = 0; // revive.delay
+        validVals[28] = 0; // revive.on
+        validVals[29] = 0; // enhance.on
+        validVals[30] = 10;// enhance.maxLv
+        validVals[31] = 0; // enhance.charm
+        validVals[32] = 1; // dungeon.on
+        validVals[33] = -1;// dungeon.max
+        validVals[34] = 1200; // dungeon.startMin
+        validVals[35] = 1215; // dungeon.endMin
+        validVals[36] = 1; // ui.effects
+        validVals[37] = 0; // ui.hidePlayers
+
+        String buffs = "000";
+        String drops = "000000";
+
+        // Valid configuration
+        boolean resValid = ((Boolean) acceptControlMethod.invoke(null, validVals, buffs, drops)).booleanValue();
+        check("Test 82: Valid 1200..1215 window accepted", resValid);
+
+        // Unscheduled -1/-1 valid
+        validVals[34] = -1;
+        validVals[35] = -1;
+        boolean resUnscheduled = ((Boolean) acceptControlMethod.invoke(null, validVals, buffs, drops)).booleanValue();
+        check("Test 82: Unscheduled -1/-1 accepted", resUnscheduled);
+
+        // One-sided -1 (startMin=-1, endMin=1215) rejected
+        validVals[34] = -1;
+        validVals[35] = 1215;
+        boolean resOneSided1 = ((Boolean) acceptControlMethod.invoke(null, validVals, buffs, drops)).booleanValue();
+        check("Test 82: One-sided startMin=-1 rejected", !resOneSided1);
+
+        // One-sided -1 (startMin=1200, endMin=-1) rejected
+        validVals[34] = 1200;
+        validVals[35] = -1;
+        boolean resOneSided2 = ((Boolean) acceptControlMethod.invoke(null, validVals, buffs, drops)).booleanValue();
+        check("Test 82: One-sided endMin=-1 rejected", !resOneSided2);
+
+        // start >= end (1200 >= 1200) rejected
+        validVals[34] = 1200;
+        validVals[35] = 1200;
+        boolean resEqual = ((Boolean) acceptControlMethod.invoke(null, validVals, buffs, drops)).booleanValue();
+        check("Test 82: start == end rejected", !resEqual);
+
+        // start > end (1215 > 1200) rejected
+        validVals[34] = 1215;
+        validVals[35] = 1200;
+        boolean resGreater = ((Boolean) acceptControlMethod.invoke(null, validVals, buffs, drops)).booleanValue();
+        check("Test 82: start > end rejected", !resGreater);
+
+        // Out of range (< -1) rejected
+        validVals[34] = -2;
+        validVals[35] = 1215;
+        boolean resNegative = ((Boolean) acceptControlMethod.invoke(null, validVals, buffs, drops)).booleanValue();
+        check("Test 82: startMin < -1 rejected", !resNegative);
+
+        // Out of range (> 1439) rejected
+        validVals[34] = 1200;
+        validVals[35] = 1440;
+        boolean resOverflow = ((Boolean) acceptControlMethod.invoke(null, validVals, buffs, drops)).booleanValue();
+        check("Test 82: endMin > 1439 rejected", !resOverflow);
+
+        // ---------------------------------------------------------------------
+        // Test 83: Clock Failure Fails Closed
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 83: Clock Failure Fails Closed ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonStartMin", 1200);
+        set("dungeonEndMin", 1215);
+        set("dungeonMaxRuns", -1);
+        check("Test 83: Negative epoch millis fails closed", !Zeus.dungeonScheduleDue(-1L));
 
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);

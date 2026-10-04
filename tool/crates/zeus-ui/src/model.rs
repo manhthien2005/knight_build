@@ -378,62 +378,6 @@ pub const DUNGEON_RUN_OPTIONS: [&str; 11] = [
     "9 lượt",
     "10 lượt",
 ];
-/// The start times the picker offers, in order. Index 0 is "no timer", index `k` is slot `k - 1`.
-///
-/// Formatted the way the mod's own reference module formats a slot — the hour zero-padded and the
-/// minute either `00` or `30` — so the dialog and the in-game menu cannot disagree about what a slot
-/// means. Slot 47 is `23:30`.
-pub const DUNGEON_SCHEDULE_OPTIONS: [&str; 49] = [
-    "Không hẹn",
-    "00:00",
-    "00:30",
-    "01:00",
-    "01:30",
-    "02:00",
-    "02:30",
-    "03:00",
-    "03:30",
-    "04:00",
-    "04:30",
-    "05:00",
-    "05:30",
-    "06:00",
-    "06:30",
-    "07:00",
-    "07:30",
-    "08:00",
-    "08:30",
-    "09:00",
-    "09:30",
-    "10:00",
-    "10:30",
-    "11:00",
-    "11:30",
-    "12:00",
-    "12:30",
-    "13:00",
-    "13:30",
-    "14:00",
-    "14:30",
-    "15:00",
-    "15:30",
-    "16:00",
-    "16:30",
-    "17:00",
-    "17:30",
-    "18:00",
-    "18:30",
-    "19:00",
-    "19:30",
-    "20:00",
-    "20:30",
-    "21:00",
-    "21:30",
-    "22:00",
-    "22:30",
-    "23:00",
-    "23:30",
-];
 /// The run count each picker index stands for, in order. Index 0 is the "keep going" sentinel.
 ///
 /// A table rather than a subtraction, like [`NAV_TARGET_IDS`]: the sentinel sits at index 0 and every
@@ -441,11 +385,6 @@ pub const DUNGEON_SCHEDULE_OPTIONS: [&str; 49] = [
 /// repeated at each of the two places that translate a selection, and one of them would eventually
 /// get it wrong.
 pub const DUNGEON_RUN_VALUES: [i8; 11] = [-1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-/// The schedule slot each picker index stands for, in order. Index 0 is the "no timer" sentinel.
-pub const DUNGEON_SCHEDULE_VALUES: [i8; 49] = [
-    -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-    25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
-];
 // ---- end DUNGEON ----------------------------------------------------
 
 /// One account's automation settings, as the operator edits them.
@@ -549,9 +488,12 @@ pub struct UiControl {
     /// Index into [`DUNGEON_RUN_OPTIONS`]. Not the run count: the first option is the "keep going"
     /// sentinel, so [`DUNGEON_RUN_VALUES`] translates it.
     pub dungeon_max: u8,
-    /// Index into [`DUNGEON_SCHEDULE_OPTIONS`]. Not the slot: the first option is the "no timer"
-    /// sentinel, so [`DUNGEON_SCHEDULE_VALUES`] translates it.
-    pub dungeon_schedule: u8,
+    /// Start minute of the daily UTC+7 schedule window (0..=1439 inclusive).
+    /// -1 means unscheduled / immediate mode (paired with dungeon_end_min == -1).
+    pub dungeon_start_min: i16,
+    /// End minute of the daily UTC+7 schedule window (0..=1439 exclusive, start < end).
+    /// -1 means unscheduled / immediate mode (paired with dungeon_start_min == -1).
+    pub dungeon_end_min: i16,
     // ---- end DUNGEON ----
 }
 
@@ -599,10 +541,9 @@ impl Default for UiControl {
             // ---- end ENHANCE ----
             // ---- DUNGEON ----
             dungeon_on: false,
-            // Both pickers on their sentinel, which is "no limit" and "no timer": the loop does what
-            // it says on the switch and stops only when the operator stops it.
             dungeon_max: 0,
-            dungeon_schedule: 0,
+            dungeon_start_min: -1,
+            dungeon_end_min: -1,
             // ---- end DUNGEON ----
         }
     }
@@ -657,9 +598,17 @@ impl UiControl {
         // ---- end ENHANCE ----
         // ---- DUNGEON ----
         self.dungeon_max = self.dungeon_max.min(DUNGEON_RUN_OPTIONS.len() as u8 - 1);
-        self.dungeon_schedule = self
-            .dungeon_schedule
-            .min(DUNGEON_SCHEDULE_OPTIONS.len() as u8 - 1);
+        if self.dungeon_start_min == -1 && self.dungeon_end_min == -1 {
+            // Unscheduled mode - valid sentinel
+        } else if self.dungeon_start_min < 0 || self.dungeon_end_min < 0 {
+            self.dungeon_start_min = -1;
+            self.dungeon_end_min = -1;
+        } else {
+            let start = self.dungeon_start_min.clamp(0, 1438);
+            let end = self.dungeon_end_min.clamp(start + 1, 1439);
+            self.dungeon_start_min = start;
+            self.dungeon_end_min = end;
+        }
         // ---- end DUNGEON ----
         self
     }
