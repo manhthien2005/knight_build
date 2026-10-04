@@ -769,7 +769,7 @@ public final class Zeus {
         // -1 is unlimited, 1..10 is a finite trip. The ceiling is the client's own combo list,
         // which stops at ten runs; past it there is no count to ask for. Refused rather than
         // clamped, so the tool and this jar cannot end up meaning two different trip lengths.
-        if (value[K_DUNGEON_MAX] < -1 || value[K_DUNGEON_MAX] > 10) {
+        if (value[K_DUNGEON_MAX] != -1 && (value[K_DUNGEON_MAX] < 1 || value[K_DUNGEON_MAX] > 10)) {
             return false;
         }
         int startMin = value[K_DUNGEON_START_MIN];
@@ -7045,9 +7045,39 @@ public final class Zeus {
         return dungeonDateKeyUtc7(System.currentTimeMillis());
     }
 
+    /** True if exact unscheduled sentinel is configured (-1/-1). */
+    public static boolean isDungeonUnscheduled() {
+        return dungeonStartMin == -1 && dungeonEndMin == -1;
+    }
+
     /** True if a valid scheduled window is configured (0 <= startMin < endMin <= 1439). */
     public static boolean isDungeonScheduled() {
-        return dungeonStartMin >= 0 && dungeonEndMin >= 0 && dungeonStartMin < dungeonEndMin;
+        return dungeonStartMin >= 0 && dungeonEndMin <= 1439 && dungeonStartMin < dungeonEndMin;
+    }
+
+    /**
+     * Whether a scheduled trip may start given converted UTC+7 minute and date key.
+     * Exact unscheduled (-1/-1) is immediate (true).
+     * Valid scheduled window checks range [startMin, endMin) and daily quota.
+     * Any other state (invalid schedule, clock/conversion failure) FAILS CLOSED (false).
+     */
+    public static boolean dungeonScheduleDue(int min, int dateKey) {
+        if (isDungeonUnscheduled()) {
+            return true;
+        }
+        if (!isDungeonScheduled()) {
+            return false; // Fail closed: invalid schedule window
+        }
+        if (min < 0 || dateKey < 0) {
+            return false; // Fail closed: clock/conversion failure
+        }
+        if (min < dungeonStartMin || min >= dungeonEndMin) {
+            return false; // Outside window
+        }
+        if (dateKey == dungeonScheduleDateKey && dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
+            return false; // Daily quota exhausted
+        }
+        return true;
     }
 
     /**
@@ -7057,21 +7087,15 @@ public final class Zeus {
      * Does not catch up late if past endMin.
      */
     public static boolean dungeonScheduleDue(long epochMillis) {
-        if (!isDungeonScheduled()) {
+        if (isDungeonUnscheduled()) {
             return true;
+        }
+        if (!isDungeonScheduled()) {
+            return false;
         }
         int min = dungeonMinuteOfDayUtc7(epochMillis);
         int dateKey = dungeonDateKeyUtc7(epochMillis);
-        if (min < 0 || dateKey < 0) {
-            return false; // clock failure fails closed
-        }
-        if (min < dungeonStartMin || min >= dungeonEndMin) {
-            return false;
-        }
-        if (dateKey == dungeonScheduleDateKey && dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
-            return false;
-        }
-        return true;
+        return dungeonScheduleDue(min, dateKey);
     }
 
     public static boolean dungeonScheduleDue() {
@@ -7640,7 +7664,7 @@ public final class Zeus {
                     return;
                 case DN_FAILURE:
                     if (dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
-                        if (!isDungeonScheduled()) {
+                        if (isDungeonUnscheduled()) {
                             dungeonStop(4, "run limit reached");
                             return;
                         }
@@ -7664,16 +7688,22 @@ public final class Zeus {
 
     /** Leaves IDLE when the run limit allows it and the schedule, if any, has come round. */
     private static void dungeonIdle() {
-        long now = System.currentTimeMillis();
-        boolean scheduled = isDungeonScheduled();
-        if (!scheduled) {
+        dungeonIdle(System.currentTimeMillis());
+    }
+
+    public static void dungeonIdle(long epochMillis) {
+        int dateKey = dungeonDateKeyUtc7(epochMillis);
+        int min = dungeonMinuteOfDayUtc7(epochMillis);
+        dungeonIdle(min, dateKey);
+    }
+
+    public static void dungeonIdle(int min, int dateKey) {
+        if (isDungeonUnscheduled()) {
             if (dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
                 dungeonStop(4, "run limit of " + dungeonMaxRuns + " already reached");
                 return;
             }
-        } else {
-            int dateKey = dungeonDateKeyUtc7(now);
-            int min = dungeonMinuteOfDayUtc7(now);
+        } else if (isDungeonScheduled()) {
             if (dateKey < 0 || min < 0) {
                 return; // clock failure fails closed
             }
@@ -7694,6 +7724,9 @@ public final class Zeus {
                     return; // quota for today reached, remain idle waiting for next day
                 }
             }
+        } else {
+            // Neither exact unscheduled nor valid scheduled window: FAIL CLOSED
+            return;
         }
         dungeonTripActive = true;
         dungeonState = DN_ROUTING;
@@ -8289,7 +8322,7 @@ public final class Zeus {
         dungeonManualEscaped = false;
         trace("DUNGEON run " + dungeonRuns + " complete");
         if (dungeonMaxRuns != -1 && dungeonRuns >= dungeonMaxRuns) {
-            if (!isDungeonScheduled()) {
+            if (isDungeonUnscheduled()) {
                 dungeonStop(4, "run limit of " + dungeonMaxRuns + " reached");
                 return;
             }

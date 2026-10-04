@@ -598,17 +598,9 @@ impl UiControl {
         // ---- end ENHANCE ----
         // ---- DUNGEON ----
         self.dungeon_max = self.dungeon_max.min(DUNGEON_RUN_OPTIONS.len() as u8 - 1);
-        if self.dungeon_start_min == -1 && self.dungeon_end_min == -1 {
-            // Unscheduled mode - valid sentinel
-        } else if self.dungeon_start_min < 0 || self.dungeon_end_min < 0 {
-            self.dungeon_start_min = -1;
-            self.dungeon_end_min = -1;
-        } else {
-            let start = self.dungeon_start_min.clamp(0, 1438);
-            let end = self.dungeon_end_min.clamp(start + 1, 1439);
-            self.dungeon_start_min = start;
-            self.dungeon_end_min = end;
-        }
+        // Do not normalize or repair invalid dungeon schedule windows:
+        // invalid values must remain invalid so parse/wire/Java consumers fail closed.
+        // Exact valid windows and exact (-1, -1) pass through unchanged.
         // ---- end DUNGEON ----
         self
     }

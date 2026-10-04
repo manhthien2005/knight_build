@@ -1360,6 +1360,46 @@ mod windows_adapter {
             assert_eq!(core.gold, GoldPickup::Skip);
             assert_eq!(core.revive, ReviveMode::Town);
             assert_eq!(core.zone_mode, ZoneMode::Pick);
+
+            // UiControl::clamped preserves valid unscheduled sentinel -1, -1
+            let unscheduled = UiControl {
+                dungeon_start_min: -1,
+                dungeon_end_min: -1,
+                ..UiControl::default()
+            }
+            .clamped();
+            assert_eq!(unscheduled.dungeon_start_min, -1);
+            assert_eq!(unscheduled.dungeon_end_min, -1);
+
+            // UiControl::clamped preserves valid window unchanged
+            let valid_win = UiControl {
+                dungeon_start_min: 1200,
+                dungeon_end_min: 1215,
+                ..UiControl::default()
+            }
+            .clamped();
+            assert_eq!(valid_win.dungeon_start_min, 1200);
+            assert_eq!(valid_win.dungeon_end_min, 1215);
+
+            // UiControl::clamped does not convert partial negative sentinel to -1, -1
+            let partial_neg = UiControl {
+                dungeon_start_min: -1,
+                dungeon_end_min: 500,
+                ..UiControl::default()
+            }
+            .clamped();
+            assert_eq!(partial_neg.dungeon_start_min, -1);
+            assert_eq!(partial_neg.dungeon_end_min, 500);
+
+            // UiControl::clamped does not convert start >= end to another valid window
+            let start_ge_end = UiControl {
+                dungeon_start_min: 500,
+                dungeon_end_min: 500,
+                ..UiControl::default()
+            }
+            .clamped();
+            assert_eq!(start_ge_end.dungeon_start_min, 500);
+            assert_eq!(start_ge_end.dungeon_end_min, 500);
         }
 
         #[test]

@@ -665,20 +665,12 @@ impl ControlSettings {
             .clamp(ENHANCE_LEVEL_MIN, ENHANCE_LEVEL_MAX);
         self.enhance_charm_type = self.enhance_charm_type.min(ENHANCE_CHARM_MAX);
         // ---- DUNGEON ----
-        self.dungeon_max = self.dungeon_max.clamp(-1, DUNGEON_RUNS_MAX);
-        if self.dungeon_start_min == -1 && self.dungeon_end_min == -1 {
-            // Unscheduled mode - valid sentinel
-        } else if self.dungeon_start_min < 0 || self.dungeon_end_min < 0 {
-            // Partial negative sentinel: normalize to unscheduled
-            self.dungeon_start_min = -1;
-            self.dungeon_end_min = -1;
-        } else {
-            // Bounded window clamp: 0..=1438 for start, (start + 1)..=1439 for end
-            let start = self.dungeon_start_min.clamp(0, 1438);
-            let end = self.dungeon_end_min.clamp(start + 1, 1439);
-            self.dungeon_start_min = start;
-            self.dungeon_end_min = end;
+        if self.dungeon_max != -1 {
+            self.dungeon_max = self.dungeon_max.clamp(1, DUNGEON_RUNS_MAX);
         }
+        // Do not normalize or repair invalid dungeon schedule windows:
+        // invalid values must remain invalid so parse/wire/Java consumers fail closed.
+        // Exact valid windows and exact (-1, -1) pass through unchanged.
         // ---- end DUNGEON ----
         if self.mount_template_id != MOUNT_ANY
             && !MOUNT_TEMPLATE_IDS.contains(&self.mount_template_id)
@@ -979,7 +971,7 @@ pub fn parse_settings(text: &str) -> CoreResult<ControlSettings> {
     // Bounded rather than clamped, for the same reason as the enhancement above, and with the same
     // care around the sentinel: -1 is a setting the operator chose on both of these, so a value
     // outside the range is a body this crate could not have written.
-    if !(-1..=DUNGEON_RUNS_MAX).contains(&dungeon_max) {
+    if dungeon_max == 0 || !(-1..=DUNGEON_RUNS_MAX).contains(&dungeon_max) {
         return Err(control_error("control_settings_dungeon_max_out_of_range"));
     }
     let valid_window = (dungeon_start_min == -1 && dungeon_end_min == -1)
@@ -1637,8 +1629,9 @@ mod contract {
         assert_eq!(wild.enhance_max_level, ENHANCE_LEVEL_MAX);
         assert_eq!(wild.enhance_charm_type, ENHANCE_CHARM_MAX);
         assert_eq!(wild.dungeon_max, DUNGEON_RUNS_MAX);
-        assert_eq!(wild.dungeon_start_min, 1438);
-        assert_eq!(wild.dungeon_end_min, 1439);
+        // Invalid dungeon schedule is NOT converted to valid schedule or -1/-1:
+        assert_eq!(wild.dungeon_start_min, 2000);
+        assert_eq!(wild.dungeon_end_min, 1000);
         assert_eq!(wild.mount_template_id, MOUNT_ANY);
 
         // Clamping preserves valid unscheduled sentinel -1, -1
@@ -1651,7 +1644,17 @@ mod contract {
         assert_eq!(unscheduled.dungeon_start_min, -1);
         assert_eq!(unscheduled.dungeon_end_min, -1);
 
-        // Clamping normalizes partial negative sentinel to -1, -1
+        // Clamping preserves valid window unchanged
+        let valid_win = ControlSettings {
+            dungeon_start_min: 1200,
+            dungeon_end_min: 1215,
+            ..ControlSettings::default()
+        }
+        .clamped();
+        assert_eq!(valid_win.dungeon_start_min, 1200);
+        assert_eq!(valid_win.dungeon_end_min, 1215);
+
+        // Clamping does not convert partial negative sentinel to -1, -1
         let partial_neg = ControlSettings {
             dungeon_start_min: -1,
             dungeon_end_min: 500,
@@ -1659,7 +1662,17 @@ mod contract {
         }
         .clamped();
         assert_eq!(partial_neg.dungeon_start_min, -1);
-        assert_eq!(partial_neg.dungeon_end_min, -1);
+        assert_eq!(partial_neg.dungeon_end_min, 500);
+
+        // Clamping does not convert start >= end to another valid window
+        let start_ge_end = ControlSettings {
+            dungeon_start_min: 500,
+            dungeon_end_min: 500,
+            ..ControlSettings::default()
+        }
+        .clamped();
+        assert_eq!(start_ge_end.dungeon_start_min, 500);
+        assert_eq!(start_ge_end.dungeon_end_min, 500);
     }
 
     #[test]
@@ -1728,5 +1741,46 @@ mod contract {
         assert!(parse_settings(&custom_wire.replace("ui.effects=0", "ui.effects=-1")).is_err());
         assert!(parse_settings(&custom_wire.replace("ui.hidePlayers=2", "ui.hidePlayers=3")).is_err());
         assert!(parse_settings(&custom_wire.replace("ui.hidePlayers=2", "ui.hidePlayers=-1")).is_err());
+
+        // parse_settings rejects dungeon.max=0
+        assert!(parse_settings(&custom_wire.replace("dungeon.max=-1", "dungeon.max=0")).is_err());
+        assert!(parse_settings(&custom_wire.replace("dungeon.max=-1", "dungeon.max=11")).is_err());
+        assert!(parse_settings(&custom_wire.replace("dungeon.max=-1", "dungeon.max=-2")).is_err());
+
+        // parse_settings rejects one-sided -1 (dungeon.startMin=-1 with dungeon.endMin=500)
+        assert!(parse_settings(
+            &custom_wire
+                .replace("dungeon.startMin=1200", "dungeon.startMin=-1")
+                .replace("dungeon.endMin=1215", "dungeon.endMin=500")
+        )
+        .is_err());
+
+        // parse_settings rejects one-sided -1 (dungeon.startMin=500 with dungeon.endMin=-1)
+        assert!(parse_settings(
+            &custom_wire
+                .replace("dungeon.startMin=1200", "dungeon.startMin=500")
+                .replace("dungeon.endMin=1215", "dungeon.endMin=-1")
+        )
+        .is_err());
+
+        // parse_settings rejects start == end
+        assert!(parse_settings(
+            &custom_wire
+                .replace("dungeon.startMin=1200", "dungeon.startMin=500")
+                .replace("dungeon.endMin=1215", "dungeon.endMin=500")
+        )
+        .is_err());
+
+        // parse_settings rejects start > end
+        assert!(parse_settings(
+            &custom_wire
+                .replace("dungeon.startMin=1200", "dungeon.startMin=600")
+                .replace("dungeon.endMin=1215", "dungeon.endMin=500")
+        )
+        .is_err());
+
+        // parse_settings rejects out-of-range minute values
+        assert!(parse_settings(&custom_wire.replace("dungeon.startMin=1200", "dungeon.startMin=-2")).is_err());
+        assert!(parse_settings(&custom_wire.replace("dungeon.endMin=1215", "dungeon.endMin=1440")).is_err());
     }
 }

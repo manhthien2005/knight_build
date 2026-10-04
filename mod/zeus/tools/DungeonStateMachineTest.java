@@ -2543,7 +2543,7 @@ public class DungeonStateMachineTest {
         }
 
         // ---------------------------------------------------------------------
-        // Test 78: Daily Quota Reset & Next Day Auto-Rearm Without Toggling dungeon.on
+        // Test 78: Daily Quota Reset & Next Day Auto-Rearm Through dungeonIdle()
         // ---------------------------------------------------------------------
         System.out.println("--- Test 78: Daily Quota Reset & Next Day Auto-Rearm ---");
         Zeus.dungeonReset();
@@ -2552,16 +2552,42 @@ public class DungeonStateMachineTest {
         set("dungeonEndMin", 1215);
         set("dungeonMaxRuns", 2);
         set("dungeonRuns", 2);
+        set("dungeonConsecutiveFails", 3);
         set("dungeonScheduleDateKey", 2026277); // Stamped for Day 1
+        set("dungeonState", Zeus.DN_IDLE);
 
-        long t20_05_day1 = t20_00 + 5 * 60000L;
-        check("Test 78: Day 1 quota already reached refuses start", !Zeus.dungeonScheduleDue(t20_05_day1));
+        // Day 1 inside window at 20:05 (min=1205, dateKey=2026277):
+        // Quota is exhausted (2 >= 2) -> dungeonIdle() must remain in DN_IDLE, dungeonRuns unchanged
+        Zeus.dungeonIdle(1205, 2026277);
+        check("Test 78: Day 1 quota already reached stays DN_IDLE", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+        check("Test 78: Day 1 dungeonRuns remains 2", ((Integer) get("dungeonRuns")).intValue() == 2);
+        check("Test 78: Day 1 dungeonConsecutiveFails remains 3", ((Integer) get("dungeonConsecutiveFails")).intValue() == 3);
 
-        // Next UTC+7 day at 20:00 (Oct 5)
-        long t20_00_day2 = t20_00 + 24 * 3600000L;
-        int nextDayKey = Zeus.dungeonDateKeyUtc7(t20_00_day2);
-        check("Test 78: Next day dateKey advances", nextDayKey == 2026278);
-        check("Test 78: Next UTC+7 calendar day becomes eligible again", Zeus.dungeonScheduleDue(t20_00_day2));
+        // Day 2 before window at 19:59 (min=1199, dateKey=2026278):
+        Zeus.dungeonIdle(1199, 2026278);
+        check("Test 78: Day 2 before window stays DN_IDLE", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+        check("Test 78: Day 2 before window dungeonRuns remains 2", ((Integer) get("dungeonRuns")).intValue() == 2);
+
+        // Day 2 at exact start boundary 20:00 (min=1200, dateKey=2026278):
+        // Window open on new calendar day!
+        Zeus.dungeonIdle(1200, 2026278);
+        check("Test 78: Day 2 start boundary resets dungeonRuns to 0", ((Integer) get("dungeonRuns")).intValue() == 0);
+        check("Test 78: Day 2 start boundary resets dungeonConsecutiveFails to 0", ((Integer) get("dungeonConsecutiveFails")).intValue() == 0);
+        check("Test 78: Day 2 dungeonScheduleDateKey stamped to Day 2", ((Integer) get("dungeonScheduleDateKey")).intValue() == 2026278);
+        check("Test 78: Day 2 transitions to DN_ROUTING", ((Integer) get("dungeonState")).intValue() == Zeus.DN_ROUTING);
+        check("Test 78: dungeonEnabled remains true without toggle", ((Boolean) get("dungeonEnabled")).booleanValue());
+
+        // Day 2 after endMin at 20:15 (min=1215, dateKey=2026278):
+        // Put state back to DN_IDLE with 1 run completed
+        set("dungeonState", Zeus.DN_IDLE);
+        set("dungeonRuns", 1);
+        Zeus.dungeonIdle(1215, 2026278);
+        check("Test 78: Day 2 after endMin stays DN_IDLE (no new run)", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+        check("Test 78: Day 2 after endMin dungeonRuns remains 1", ((Integer) get("dungeonRuns")).intValue() == 1);
+
+        // Day 2 running trip in DN_COMBAT or DN_ROUTING at/past endMin is not cancelled
+        set("dungeonState", Zeus.DN_ROUTING);
+        check("Test 78: Active routing not aborted", ((Integer) get("dungeonState")).intValue() == Zeus.DN_ROUTING);
 
         // ---------------------------------------------------------------------
         // Test 79: Reaching Max Today Stays in DN_IDLE Instead of Permanently Disabling
@@ -2722,16 +2748,103 @@ public class DungeonStateMachineTest {
         boolean resOverflow = ((Boolean) acceptControlMethod.invoke(null, validVals, buffs, drops)).booleanValue();
         check("Test 82: endMin > 1439 rejected", !resOverflow);
 
+        // dungeon.max = 0 is rejected (valid domain is -1 or 1..10)
+        validVals[33] = 0;
+        validVals[34] = 1200;
+        validVals[35] = 1215;
+        boolean resMaxZero = ((Boolean) acceptControlMethod.invoke(null, validVals, buffs, drops)).booleanValue();
+        check("Test 82: dungeon.max=0 rejected", !resMaxZero);
+        validVals[33] = -1;
+
         // ---------------------------------------------------------------------
-        // Test 83: Clock Failure Fails Closed
+        // Test 83: Clock / Conversion Failure Fails Closed
         // ---------------------------------------------------------------------
-        System.out.println("--- Test 83: Clock Failure Fails Closed ---");
+        System.out.println("--- Test 83: Clock / Conversion Failure Fails Closed ---");
         Zeus.dungeonReset();
         set("dungeonEnabled", true);
         set("dungeonStartMin", 1200);
         set("dungeonEndMin", 1215);
         set("dungeonMaxRuns", -1);
-        check("Test 83: Negative epoch millis fails closed", !Zeus.dungeonScheduleDue(-1L));
+        set("dungeonState", Zeus.DN_IDLE);
+
+        // Negative minute indicates clock/conversion failure -> fails closed
+        check("Test 83: Conversion failure min=-1 in dungeonScheduleDue fails closed", !Zeus.dungeonScheduleDue(-1, 2026278));
+        // Negative dateKey indicates clock/conversion failure -> fails closed
+        check("Test 83: Conversion failure dateKey=-1 in dungeonScheduleDue fails closed", !Zeus.dungeonScheduleDue(1205, -1));
+
+        // In dungeonIdle, conversion failures fail closed (stay in DN_IDLE)
+        Zeus.dungeonIdle(-1, 2026278);
+        check("Test 83: Conversion failure min=-1 in dungeonIdle stays DN_IDLE", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+        Zeus.dungeonIdle(1205, -1);
+        check("Test 83: Conversion failure dateKey=-1 in dungeonIdle stays DN_IDLE", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+
+        // ---------------------------------------------------------------------
+        // Test 84: Invalid Schedule Pair Fails Closed
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 84: Invalid Schedule Pair Fails Closed ---");
+        Zeus.dungeonReset();
+        set("dungeonEnabled", true);
+        set("dungeonMaxRuns", -1);
+
+        // Exact -1/-1 remains unscheduled and immediate
+        set("dungeonStartMin", -1);
+        set("dungeonEndMin", -1);
+        check("Test 84: Exact -1/-1 is unscheduled", Zeus.isDungeonUnscheduled());
+        check("Test 84: Exact -1/-1 is not scheduled", !Zeus.isDungeonScheduled());
+        check("Test 84: Exact -1/-1 scheduleDue is true", Zeus.dungeonScheduleDue(1205, 2026278));
+        set("dungeonState", Zeus.DN_IDLE);
+        Zeus.dungeonIdle(1205, 2026278);
+        check("Test 84: Exact -1/-1 starts run", ((Integer) get("dungeonState")).intValue() == Zeus.DN_ROUTING);
+
+        // Invalid -1/500 fails closed
+        set("dungeonStartMin", -1);
+        set("dungeonEndMin", 500);
+        check("Test 84: -1/500 is not unscheduled", !Zeus.isDungeonUnscheduled());
+        check("Test 84: -1/500 is not scheduled", !Zeus.isDungeonScheduled());
+        check("Test 84: -1/500 scheduleDue fails closed", !Zeus.dungeonScheduleDue(200, 2026278));
+        set("dungeonState", Zeus.DN_IDLE);
+        Zeus.dungeonIdle(200, 2026278);
+        check("Test 84: -1/500 dungeonIdle fails closed (stays DN_IDLE)", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+
+        // Invalid 500/-1 fails closed
+        set("dungeonStartMin", 500);
+        set("dungeonEndMin", -1);
+        check("Test 84: 500/-1 is not unscheduled", !Zeus.isDungeonUnscheduled());
+        check("Test 84: 500/-1 is not scheduled", !Zeus.isDungeonScheduled());
+        check("Test 84: 500/-1 scheduleDue fails closed", !Zeus.dungeonScheduleDue(600, 2026278));
+        set("dungeonState", Zeus.DN_IDLE);
+        Zeus.dungeonIdle(600, 2026278);
+        check("Test 84: 500/-1 dungeonIdle fails closed (stays DN_IDLE)", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+
+        // Invalid start >= end fails closed
+        set("dungeonStartMin", 600);
+        set("dungeonEndMin", 500);
+        check("Test 84: 600/500 scheduleDue fails closed", !Zeus.dungeonScheduleDue(550, 2026278));
+        set("dungeonState", Zeus.DN_IDLE);
+        Zeus.dungeonIdle(550, 2026278);
+        check("Test 84: 600/500 dungeonIdle fails closed (stays DN_IDLE)", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+
+        set("dungeonStartMin", 500);
+        set("dungeonEndMin", 500);
+        check("Test 84: 500/500 scheduleDue fails closed", !Zeus.dungeonScheduleDue(500, 2026278));
+        set("dungeonState", Zeus.DN_IDLE);
+        Zeus.dungeonIdle(500, 2026278);
+        check("Test 84: 500/500 dungeonIdle fails closed (stays DN_IDLE)", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+
+        // Invalid values outside 0..1439 fail closed
+        set("dungeonStartMin", -5);
+        set("dungeonEndMin", 1200);
+        check("Test 84: -5/1200 scheduleDue fails closed", !Zeus.dungeonScheduleDue(600, 2026278));
+        set("dungeonState", Zeus.DN_IDLE);
+        Zeus.dungeonIdle(600, 2026278);
+        check("Test 84: -5/1200 dungeonIdle fails closed (stays DN_IDLE)", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
+
+        set("dungeonStartMin", 1200);
+        set("dungeonEndMin", 1500);
+        check("Test 84: 1200/1500 scheduleDue fails closed", !Zeus.dungeonScheduleDue(1205, 2026278));
+        set("dungeonState", Zeus.DN_IDLE);
+        Zeus.dungeonIdle(1205, 2026278);
+        check("Test 84: 1200/1500 dungeonIdle fails closed (stays DN_IDLE)", ((Integer) get("dungeonState")).intValue() == Zeus.DN_IDLE);
 
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);
