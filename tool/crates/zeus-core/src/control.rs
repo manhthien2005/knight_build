@@ -45,13 +45,27 @@ pub const CONTROL_FILE_NAME: &str = "zeus-control.txt";
 /// well. Their bump is deliberately deferred to a batch step, so the three ship under a version
 /// the mod already accepts; a jar that has not learned them refuses the whole file and turns every
 /// module off, which is the failure this constant exists to make legible.
-pub const CONTROL_VERSION: u32 = 14;
+/// Format version the mod accepts. A different value turns every module off.
+///
+/// Bumped to 2 when the pickup settings moved to the client's own shape, and to 3 when zone
+/// switching and the material close-drop arrived: a stale jar paired with a new tool then reports a
+/// version it does not know instead of an unexplained unknown key. 5 added `nav.target`, 6 `ui.ring`
+/// with `atk.farmOnArrival`, 8 dropped `atk.travel` for one destination, and 9 added
+/// `nav.detectSpots`, 10 `atk.reviveDelay`, 11 moved reviving to its own `revive.*` keys with a
+/// switch of its own, 12 did the same for the mount — `mount.on`/`mount.id`, with 0 meaning
+/// "any mount in the bag", and 13 split the single `atk.potion` gate into `atk.hpOn` and
+/// `atk.mpOn`, so HP and MP each get their own toggle.
+/// 14 added QoL keys (`ui.effects`, `ui.hidePlayers`).
+/// 15 replaced legacy 48 half-hour VM-local `dungeon.schedule` with exact daily UTC+7 time window
+/// (`dungeon.startMin` and `dungeon.endMin`).
+pub const CONTROL_VERSION: u32 = 15;
 
 /// Previous Control version supported for backward-compatible ingestion.
+pub const CONTROL_VERSION_V14: u32 = 14;
 pub const CONTROL_VERSION_V13: u32 = 13;
 
 /// Number of lines `to_wire()` emits, including the `v=` line.
-pub const CTL_KEY_COUNT: usize = 37;
+pub const CTL_KEY_COUNT: usize = 38;
 
 /// Canonical key count for legacy Control v13.
 pub const CTL_KEY_COUNT_V13: usize = 35;
@@ -67,6 +81,21 @@ pub const CTL_KEY_NAMES_V13: [&str; CTL_KEY_COUNT_V13] = [
     "dungeon.on", "dungeon.max", "dungeon.schedule",
 ];
 
+/// Canonical key count for legacy Control v14.
+pub const CTL_KEY_COUNT_V14: usize = 37;
+
+/// Key names for legacy Control v14 in canonical wire order.
+pub const CTL_KEY_NAMES_V14: [&str; CTL_KEY_COUNT_V14] = [
+    "v", "atk.mode", "atk.map", "atk.zone", "atk.x", "atk.y", "atk.radius",
+    "atk.hpOn", "atk.hpPct", "atk.mpOn", "atk.mpPct", "revive.mode", "atk.buffs",
+    "atk.zoneMode", "atk.zonePick", "item.rank", "item.mphp", "item.gold",
+    "mount.on", "mount.id", "item.medalDialog", "item.dropsOn", "item.drops",
+    "nav.target", "ui.ring", "atk.farmOnArrival", "nav.detectSpots",
+    "revive.delay", "revive.on", "enhance.on", "enhance.maxLv", "enhance.charm",
+    "dungeon.on", "dungeon.max", "dungeon.schedule",
+    "ui.effects", "ui.hidePlayers",
+];
+
 /// Key names in the exact order `to_wire()` emits them. The jar's parser is order-insensitive
 /// (it `take()`s by name), but the CI test asserts order so that a drift in either direction —
 /// adding a key without bumping the count, or reordering without updating this array — is caught.
@@ -77,7 +106,7 @@ pub const CTL_KEY_NAMES: [&str; CTL_KEY_COUNT] = [
     "mount.on", "mount.id", "item.medalDialog", "item.dropsOn", "item.drops",
     "nav.target", "ui.ring", "atk.farmOnArrival", "nav.detectSpots",
     "revive.delay", "revive.on", "enhance.on", "enhance.maxLv", "enhance.charm",
-    "dungeon.on", "dungeon.max", "dungeon.schedule",
+    "dungeon.on", "dungeon.max", "dungeon.startMin", "dungeon.endMin",
     "ui.effects", "ui.hidePlayers",
 ];
 
@@ -135,8 +164,13 @@ pub const ENHANCE_CHARM_MAX: u8 = 3;
 /// rather than a pair of bounds: a larger target could never be reached and the loop would only
 /// keep re-entering the dungeon.
 pub const DUNGEON_RUNS_MAX: i8 = 10;
-/// Half-hour slots in a day, which is the resolution the mod's own schedule uses. -1 is "no
-/// timer", so slot 0 is 00:00 and the last is 23:30.
+/// Sentinel value meaning no timer / unscheduled mode.
+pub const DUNGEON_UNSCHEDULED: i16 = -1;
+/// Minimum valid minute of the day for UTC+7 schedule (00:00).
+pub const DUNGEON_MIN_MINUTE: i16 = 0;
+/// Maximum valid minute of the day for UTC+7 schedule (23:59).
+pub const DUNGEON_MAX_MINUTE: i16 = 1439;
+/// Legacy half-hour slots in a day, which is the resolution the mod's legacy schedule used.
 pub const DUNGEON_SCHEDULE_SLOTS: i8 = 48;
 // ---- end DUNGEON ----
 
@@ -542,9 +576,12 @@ pub struct ControlSettings {
     /// Runs to complete before stopping, at most `DUNGEON_RUNS_MAX`. -1 keeps going without a
     /// limit.
     pub dungeon_max: i8,
-    /// Half-hour slot of the day to start at, 0 being 00:00 and the last being 23:30. -1 means no
-    /// timer, so the loop starts as soon as it is armed.
-    pub dungeon_schedule: i8,
+    /// Start minute of the daily UTC+7 schedule window (0..=1439 inclusive).
+    /// -1 means unscheduled / immediate mode (must be paired with dungeon_end_min == -1).
+    pub dungeon_start_min: i16,
+    /// End minute of the daily UTC+7 schedule window (0..=1439 exclusive, start < end).
+    /// -1 means unscheduled / immediate mode (must be paired with dungeon_start_min == -1).
+    pub dungeon_end_min: i16,
     // ---- end DUNGEON ----
     // ---- QOL --------------------------------------------------------------
     /// Visual effects rendering switch: 1 = enabled (client fa.ch = 0), 0 = disabled (fa.ch = 1).
@@ -600,7 +637,8 @@ impl Default for ControlSettings {
             // ---- DUNGEON ----
             dungeon_on: false,
             dungeon_max: -1,
-            dungeon_schedule: -1,
+            dungeon_start_min: -1,
+            dungeon_end_min: -1,
             // ---- end DUNGEON ----
             // ---- QOL --------------------------------------------------------------
             effects: 1,
@@ -627,8 +665,12 @@ impl ControlSettings {
             .clamp(ENHANCE_LEVEL_MIN, ENHANCE_LEVEL_MAX);
         self.enhance_charm_type = self.enhance_charm_type.min(ENHANCE_CHARM_MAX);
         // ---- DUNGEON ----
-        self.dungeon_max = self.dungeon_max.clamp(-1, DUNGEON_RUNS_MAX);
-        self.dungeon_schedule = self.dungeon_schedule.clamp(-1, DUNGEON_SCHEDULE_SLOTS - 1);
+        if self.dungeon_max != -1 {
+            self.dungeon_max = self.dungeon_max.clamp(1, DUNGEON_RUNS_MAX);
+        }
+        // Do not normalize or repair invalid dungeon schedule windows:
+        // invalid values must remain invalid so parse/wire/Java consumers fail closed.
+        // Exact valid windows and exact (-1, -1) pass through unchanged.
         // ---- end DUNGEON ----
         if self.mount_template_id != MOUNT_ANY
             && !MOUNT_TEMPLATE_IDS.contains(&self.mount_template_id)
@@ -719,7 +761,14 @@ impl ControlSettings {
         // ---- DUNGEON ----
         body.push_str(&format!("dungeon.on={}\n", flag(settings.dungeon_on)));
         body.push_str(&format!("dungeon.max={}\n", settings.dungeon_max));
-        body.push_str(&format!("dungeon.schedule={}\n", settings.dungeon_schedule));
+        body.push_str(&format!(
+            "dungeon.startMin={}\n",
+            settings.dungeon_start_min
+        ));
+        body.push_str(&format!(
+            "dungeon.endMin={}\n",
+            settings.dungeon_end_min
+        ));
         // ---- end DUNGEON ----
         // ---- QOL --------------------------------------------------------------
         body.push_str(&format!("ui.effects={}\n", settings.effects));
@@ -824,7 +873,7 @@ pub fn parse_settings(text: &str) -> CoreResult<ControlSettings> {
     };
 
     let version = number::<u32>(take("v")?)?;
-    if version != CONTROL_VERSION && version != CONTROL_VERSION_V13 {
+    if version != CONTROL_VERSION {
         return Err(control_error("control_settings_version_unsupported"));
     }
     let mode = AttackMode::from_wire(number(take("atk.mode")?)?)
@@ -917,32 +966,33 @@ pub fn parse_settings(text: &str) -> CoreResult<ControlSettings> {
     // ---- DUNGEON ----
     let dungeon_on = parse_flag(take("dungeon.on")?)?;
     let dungeon_max = number::<i8>(take("dungeon.max")?)?;
-    let dungeon_schedule = number::<i8>(take("dungeon.schedule")?)?;
+    let dungeon_start_min = number::<i16>(take("dungeon.startMin")?)?;
+    let dungeon_end_min = number::<i16>(take("dungeon.endMin")?)?;
     // Bounded rather than clamped, for the same reason as the enhancement above, and with the same
     // care around the sentinel: -1 is a setting the operator chose on both of these, so a value
     // outside the range is a body this crate could not have written.
-    if !(-1..=DUNGEON_RUNS_MAX).contains(&dungeon_max) {
+    if dungeon_max == 0 || !(-1..=DUNGEON_RUNS_MAX).contains(&dungeon_max) {
         return Err(control_error("control_settings_dungeon_max_out_of_range"));
     }
-    if !(-1..=DUNGEON_SCHEDULE_SLOTS - 1).contains(&dungeon_schedule) {
+    let valid_window = (dungeon_start_min == -1 && dungeon_end_min == -1)
+        || ((0..=1439).contains(&dungeon_start_min)
+            && (0..=1439).contains(&dungeon_end_min)
+            && dungeon_start_min < dungeon_end_min);
+    if !valid_window {
         return Err(control_error(
             "control_settings_dungeon_schedule_out_of_range",
         ));
     }
     // ---- end DUNGEON ----
-    let (effects, hide_players) = if version == CONTROL_VERSION_V13 {
-        (1u8, 0u8)
-    } else {
-        let eff = number::<u8>(take("ui.effects")?)?;
-        if eff > 1 {
-            return Err(control_error("control_settings_effects_invalid"));
-        }
-        let hp = number::<u8>(take("ui.hidePlayers")?)?;
-        if hp > 2 {
-            return Err(control_error("control_settings_hide_players_invalid"));
-        }
-        (eff, hp)
-    };
+    let eff = number::<u8>(take("ui.effects")?)?;
+    if eff > 1 {
+        return Err(control_error("control_settings_effects_invalid"));
+    }
+    let hp = number::<u8>(take("ui.hidePlayers")?)?;
+    if hp > 2 {
+        return Err(control_error("control_settings_hide_players_invalid"));
+    }
+    let (effects, hide_players) = (eff, hp);
 
     let settings = ControlSettings {
         mode,
@@ -981,7 +1031,8 @@ pub fn parse_settings(text: &str) -> CoreResult<ControlSettings> {
         // ---- DUNGEON ----
         dungeon_on,
         dungeon_max,
-        dungeon_schedule,
+        dungeon_start_min,
+        dungeon_end_min,
         // ---- end DUNGEON ----
         // ---- QOL --------------------------------------------------------------
         effects,
@@ -989,13 +1040,9 @@ pub fn parse_settings(text: &str) -> CoreResult<ControlSettings> {
         // ---- end QOL ----------------------------------------------------------
     };
 
-    // Every key must be one this parser knows for the respective version: an unrecognised key
+    // Every key must be one this parser knows for the current version: an unrecognised key
     // means the tool and the mod disagree about the format, and the mod turns everything off.
-    let known_keys: &[&str] = if version == CONTROL_VERSION_V13 {
-        &CTL_KEY_NAMES_V13
-    } else {
-        &CTL_KEY_NAMES
-    };
+    let known_keys: &[&str] = &CTL_KEY_NAMES;
     if fields.iter().any(|(key, _)| !known_keys.contains(key)) {
         return Err(control_error("control_settings_unknown_key"));
     }
@@ -1039,7 +1086,7 @@ mod wire_shape {
     #[test]
     fn control_body_is_the_exact_shape_the_mod_parses() {
         let body = spotted().to_wire();
-        assert!(body.starts_with("v=14\n"));
+        assert!(body.starts_with("v=15\n"));
         for line in [
             "atk.mode=1",
             "atk.map=43",
@@ -1071,7 +1118,8 @@ mod wire_shape {
             // ---- DUNGEON ----
             "dungeon.on=0",
             "dungeon.max=-1",
-            "dungeon.schedule=-1",
+            "dungeon.startMin=-1",
+            "dungeon.endMin=-1",
             // ---- end DUNGEON ----
             "ui.effects=1",
             "ui.hidePlayers=0",
@@ -1081,7 +1129,7 @@ mod wire_shape {
         for line in body.lines() {
             assert!(line.contains('='), "unparsable line {line}");
         }
-        // 37 keys, asserted so an added key cannot ship without the mod learning it: an unknown
+        // 38 keys, asserted so an added key cannot ship without the mod learning it: an unknown
         // key turns every module off.
         assert_eq!(body.lines().count(), CTL_KEY_COUNT);
     }
@@ -1195,7 +1243,8 @@ mod settings {
             // ---- DUNGEON ----
             dungeon_on: true,
             dungeon_max: 7,
-            dungeon_schedule: 25,
+            dungeon_start_min: 1200,
+            dungeon_end_min: 1230,
             // ---- end DUNGEON ----
             effects: 0,
             hide_players: 2,
@@ -1303,7 +1352,8 @@ mod settings {
     fn a_reader_refuses_every_malformed_body_rather_than_half_reading_it() {
         let body = spotted().to_wire();
         let cases: &[(&str, String)] = &[
-            ("unsupported version", body.replace("v=14", "v=12")),
+            ("unsupported version 14", body.replace("v=15", "v=14")),
+            ("unsupported version 13", body.replace("v=15", "v=13")),
             ("missing key", body.replace("atk.radius=120\n", "")),
             ("unknown key", format!("{body}nav.mode=1\n")),
             ("duplicate key", format!("{body}atk.mode=0\n")),
@@ -1412,8 +1462,34 @@ mod settings {
                 body.replace("dungeon.max=-1", "dungeon.max=-2"),
             ),
             (
-                "dungeon slot past the last half hour",
-                body.replace("dungeon.schedule=-1", "dungeon.schedule=48"),
+                "dungeon start min past 1439",
+                body.replace("dungeon.startMin=-1", "dungeon.startMin=1440"),
+            ),
+            (
+                "dungeon end min past 1439",
+                body.replace("dungeon.endMin=-1", "dungeon.endMin=1440"),
+            ),
+            (
+                "dungeon start single blank",
+                body.replace("dungeon.startMin=-1", "dungeon.startMin=600"),
+            ),
+            (
+                "dungeon end single blank",
+                body.replace("dungeon.endMin=-1", "dungeon.endMin=600"),
+            ),
+            (
+                "dungeon start equals end",
+                body.replace(
+                    "dungeon.startMin=-1\ndungeon.endMin=-1",
+                    "dungeon.startMin=600\ndungeon.endMin=600",
+                ),
+            ),
+            (
+                "dungeon start after end",
+                body.replace(
+                    "dungeon.startMin=-1\ndungeon.endMin=-1",
+                    "dungeon.startMin=700\ndungeon.endMin=600",
+                ),
             ),
             // ---- end DUNGEON ----
             // ---- QOL ----
@@ -1538,7 +1614,8 @@ mod contract {
             enhance_max_level: 250,
             enhance_charm_type: 200,
             dungeon_max: 100,
-            dungeon_schedule: 100,
+            dungeon_start_min: 2000,
+            dungeon_end_min: 1000,
             mount_template_id: 9999,
             ..ControlSettings::default()
         }
@@ -1552,62 +1629,158 @@ mod contract {
         assert_eq!(wild.enhance_max_level, ENHANCE_LEVEL_MAX);
         assert_eq!(wild.enhance_charm_type, ENHANCE_CHARM_MAX);
         assert_eq!(wild.dungeon_max, DUNGEON_RUNS_MAX);
-        assert_eq!(wild.dungeon_schedule, DUNGEON_SCHEDULE_SLOTS - 1);
+        // Invalid dungeon schedule is NOT converted to valid schedule or -1/-1:
+        assert_eq!(wild.dungeon_start_min, 2000);
+        assert_eq!(wild.dungeon_end_min, 1000);
         assert_eq!(wild.mount_template_id, MOUNT_ANY);
+
+        // Clamping preserves valid unscheduled sentinel -1, -1
+        let unscheduled = ControlSettings {
+            dungeon_start_min: -1,
+            dungeon_end_min: -1,
+            ..ControlSettings::default()
+        }
+        .clamped();
+        assert_eq!(unscheduled.dungeon_start_min, -1);
+        assert_eq!(unscheduled.dungeon_end_min, -1);
+
+        // Clamping preserves valid window unchanged
+        let valid_win = ControlSettings {
+            dungeon_start_min: 1200,
+            dungeon_end_min: 1215,
+            ..ControlSettings::default()
+        }
+        .clamped();
+        assert_eq!(valid_win.dungeon_start_min, 1200);
+        assert_eq!(valid_win.dungeon_end_min, 1215);
+
+        // Clamping does not convert partial negative sentinel to -1, -1
+        let partial_neg = ControlSettings {
+            dungeon_start_min: -1,
+            dungeon_end_min: 500,
+            ..ControlSettings::default()
+        }
+        .clamped();
+        assert_eq!(partial_neg.dungeon_start_min, -1);
+        assert_eq!(partial_neg.dungeon_end_min, 500);
+
+        // Clamping does not convert start >= end to another valid window
+        let start_ge_end = ControlSettings {
+            dungeon_start_min: 500,
+            dungeon_end_min: 500,
+            ..ControlSettings::default()
+        }
+        .clamped();
+        assert_eq!(start_ge_end.dungeon_start_min, 500);
+        assert_eq!(start_ge_end.dungeon_end_min, 500);
     }
 
     #[test]
-    fn v14_control_contract_and_v13_compatibility() {
-        assert_eq!(CONTROL_VERSION, 14);
-        assert_eq!(CTL_KEY_COUNT, 37);
-        assert_eq!(CTL_KEY_NAMES.len(), 37);
-        assert_eq!(CTL_KEY_NAMES[35], "ui.effects");
-        assert_eq!(CTL_KEY_NAMES[36], "ui.hidePlayers");
+    fn v15_control_contract_and_legacy_rejection() {
+        assert_eq!(CONTROL_VERSION, 15);
+        assert_eq!(CTL_KEY_COUNT, 38);
+        assert_eq!(CTL_KEY_NAMES.len(), 38);
+        assert_eq!(CTL_KEY_NAMES[34], "dungeon.startMin");
+        assert_eq!(CTL_KEY_NAMES[35], "dungeon.endMin");
+        assert_eq!(CTL_KEY_NAMES[36], "ui.effects");
+        assert_eq!(CTL_KEY_NAMES[37], "ui.hidePlayers");
+
+        // Legacy Control v14 constants
+        assert_eq!(CONTROL_VERSION_V14, 14);
+        assert_eq!(CTL_KEY_COUNT_V14, 37);
+        assert_eq!(CTL_KEY_NAMES_V14.len(), 37);
+
+        // Legacy Control v13 constants
         assert_eq!(CONTROL_VERSION_V13, 13);
         assert_eq!(CTL_KEY_COUNT_V13, 35);
         assert_eq!(CTL_KEY_NAMES_V13.len(), 35);
-        assert!(!CTL_KEY_NAMES_V13.contains(&"ui.effects"));
-        assert!(!CTL_KEY_NAMES_V13.contains(&"ui.hidePlayers"));
 
-        // v13 body with neutral defaults
+        // v14 body fails closed under v15 schema
+        let v14_body = ControlSettings::default()
+            .to_wire()
+            .replace("v=15\n", "v=14\n")
+            .replace(
+                "dungeon.startMin=-1\ndungeon.endMin=-1\n",
+                "dungeon.schedule=-1\n",
+            );
+        assert_eq!(v14_body.lines().count(), 37);
+        assert!(parse_settings(&v14_body).is_err(), "v14 body must fail closed");
+
+        // v13 body fails closed under v15 schema
         let v13_body = ControlSettings::default()
             .to_wire()
-            .replace("v=14\n", "v=13\n")
+            .replace("v=15\n", "v=13\n")
+            .replace(
+                "dungeon.startMin=-1\ndungeon.endMin=-1\n",
+                "dungeon.schedule=-1\n",
+            )
             .replace("ui.effects=1\n", "")
             .replace("ui.hidePlayers=0\n", "");
         assert_eq!(v13_body.lines().count(), 35);
-        let parsed_v13 = parse_settings(&v13_body).expect("v13 body parses under compatibility");
-        assert_eq!(parsed_v13.effects, 1);
-        assert_eq!(parsed_v13.hide_players, 0);
+        assert!(parse_settings(&v13_body).is_err(), "v13 body must fail closed");
 
-        // Normalized v13 emits canonical v14 wire
-        let v14_from_v13 = parsed_v13.to_wire();
-        assert_eq!(v14_from_v13.lines().count(), 37);
-        assert!(v14_from_v13.starts_with("v=14\n"));
-        assert!(v14_from_v13.contains("ui.effects=1\n"));
-        assert!(v14_from_v13.contains("ui.hidePlayers=0\n"));
-
-        // v13 schema rejects v14 keys as unknown
-        let malformed_v13 = format!("{v13_body}ui.effects=1\n");
-        assert!(parse_settings(&malformed_v13).is_err());
-        let malformed_v13_hp = format!("{v13_body}ui.hidePlayers=0\n");
-        assert!(parse_settings(&malformed_v13_hp).is_err());
-
-        // v14 round-trip preserves configured QoL values
+        // v15 round-trip preserves configured QoL and dungeon window values
         let mut custom = ControlSettings::default();
         custom.effects = 0;
         custom.hide_players = 2;
+        custom.dungeon_start_min = 1200;
+        custom.dungeon_end_min = 1215;
         let custom_wire = custom.to_wire();
         assert!(custom_wire.contains("ui.effects=0\n"));
         assert!(custom_wire.contains("ui.hidePlayers=2\n"));
-        let parsed_custom = parse_settings(&custom_wire).expect("custom v14 round-trip");
+        assert!(custom_wire.contains("dungeon.startMin=1200\n"));
+        assert!(custom_wire.contains("dungeon.endMin=1215\n"));
+        let parsed_custom = parse_settings(&custom_wire).expect("custom v15 round-trip");
         assert_eq!(parsed_custom.effects, 0);
         assert_eq!(parsed_custom.hide_players, 2);
+        assert_eq!(parsed_custom.dungeon_start_min, 1200);
+        assert_eq!(parsed_custom.dungeon_end_min, 1215);
 
         // invalid QoL values fail
         assert!(parse_settings(&custom_wire.replace("ui.effects=0", "ui.effects=2")).is_err());
         assert!(parse_settings(&custom_wire.replace("ui.effects=0", "ui.effects=-1")).is_err());
         assert!(parse_settings(&custom_wire.replace("ui.hidePlayers=2", "ui.hidePlayers=3")).is_err());
         assert!(parse_settings(&custom_wire.replace("ui.hidePlayers=2", "ui.hidePlayers=-1")).is_err());
+
+        // parse_settings rejects dungeon.max=0
+        assert!(parse_settings(&custom_wire.replace("dungeon.max=-1", "dungeon.max=0")).is_err());
+        assert!(parse_settings(&custom_wire.replace("dungeon.max=-1", "dungeon.max=11")).is_err());
+        assert!(parse_settings(&custom_wire.replace("dungeon.max=-1", "dungeon.max=-2")).is_err());
+
+        // parse_settings rejects one-sided -1 (dungeon.startMin=-1 with dungeon.endMin=500)
+        assert!(parse_settings(
+            &custom_wire
+                .replace("dungeon.startMin=1200", "dungeon.startMin=-1")
+                .replace("dungeon.endMin=1215", "dungeon.endMin=500")
+        )
+        .is_err());
+
+        // parse_settings rejects one-sided -1 (dungeon.startMin=500 with dungeon.endMin=-1)
+        assert!(parse_settings(
+            &custom_wire
+                .replace("dungeon.startMin=1200", "dungeon.startMin=500")
+                .replace("dungeon.endMin=1215", "dungeon.endMin=-1")
+        )
+        .is_err());
+
+        // parse_settings rejects start == end
+        assert!(parse_settings(
+            &custom_wire
+                .replace("dungeon.startMin=1200", "dungeon.startMin=500")
+                .replace("dungeon.endMin=1215", "dungeon.endMin=500")
+        )
+        .is_err());
+
+        // parse_settings rejects start > end
+        assert!(parse_settings(
+            &custom_wire
+                .replace("dungeon.startMin=1200", "dungeon.startMin=600")
+                .replace("dungeon.endMin=1215", "dungeon.endMin=500")
+        )
+        .is_err());
+
+        // parse_settings rejects out-of-range minute values
+        assert!(parse_settings(&custom_wire.replace("dungeon.startMin=1200", "dungeon.startMin=-2")).is_err());
+        assert!(parse_settings(&custom_wire.replace("dungeon.endMin=1215", "dungeon.endMin=1440")).is_err());
     }
 }

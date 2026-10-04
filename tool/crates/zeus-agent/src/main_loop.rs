@@ -913,8 +913,8 @@ fn handle_cloud_event(
 
 #[cfg(any(unix, test))]
 pub(crate) fn evaluate_control_version_gate(acc_control_version: i32, jar_ctl_version: i32) -> bool {
-    if jar_ctl_version == 14 {
-        acc_control_version == 13 || acc_control_version == 14
+    if jar_ctl_version == 15 {
+        acc_control_version == 15
     } else {
         acc_control_version == jar_ctl_version
     }
@@ -1006,7 +1006,7 @@ pub(crate) fn build_control_settings(
     control: &serde_json::Value,
     control_version: i32,
 ) -> Result<ControlSettings, String> {
-    if control_version != 13 && control_version != 14 {
+    if control_version != 15 {
         return Err(format!("unsupported control_version={control_version}"));
     }
 
@@ -3067,7 +3067,7 @@ fn read_meminfo_total_mb() -> u32 {
 mod tests {
     use super::*;
 
-    fn sample_v13_control_json() -> serde_json::Value {
+    fn sample_v15_control_json() -> serde_json::Value {
         serde_json::json!({
             "atk.mode": 0,
             "atk.map": 0,
@@ -3102,90 +3102,104 @@ mod tests {
             "enhance.charm": 0,
             "dungeon.on": 0,
             "dungeon.max": -1,
-            "dungeon.schedule": -1
+            "dungeon.startMin": -1,
+            "dungeon.endMin": -1,
+            "ui.effects": 1,
+            "ui.hidePlayers": 0
         })
     }
 
     #[test]
     fn test_control_version_gate_evaluation() {
-        // When jar is v14:
-        assert!(evaluate_control_version_gate(13, 14));
-        assert!(evaluate_control_version_gate(14, 14));
-        assert!(!evaluate_control_version_gate(12, 14));
-        assert!(!evaluate_control_version_gate(15, 14));
+        // When jar is v15:
+        assert!(evaluate_control_version_gate(15, 15));
+        assert!(!evaluate_control_version_gate(14, 15));
+        assert!(!evaluate_control_version_gate(13, 15));
+        assert!(!evaluate_control_version_gate(16, 15));
 
-        // When jar is v13:
-        assert!(evaluate_control_version_gate(13, 13));
-        assert!(!evaluate_control_version_gate(14, 13));
+        // When jar is legacy (e.g. 14):
+        assert!(evaluate_control_version_gate(14, 14));
+        assert!(!evaluate_control_version_gate(15, 14));
     }
 
     #[test]
-    fn test_v13_account_normalizes_to_v14_wire_with_neutral_defaults() {
-        let v13_json = sample_v13_control_json();
-        let settings = build_control_settings(&v13_json, 13).expect("v13 control parses successfully");
+    fn test_v15_account_normalizes_to_v15_wire() {
+        let v15_json = sample_v15_control_json();
+        let settings = build_control_settings(&v15_json, 15).expect("v15 control parses successfully");
         assert_eq!(settings.effects, 1);
         assert_eq!(settings.hide_players, 0);
+        assert_eq!(settings.dungeon_start_min, -1);
+        assert_eq!(settings.dungeon_end_min, -1);
 
         let wire = settings.to_wire();
-        assert!(wire.starts_with("v=14\n"));
+        assert!(wire.starts_with("v=15\n"));
         assert!(wire.contains("ui.effects=1\n"));
         assert!(wire.contains("ui.hidePlayers=0\n"));
+        assert!(wire.contains("dungeon.startMin=-1\n"));
+        assert!(wire.contains("dungeon.endMin=-1\n"));
         let line_count = wire.lines().count();
-        assert_eq!(line_count, 37, "canonical v14 wire must have exactly 37 keys");
+        assert_eq!(line_count, 38, "canonical v15 wire must have exactly 38 keys");
     }
 
     #[test]
-    fn test_v14_account_preserves_configured_qol_values() {
-        let mut v14_json = sample_v13_control_json();
-        v14_json["ui.effects"] = serde_json::json!(0);
-        v14_json["ui.hidePlayers"] = serde_json::json!(2);
+    fn test_v15_account_preserves_configured_values() {
+        let mut v15_json = sample_v15_control_json();
+        v15_json["ui.effects"] = serde_json::json!(0);
+        v15_json["ui.hidePlayers"] = serde_json::json!(2);
+        v15_json["dungeon.startMin"] = serde_json::json!(1200);
+        v15_json["dungeon.endMin"] = serde_json::json!(1215);
 
-        let settings = build_control_settings(&v14_json, 14).expect("v14 control parses successfully");
+        let settings = build_control_settings(&v15_json, 15).expect("v15 control parses successfully");
         assert_eq!(settings.effects, 0);
         assert_eq!(settings.hide_players, 2);
+        assert_eq!(settings.dungeon_start_min, 1200);
+        assert_eq!(settings.dungeon_end_min, 1215);
 
         let wire = settings.to_wire();
-        assert!(wire.starts_with("v=14\n"));
+        assert!(wire.starts_with("v=15\n"));
         assert!(wire.contains("ui.effects=0\n"));
         assert!(wire.contains("ui.hidePlayers=2\n"));
-        assert_eq!(wire.lines().count(), 37);
+        assert!(wire.contains("dungeon.startMin=1200\n"));
+        assert!(wire.contains("dungeon.endMin=1215\n"));
+        assert_eq!(wire.lines().count(), 38);
     }
 
     #[test]
     fn test_unsupported_versions_fail_closed() {
-        let json = sample_v13_control_json();
-        assert!(build_control_settings(&json, 12).is_err());
-        assert!(build_control_settings(&json, 15).is_err());
+        let json = sample_v15_control_json();
+        assert!(build_control_settings(&json, 13).is_err());
+        assert!(build_control_settings(&json, 14).is_err());
+        assert!(build_control_settings(&json, 16).is_err());
     }
 
     #[test]
     fn test_unknown_keys_fail_closed() {
-        let mut json = sample_v13_control_json();
+        let mut json = sample_v15_control_json();
         json["unknown.field"] = serde_json::json!(1);
-        assert!(build_control_settings(&json, 13).is_err());
-        assert!(build_control_settings(&json, 14).is_err());
+        assert!(build_control_settings(&json, 15).is_err());
     }
 
     #[test]
-    fn test_invalid_qol_values_fail_closed_in_v14() {
-        let mut invalid_effects = sample_v13_control_json();
+    fn test_invalid_dungeon_and_qol_values_fail_closed_in_v15() {
+        let mut invalid_effects = sample_v15_control_json();
         invalid_effects["ui.effects"] = serde_json::json!(2);
-        invalid_effects["ui.hidePlayers"] = serde_json::json!(0);
-        assert!(build_control_settings(&invalid_effects, 14).is_err());
+        assert!(build_control_settings(&invalid_effects, 15).is_err());
 
-        let mut invalid_hide = sample_v13_control_json();
-        invalid_hide["ui.effects"] = serde_json::json!(1);
-        invalid_hide["ui.hidePlayers"] = serde_json::json!(3);
-        assert!(build_control_settings(&invalid_hide, 14).is_err());
+        let mut invalid_dungeon = sample_v15_control_json();
+        invalid_dungeon["dungeon.startMin"] = serde_json::json!(1300);
+        invalid_dungeon["dungeon.endMin"] = serde_json::json!(1200);
+        assert!(build_control_settings(&invalid_dungeon, 15).is_err());
     }
 
     #[test]
     fn test_empty_account_control_uses_defaults() {
         let empty = serde_json::json!({});
-        let settings = build_control_settings(&empty, 13).expect("empty control uses default");
+        let settings = build_control_settings(&empty, 15).expect("empty control uses default");
         assert_eq!(settings.effects, 1);
         assert_eq!(settings.hide_players, 0);
-        assert_eq!(settings.to_wire().lines().count(), 37);
+        assert_eq!(settings.dungeon_start_min, -1);
+        assert_eq!(settings.dungeon_end_min, -1);
+        assert_eq!(settings.to_wire().lines().count(), 38);
     }
 
     #[test]

@@ -927,10 +927,16 @@ fn build_config_row(
                 ID_MESSAGE + 200 + index as isize,
             );
             set_font(label, font);
+            let text_val = match row.id {
+                dialogs::ID_CFG_SPOT_NAME => control.spot_name.clone(),
+                dialogs::ID_CFG_DUNGEON_START => dialogs::format_time_hhmm(control.dungeon_start_min),
+                dialogs::ID_CFG_DUNGEON_END => dialogs::format_time_hhmm(control.dungeon_end_min),
+                _ => String::new(),
+            };
             let field = create_child(
                 window,
                 WC_EDITW,
-                &control.spot_name,
+                &text_val,
                 WS_TABSTOP,
                 metrics.control_rect(column, index).into(),
                 id,
@@ -1128,12 +1134,11 @@ fn config_choice(id: u16, control: &UiControl) -> u8 {
         dialogs::ID_CFG_ENHANCE_CHARM => control.enhance_charm,
         // ---- end ENHANCE ----
         // ---- DUNGEON ----
-        // Both open on the picker index itself, like `nav_target` and `revive`: the index is what the
-        // dialog stores and what `port.rs` translates through `DUNGEON_RUN_VALUES` and
-        // `DUNGEON_SCHEDULE_VALUES`. Unlike `ENHANCE_MAXLV` there is no arithmetic here, because the
-        // setting carries the index rather than a level the list starts above.
+        // Opens on the picker index itself, like `nav_target` and `revive`: the index is what the
+        // dialog stores and what `port.rs` translates through `DUNGEON_RUN_VALUES`.
+        // Unlike `ENHANCE_MAXLV` there is no arithmetic here, because the setting carries the index
+        // rather than a level the list starts above.
         dialogs::ID_CFG_DUNGEON_MAX => control.dungeon_max,
-        dialogs::ID_CFG_DUNGEON_SCHED => control.dungeon_schedule,
         // ---- end DUNGEON ----
         _ => 0,
     }
@@ -1872,13 +1877,21 @@ fn read_config(window: HWND) -> Result<UiControl, FieldError> {
                     // ---- end ENHANCE ----
                     // ---- DUNGEON ----
                     dialogs::ID_CFG_DUNGEON_MAX => control.dungeon_max = selected,
-                    dialogs::ID_CFG_DUNGEON_SCHED => control.dungeon_schedule = selected,
                     // ---- end DUNGEON ----
                     _ => {}
                 }
             }
         }
     }
+    // Dungeon daily UTC+7 time window
+    let start_text =
+        String::from_utf16_lossy(&read_text(window, dialogs::ID_CFG_DUNGEON_START as isize));
+    let end_text =
+        String::from_utf16_lossy(&read_text(window, dialogs::ID_CFG_DUNGEON_END as isize));
+    let (start_min, end_min) = dialogs::validate_dungeon_window(&start_text, &end_text)?;
+    control.dungeon_start_min = start_min;
+    control.dungeon_end_min = end_min;
+
     // The map and the zone are never typed: the mod can only work the map its character stands on, so
     // they come from the reading and the operator only chooses where within it.
     if let (Some(pixel_x), Some(pixel_y)) = (spot_x, spot_y) {
