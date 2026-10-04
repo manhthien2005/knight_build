@@ -3012,7 +3012,8 @@ public final class Zeus {
                 traceTargetId = Integer.MIN_VALUE;
                 trace("TARGET none");
             }
-            String dialog = fu.s == null ? null : dialogText(fu.s);
+            da activeDialog = fu.s != null ? fu.s : (fu.t != null ? fu.t : null);
+            String dialog = activeDialog == null ? null : dialogText(activeDialog);
             if (dialog != null && !dialog.equals(traceDialog)) {
                 traceDialog = dialog;
                 trace("DIALOG " + clean(dialog));
@@ -6775,23 +6776,11 @@ public final class Zeus {
             cn.g.N();
         } catch (Throwable t) {
         }
-        boolean nativeDispatched = false;
-        boolean wasMenuOpen = (fu.p != null && fu.p.a);
-        da wasDialog = fu.s;
         try {
             npc.k();
-            if ((fu.p != null && fu.p.a && !wasMenuOpen) || (fu.s != null && fu.s != wasDialog)) {
-                nativeDispatched = true;
-            }
         } catch (Throwable t) {
-        }
-        if (!nativeDispatched) {
-            try {
-                q.a().a((byte) dungeonNpcCu);
-            } catch (Throwable t) {
-                dungeonState = DN_ROUTING;
-                return false;
-            }
+            dungeonState = DN_ROUTING;
+            return false;
         }
         dungeonTried = 0;
         dungeonStallTicks = 0;
@@ -6813,26 +6802,17 @@ public final class Zeus {
                 cn.g.N();
             } catch (Throwable t) {
             }
-            boolean wasMenuOpen = (fu.p != null && fu.p.a);
-            da wasDialog = fu.s;
             try {
                 npc.k();
-                if ((fu.p != null && fu.p.a && !wasMenuOpen) || (fu.s != null && fu.s != wasDialog)) {
-                    dungeonWait = 40;
-                    return true;
-                }
+                dungeonMenu = null;
+                dungeonMenuNpc = Integer.MIN_VALUE;
+                dungeonWait = 40;
+                return true;
             } catch (Throwable t) {
+                return false;
             }
         }
-        dungeonMenu = null;
-        dungeonMenuNpc = Integer.MIN_VALUE;
-        try {
-            q.a().a((byte) dungeonNpcCu);
-        } catch (Throwable t) {
-            return false;
-        }
-        dungeonWait = 40;
-        return true;
+        return false;
     }
 
     /**
@@ -6923,9 +6903,7 @@ public final class Zeus {
                         Object entry = buttons.a(i);
                         if (entry instanceof bt) {
                             bt btn = (bt) entry;
-                            // Critical: Reject buttons where btn.d == null because native bt.a()
-                            // diverts to fu.s.b() when fu.s != null! Only genuine buttons with a callback target are actionable.
-                            if (btn.a != null && btn.d != null) {
+                            if (btn.a != null) {
                                 String s = norm(btn.a);
                                 if (s.indexOf("giao tiep") >= 0 && s.indexOf("giao dich") < 0) {
                                     return btn;
@@ -7188,6 +7166,9 @@ public final class Zeus {
     static int dungeonNoTargetTicks = 0;
     static int dungeonRunTicks = 0;
 
+    /** Latch: true once native Ngã Tư submenu dispatch occurs, awaiting entry result. */
+    static boolean dungeonAwaitingEntry = false;
+
     /** Labels and item collection of the server menu currently open, captured by {@link #serverMenu}. Its own trio: never TRAVEL's. */
     static String[] dungeonMenu = null;
     static et dungeonMenuItems = null;
@@ -7418,8 +7399,12 @@ public final class Zeus {
         dungeonNoTargetTicks = 0;
         dungeonRunTicks = 0;
         dungeonConsecutiveFails = 0;
+        dungeonAwaitingEntry = false;
         if (fu.s != null && isDungeonConfirmDialog(fu.s)) {
             dismissDungeonDialog(fu.s);
+        }
+        if (fu.t != null && isDungeonConfirmDialog(fu.t)) {
+            dismissDungeonDialog(fu.t);
         }
         dungeonRestoreCombat();
     }
@@ -7437,11 +7422,22 @@ public final class Zeus {
         dungeonStep = 0;
         dungeonWait = 0;
         dungeonTried = 0;
+        dungeonAwaitingEntry = false;
         if (fu.s != null && isDungeonConfirmDialog(fu.s)) {
             dismissDungeonDialog(fu.s);
         }
+        if (fu.t != null && isDungeonConfirmDialog(fu.t)) {
+            dismissDungeonDialog(fu.t);
+        }
         dungeonRestoreCombat();
         trace("DUNGEON stopped (" + why + "): " + reason);
+    }
+
+    /** Transitions to DN_MANUAL_REVIEW while publishing dungeonWhy=0 (state-only manual review). */
+    public static void dungeonManualReview(String reason) {
+        dungeonStop(0, reason);
+        dungeonState = DN_MANUAL_REVIEW;
+        trace("DUNGEON manual review: " + reason);
     }
 
     /** Handles run failure, bounds consecutive failures, and triggers manual review when cap reached. */
@@ -7450,6 +7446,7 @@ public final class Zeus {
             ++dungeonFails;
         }
         ++dungeonConsecutiveFails;
+        dungeonAwaitingEntry = false;
         dungeonRestoreCombat();
         trace("DUNGEON run failed (" + why + "): " + reason + " (fails=" + dungeonFails
                 + " consec=" + dungeonConsecutiveFails + ")");
@@ -7526,6 +7523,7 @@ public final class Zeus {
                 dungeonWasIn = true;
                 dungeonTried = 0;
                 dungeonNavigating = false;
+                dungeonAwaitingEntry = false;
                 if (dungeonState != DN_COMBAT) {
                     dungeonState = DN_COMBAT;
                     dungeonWhy = 0;
@@ -7589,13 +7587,9 @@ public final class Zeus {
                 }
             }
 
-            if (dungeonWait > 0) {
-                if (dungeonState == DN_PREPARATION && (dungeonMenu != null || (dungeonStep == 2 && isDungeonConfirmDialog(fu.s)))) {
-                    dungeonWait = 0;
-                } else {
-                    --dungeonWait;
-                    return;
-                }
+            if (dungeonWait > 0 && dungeonState != DN_PREPARATION) {
+                --dungeonWait;
+                return;
             }
 
             switch (dungeonState) {
@@ -7659,6 +7653,7 @@ public final class Zeus {
         dungeonStallTicks = 0;
         dungeonNpcCu = -1;
         dungeonWhy = 0;
+        dungeonAwaitingEntry = false;
         trace("DUNGEON starting a run (done=" + dungeonRuns + " max=" + dungeonMaxRuns + ")");
     }
 
@@ -7751,314 +7746,211 @@ public final class Zeus {
     }
 
     /**
-     * Drives the NPC's two menus and the confirmation dialog:
-     * Step 0: Pick "Giao tiếp" from Pho Chi Huy's first menu.
-     * Step 1: Pick "Vào Ngã Tư Tử Thần" from the second submenu.
-     * Step 2: Confirm the entry dialog ("Có" / "Đồng ý" / "OK" / "Vào").
-     * Step 3: Wait for server teleport into Map 48.
+     * Drives the NPC's two menus and the confirmation dialog reactively:
+     * 1. Check if already inside Map 48 -> DN_COMBAT.
+     * 2. Unrelated dialog fail-closed safety check.
+     * 3. Submenu check: If active menu in fu.p contains "Ngã Tư", dispatch immediately via fu.p.a(2, 0).
+     * 4. Giao tiếp check: If actionable "Giao tiếp" command in fu.p/fu.s, invoke native bt.a().
+     * 5. Speech dialog check: If fu.s is active NPC story/speech dialog, advance it.
+     * 6. Confirmation check: If valid confirmation dialog in fu.s, confirm it (optional; direct teleport also succeeds).
+     * 7. Bounded retry and wait countdown: decrement dungeonWait, retry ask NPC if wait expires up to DN_MAX_TRIES.
      */
     private static void dungeonInteract() {
         if (dungeonInDungeon()) {
+            dungeonAwaitingEntry = false;
             dungeonState = DN_COMBAT;
             return;
         }
 
-        switch (dungeonStep) {
-            case 0: { // Step 0: First menu -> pick "Giao tiếp" via native UI action
-                if (fu.s != null) {
-                    if (isDungeonConfirmDialog(fu.s)) {
-                        dismissDungeonDialog(fu.s);
-                        dungeonWait = 10;
-                        return;
-                    }
-                    if (isBlockingDialog(fu.s)) {
-                        if (++dungeonTried >= DN_MAX_TRIES) {
-                            dungeonStop(5, "unrelated dialog blocking first menu: " + clean(dialogText(fu.s)));
-                            return;
-                        }
-                        dungeonWait = 10;
-                        return;
-                    }
-                }
-
-                // Fast-path: If the server submenu ("Vào Ngã Tư Tử Thần") is ALREADY present in fu.p, transition directly to Step 1
-                et currentItems = (fu.p != null && fu.p.a) ? getFrItems(fu.p) : dungeonMenuItems;
-                if (currentItems != null) {
-                    for (int i = 0; i < currentItems.c(); i++) {
-                        Object entry = currentItems.a(i);
-                        if (entry instanceof bt && ((bt) entry).a != null) {
-                            String l = norm(((bt) entry).a);
-                            if (l.indexOf("nga tu") >= 0 || l.indexOf("tu than") >= 0) {
-                                dungeonStep = 1;
-                                dungeonWait = 0;
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                // Locate "Giao tiếp" command button in active menu (fu.p), captured items, or dialog (fu.s)
-                et activeItems = (fu.p != null && fu.p.a) ? getFrItems(fu.p) : dungeonMenuItems;
-                if (activeItems == null && dungeonMenuItems != null) {
-                    activeItems = dungeonMenuItems;
-                }
-                bt giaoTiepCmd = null;
-                int giaoTiepIndex = -1;
-                if (activeItems != null) {
-                    for (int i = 0; i < activeItems.c(); i++) {
-                        Object entry = activeItems.a(i);
-                        if (entry instanceof bt) {
-                            bt btn = (bt) entry;
-                            if (btn.a != null) {
-                                String label = norm(btn.a);
-                                if (label.indexOf("giao tiep") >= 0 && label.indexOf("giao dich") < 0) {
-                                    giaoTiepCmd = btn;
-                                    giaoTiepIndex = i;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if (giaoTiepCmd == null && fu.s != null) {
-                    giaoTiepCmd = findGiaoTiepInDialog(fu.s);
-                }
-
-                int legacyPick = -1;
-                if (giaoTiepCmd == null && dungeonMenu != null) {
-                    legacyPick = dungeonMenuPick("giao tiep", "giao dich");
-                }
-
-                // V2 Parity: If fu.s is an active NPC conversation/story dialog for Pho Chi Huy, advance it
-                if (giaoTiepCmd == null && legacyPick < 0 && fu.s != null && isNpcSpeechDialog(fu.s)) {
-                    dungeonStep = 1;
-                    dungeonTried = 0;
-                    dungeonWait = 60;
-                    dungeonMenu = null;
-                    dungeonMenuItems = null;
-                    dungeonMenuNpc = Integer.MIN_VALUE;
-                    trace("DUNGEON advancing Pho Chi Huy speech dialog in fu.s");
-                    if (fu.s.ab != null) {
-                        fu.s.ab.a();
-                    } else if (fu.s.Z != null) {
-                        fu.s.Z.a();
-                    } else {
-                        fu.al[5] = true;
-                        fu.am[5] = true;
-                    }
-                    return;
-                }
-
-                if (giaoTiepCmd == null && legacyPick < 0) {
-                    if (dungeonWait > 0) {
-                        --dungeonWait;
-                        return;
-                    }
-                    if (dungeonMenu == null && activeItems == null && (fu.s == null || findGiaoTiepInDialog(fu.s) == null)) {
-                        if (++dungeonTried >= 2) {
-                            dungeonStop(2, "the dungeon NPC gave no menu");
-                            return;
-                        }
-                        dungeonAskNpc();
-                        return;
-                    }
-                    dungeonCloseMenu();
-                    dungeonMenu = null;
-                    dungeonMenuItems = null;
-                    dungeonMenuNpc = Integer.MIN_VALUE;
-                    if (++dungeonTried >= DN_MAX_TRIES) {
-                        dungeonStop(2, "no \"giao tiep\" row in the dungeon NPC's menu");
-                        return;
-                    }
-                    dungeonWait = 10;
-                    return;
-                }
-
-                // Native UI contract: set menu cursor index on active menu
-                if (fu.p != null && fu.p.a && giaoTiepIndex >= 0) {
-                    setFrIndex(fu.p, giaoTiepIndex);
-                }
-
-                // ARM NEXT STATE BEFORE DISPATCH to eliminate race conditions
-                dungeonStep = 1;
-                dungeonTried = 0;
-                dungeonWait = 60;
-                dungeonMenu = null;
-                dungeonMenuItems = null;
-                dungeonMenuNpc = Integer.MIN_VALUE;
-                trace("DUNGEON invoked native 'Giao tiếp' command, waiting on second menu");
-
-                if (giaoTiepCmd != null) {
-                    // Execute verified native command callback exactly once
-                    giaoTiepCmd.a();
-                } else {
-                    // Legacy/string-only mock fallback
-                    if (!dungeonSelect(legacyPick)) {
-                        dungeonStop(2, "selecting \"giao tiep\" failed");
-                    }
-                }
-                return;
-            }
-
-            case 1: { // Step 1: Second menu -> pick "Vào Ngã Tư Tử Thần"
-                if (fu.s != null) {
-                    if (isDungeonConfirmDialog(fu.s)) {
-                        dungeonStep = 2;
-                        dungeonWait = 0;
-                        return;
-                    }
-                    if (isBlockingDialog(fu.s)) {
-                        if (++dungeonTried >= DN_MAX_TRIES) {
-                            dungeonStop(5, "unrelated dialog blocking second menu: " + clean(dialogText(fu.s)));
-                            return;
-                        }
-                        dungeonWait = 10;
-                        return;
-                    }
-                }
-
-                et secondItems = (fu.p != null && fu.p.a) ? getFrItems(fu.p) : dungeonMenuItems;
-                if (secondItems == null && dungeonMenuItems != null) {
-                    secondItems = dungeonMenuItems;
-                }
-                int pick = -1;
-                if (secondItems != null) {
-                    for (int i = 0; i < secondItems.c(); i++) {
-                        Object entry = secondItems.a(i);
-                        if (entry instanceof bt) {
-                            bt btn = (bt) entry;
-                            if (btn.a != null) {
-                                String label = norm(btn.a);
-                                if (label.indexOf("nga tu") >= 0 || label.indexOf("tu than") >= 0 || label.indexOf("vao nga tu") >= 0) {
-                                    pick = i;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if (pick < 0) {
-                    pick = dungeonMenuPick("nga tu", null);
-                    if (pick < 0) {
-                        pick = dungeonMenuPick("tu than", null);
-                    }
-                    if (pick < 0) {
-                        pick = dungeonMenuPick("vao nga tu", null);
-                    }
-                }
-
-                if (pick < 0) {
-                    if (dungeonMenu == null && secondItems == null) {
-                        if (dungeonWait > 0) {
-                            --dungeonWait;
-                            return;
-                        }
-                        if (++dungeonTried >= DN_MAX_TRIES) {
-                            dungeonStop(2, "no submenu after the dialogue pick");
-                            return;
-                        }
-                        dungeonStep = 0;
-                        dungeonAskNpc();
-                        return;
-                    }
-                    dungeonCloseMenu();
-                    dungeonMenu = null;
-                    dungeonMenuItems = null;
-                    dungeonMenuNpc = Integer.MIN_VALUE;
-                    if (++dungeonTried >= DN_MAX_TRIES) {
-                        dungeonStop(2, "no \"nga tu\" row in the dungeon submenu");
-                        return;
-                    }
-                    dungeonWait = 10;
-                    return;
-                }
-
-                int npc = dungeonMenuNpc;
-                int menuId = dungeonMenuId;
-                dungeonMenu = null;
-                dungeonMenuItems = null;
-                dungeonMenuNpc = Integer.MIN_VALUE;
-                dungeonStep = 2;
-                dungeonTried = 0;
-                dungeonWait = 60;
-                trace("DUNGEON invoked native second-menu action for row " + pick + ", waiting on confirmation dialog");
-
-                if (fu.p != null && fu.p.a) {
-                    setFrIndex(fu.p, pick);
-                    try {
-                        fu.p.a(2, 0);
-                    } catch (Throwable t) {
-                        dungeonStop(2, "native server menu action failed: " + t);
-                    }
-                } else {
-                    try {
-                        q.a().b((short) npc, (byte) menuId, (byte) pick);
-                    } catch (Throwable t) {
-                        dungeonStop(2, "selecting dungeon row " + pick + " failed");
-                    }
-                }
-                return;
-            }
-
-            case 2: { // Step 2: Confirmation dialog -> confirm entry
-                boolean isExpectedConfirm = isDungeonConfirmDialog(fu.s);
-                boolean isTestConfirmWithoutText = (fu.s instanceof ah && norm(dialogText(fu.s)).length() == 0 && fu.s != null);
-                if (fu.s == null || (!isExpectedConfirm && !isTestConfirmWithoutText)) {
-                    if (isBlockingDialog(fu.s)) {
-                        if (++dungeonTried >= DN_MAX_TRIES) {
-                            dungeonStop(5, "unrelated dialog blocking confirmation: " + clean(dialogText(fu.s)));
-                            return;
-                        }
-                        dungeonWait = 10;
-                        return;
-                    }
-                    if (dungeonWait > 0) {
-                        --dungeonWait;
-                        return;
-                    }
-                    if (++dungeonTried >= DN_MAX_TRIES) {
-                        dungeonStop(2, "no confirmation dialog after dungeon pick");
-                        return;
-                    }
-                    dungeonStep = 0;
-                    dungeonAskNpc();
-                    return;
-                }
-                if (!dungeonConfirmDialog(fu.s)) {
-                    if (++dungeonTried >= DN_MAX_TRIES) {
-                        dungeonStop(2, "could not confirm dungeon entry dialog");
-                        return;
-                    }
-                    dungeonWait = 10;
-                    return;
-                }
-                dungeonStep = 3;
-                dungeonTried = 0;
-                dungeonWait = 80;
-                trace("DUNGEON confirmed entry dialog, waiting on teleport to Map 48");
-                return;
-            }
-
-            case 3: { // Step 3: Waiting for server teleport to Map 48
-                if (dungeonWait > 0) {
-                    --dungeonWait;
-                    return;
-                }
+        // 1. Reactive check: Valid confirmation dialog in fu.s or fu.t (optional; direct teleport also succeeds)
+        da confirmDlg = dungeonConfirmDialogTarget();
+        if (confirmDlg != null) {
+            trace("DUNGEON observed confirmation dialog: \"" + clean(dialogText(confirmDlg)) + "\"");
+            if (!dungeonConfirmDialog(confirmDlg)) {
                 if (++dungeonTried >= DN_MAX_TRIES) {
-                    dungeonStop(2, "teleport to Map 48 timed out");
+                    dungeonStop(2, "could not confirm dungeon entry dialog");
                     return;
                 }
-                dungeonStep = 0;
-                dungeonAskNpc();
+                dungeonWait = 10;
                 return;
             }
+            dungeonStep = 3;
+            dungeonTried = 0;
+            dungeonWait = 80;
+            trace("DUNGEON confirmed entry dialog, waiting on teleport to Map 48");
+            return;
+        }
 
-            default: {
-                dungeonStep = 0;
-                dungeonAskNpc();
+        // Unrelated modal safety check: fail closed on genuine blocking modals
+        da blockingDlg = (fu.s != null && isBlockingDialog(fu.s)) ? fu.s : ((fu.t != null && isBlockingDialog(fu.t)) ? fu.t : null);
+        if (blockingDlg != null) {
+            if (++dungeonTried >= DN_MAX_TRIES) {
+                dungeonStop(5, "unrelated dialog blocking dungeon: " + clean(dialogText(blockingDlg)));
                 return;
+            }
+            dungeonWait = 10;
+            return;
+        }
+
+        // 2. Reactive check: Submenu ("Vào Ngã Tư Tử Thần")
+        et activeItems = (fu.p != null && fu.p.a) ? getFrItems(fu.p) : dungeonMenuItems;
+        if (activeItems == null && dungeonMenuItems != null) {
+            activeItems = dungeonMenuItems;
+        }
+        int ngaTuRow = -1;
+        if (activeItems != null) {
+            for (int i = 0; i < activeItems.c(); i++) {
+                Object entry = activeItems.a(i);
+                if (entry instanceof bt) {
+                    bt btn = (bt) entry;
+                    if (btn.a != null) {
+                        String label = norm(btn.a);
+                        if (label.indexOf("nga tu") >= 0 || label.indexOf("tu than") >= 0 || label.indexOf("vao nga tu") >= 0) {
+                            ngaTuRow = i;
+                            break;
+                        }
+                    }
+                }
             }
         }
+        if (ngaTuRow < 0 && dungeonMenu != null) {
+            ngaTuRow = dungeonMenuPick("nga tu", null);
+            if (ngaTuRow < 0) {
+                ngaTuRow = dungeonMenuPick("tu than", null);
+            }
+            if (ngaTuRow < 0) {
+                ngaTuRow = dungeonMenuPick("vao nga tu", null);
+            }
+        }
+
+        if (ngaTuRow >= 0) {
+            if (dungeonAwaitingEntry) {
+                dungeonManualReview("server re-presented Ngã Tư submenu without entering dungeon (entry rejected or unmet requirement)");
+                return;
+            }
+            int npc = dungeonMenuNpc;
+            int menuId = dungeonMenuId;
+            dungeonMenu = null;
+            dungeonMenuItems = null;
+            dungeonMenuNpc = Integer.MIN_VALUE;
+            dungeonStep = 2;
+            dungeonTried = 0;
+            dungeonWait = 60;
+            dungeonAwaitingEntry = true;
+            trace("DUNGEON invoked native second-menu action for row " + ngaTuRow + ", waiting on confirmation dialog or teleport");
+
+            if (fu.p != null && fu.p.a) {
+                setFrIndex(fu.p, ngaTuRow);
+                try {
+                    fu.p.a(2, 0);
+                } catch (Throwable t) {
+                    dungeonStop(2, "native server menu action failed: " + t);
+                }
+            } else {
+                try {
+                    q.a().b((short) npc, (byte) menuId, (byte) ngaTuRow);
+                } catch (Throwable t) {
+                    dungeonStop(2, "selecting dungeon row " + ngaTuRow + " failed");
+                }
+            }
+            return;
+        }
+
+        // 3. Reactive check: Actionable "Giao tiếp" command
+        bt giaoTiepCmd = null;
+        int giaoTiepIndex = -1;
+        if (activeItems != null) {
+            for (int i = 0; i < activeItems.c(); i++) {
+                Object entry = activeItems.a(i);
+                if (entry instanceof bt) {
+                    bt btn = (bt) entry;
+                    if (btn.a != null) {
+                        String label = norm(btn.a);
+                        if (label.indexOf("giao tiep") >= 0 && label.indexOf("giao dich") < 0) {
+                            giaoTiepCmd = btn;
+                            giaoTiepIndex = i;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (giaoTiepCmd == null && fu.s != null) {
+            giaoTiepCmd = findGiaoTiepInDialog(fu.s);
+        }
+        int legacyPick = -1;
+        if (giaoTiepCmd == null && dungeonMenu != null) {
+            legacyPick = dungeonMenuPick("giao tiep", "giao dich");
+        }
+
+        if (dungeonStep == 0 && (giaoTiepCmd != null || legacyPick >= 0)) {
+            if (fu.p != null && fu.p.a && giaoTiepIndex >= 0) {
+                setFrIndex(fu.p, giaoTiepIndex);
+            }
+            dungeonStep = 1;
+            dungeonTried = 0;
+            dungeonWait = 60;
+            dungeonMenu = null;
+            dungeonMenuItems = null;
+            dungeonMenuNpc = Integer.MIN_VALUE;
+            trace("DUNGEON invoked native 'Giao tiếp' command, waiting on second menu");
+
+            if (giaoTiepCmd != null) {
+                giaoTiepCmd.a();
+            } else {
+                if (!dungeonSelect(legacyPick)) {
+                    dungeonStop(2, "selecting \"giao tiếp\" failed");
+                }
+            }
+            return;
+        }
+
+        // 4. Reactive check: Relevant NPC / story speech dialog in fu.s
+        if (fu.s != null && isNpcSpeechDialog(fu.s)) {
+            dungeonStep = (dungeonStep < 1) ? 1 : dungeonStep;
+            dungeonTried = 0;
+            dungeonWait = 60;
+            dungeonMenu = null;
+            dungeonMenuItems = null;
+            dungeonMenuNpc = Integer.MIN_VALUE;
+            trace("DUNGEON advancing Pho Chi Huy speech dialog in fu.s");
+            if (fu.s.ab != null) {
+                fu.s.ab.a();
+            } else if (fu.s.Z != null) {
+                fu.s.Z.a();
+            } else {
+                fu.al[5] = true;
+                fu.am[5] = true;
+            }
+            return;
+        }
+
+        // 5. Cooldown / Wait Budget
+        if (dungeonWait > 0) {
+            --dungeonWait;
+            return;
+        }
+
+        // 6. Bounded Retry
+        if (dungeonAwaitingEntry) {
+            if (++dungeonTried >= DN_MAX_TRIES) {
+                dungeonStop(2, "dungeon interaction timed out waiting for confirmation or teleport after " + DN_MAX_TRIES + " tries");
+                return;
+            }
+            dungeonWait = 60;
+            return;
+        }
+
+        if (++dungeonTried >= DN_MAX_TRIES) {
+            dungeonStop(2, "dungeon interaction timed out after " + DN_MAX_TRIES + " tries");
+            return;
+        }
+        dungeonStep = 0;
+        dungeonCloseMenu();
+        dungeonMenu = null;
+        dungeonMenuItems = null;
+        dungeonMenuNpc = Integer.MIN_VALUE;
+        dungeonAskNpc();
     }
 
     /**
@@ -8103,6 +7995,26 @@ public final class Zeus {
                         }
                     }
                 }
+            } else if (dialog instanceof dz) {
+                try {
+                    java.lang.reflect.Field fb = dz.class.getDeclaredField("b");
+                    fb.setAccessible(true);
+                    Object btn = fb.get(dialog);
+                    if (btn instanceof bt) {
+                        bt b = (bt) btn;
+                        String cap = (b.a == null) ? "" : norm(b.a).trim();
+                        if (cap.length() > 0 && isAffirmativeCaption(cap) && !isNegativeCaption(cap)) {
+                            trace("DUNGEON dialog confirming via dz.b=\"" + clean(b.a) + "\"");
+                            b.a();
+                            return true;
+                        } else {
+                            trace("DUNGEON dz.b caption blank, negative, or ambiguous: \"" + clean(b.a) + "\"");
+                            return false;
+                        }
+                    }
+                } catch (Throwable t) {
+                }
+                return false;
             }
 
             // 2. Check softkeys Z (left) and ab (right)
@@ -8178,10 +8090,25 @@ public final class Zeus {
                 return false;
             }
             String text = norm(dialogText(dialog));
-            return text.indexOf("nga tu") >= 0 || text.indexOf("tu than") >= 0;
+            boolean hasDungeonId = text.indexOf("nga tu") >= 0 || text.indexOf("tu than") >= 0;
+            boolean hasEntryIntent = text.indexOf("vao") >= 0;
+            return hasDungeonId && hasEntryIntent;
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    private static da dungeonConfirmDialogTarget() {
+        if (dungeonStep != 2) {
+            return null;
+        }
+        if (isDungeonConfirmDialog(fu.s)) {
+            return fu.s;
+        }
+        if (isDungeonConfirmDialog(fu.t)) {
+            return fu.t;
+        }
+        return null;
     }
 
     private static boolean isDangerousAffirmativeCaption(String cap) {
@@ -8214,7 +8141,7 @@ public final class Zeus {
         if (dialog == null) {
             return false;
         }
-        if (isDungeonConfirmDialog(dialog)) {
+        if (dungeonStep == 2 && isDungeonConfirmDialog(dialog)) {
             return false;
         }
         if (isNpcSpeechDialog(dialog)) {
@@ -8284,10 +8211,14 @@ public final class Zeus {
             }
             if (fu.s == dialog) {
                 fu.s = null;
+            } else if (fu.t == dialog) {
+                fu.t = null;
             }
         } catch (Throwable t) {
             if (fu.s == dialog) {
                 fu.s = null;
+            } else if (fu.t == dialog) {
+                fu.t = null;
             }
         }
     }
@@ -9222,6 +9153,34 @@ public final class Zeus {
                 Object vt = ft.get(dialog);
                 if (vt instanceof String && ((String) vt).length() > 0) {
                     out.append((String) vt).append(' ');
+                }
+            } catch (Throwable t) {
+            }
+        } else if (dialog instanceof dz) {
+            try {
+                java.lang.reflect.Field fh = dz.class.getDeclaredField("h");
+                fh.setAccessible(true);
+                Object vh = fh.get(dialog);
+                if (vh instanceof String && ((String) vh).length() > 0) {
+                    out.append((String) vh).append(' ');
+                }
+            } catch (Throwable t) {
+            }
+            try {
+                java.lang.reflect.Field fi = dz.class.getDeclaredField("i");
+                fi.setAccessible(true);
+                Object vi = fi.get(dialog);
+                if (vi instanceof String && ((String) vi).length() > 0) {
+                    out.append((String) vi).append(' ');
+                }
+            } catch (Throwable t) {
+            }
+            try {
+                java.lang.reflect.Field fj = dz.class.getDeclaredField("j");
+                fj.setAccessible(true);
+                Object vj = fj.get(dialog);
+                if (vj instanceof String && ((String) vj).length() > 0) {
+                    out.append((String) vj).append(' ');
                 }
             } catch (Throwable t) {
             }
