@@ -2,7 +2,9 @@
  * PatchZeus — inject Zeus_Knight hooks into the official v4.0.3 vanilla jar.
  *
  * Hooks:
- *   1. Main/GameCanvas.update()V: inject `invokestatic Zeus.tick()V` at the RETURN.
+ *   1. Main/GameCanvas:
+ *      - update()V: inject `invokestatic Zeus.tick()V` at the RETURN.
+ *      - connect()V: inject `invokestatic Zeus.serverTargetSafe()Z` guard at prologue.
  *   2. GameScreen/SelectCharScreen.selectChar: widen private/package -> public.
  *   3. InterfaceComponents/MsgDialog.cmdList: widen private/package -> public.
  *   4. netcommand/Cmd_Message.send()V: inject `Zeus.sent(this.m)` at prologue.
@@ -10,6 +12,7 @@
  *      - startAt(mVector, int, String, boolean, mVector): inject local menu hook Zeus.menu(mVector, String).
  *      - setinfoDynamic(mVector, int, int, int, String): inject server menu hook Zeus.serverMenu(mVector, idMenu, idNPC, String).
  *   6. GameScreen/GameScreen.paint(mGraphics)V: inject `Zeus.paint(g)` before RETURN.
+ *   7. GameScreen/LoginScreen.login(String, String)V: inject `invokestatic Zeus.serverTargetSafe()Z` guard at prologue.
  *
  * usage: PatchZeus <in.jar> <out-class-dir>
  */
@@ -38,15 +41,19 @@ public final class PatchZeus {
         ZipFile zf = new ZipFile(args[0]);
         File outDir = new File(args[1]);
 
-        // ── 1. Hook Main/GameCanvas.update()V ───────────────────────────
+        // ── 1. Hook Main/GameCanvas.update()V (tick) & connect()V (guard) ──
         byte[] gcBytes = readAll(zf.getInputStream(zf.getEntry("Main/GameCanvas.class")));
         ClassReader gcr = new ClassReader(gcBytes);
         ClassWriter gcw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-        TickHook tick = new TickHook(gcw);
-        gcr.accept(tick, 0);
-        if (tick.targetMethodCount != 1 || tick.returnCount != 1) {
+        GameCanvasHook gcHook = new GameCanvasHook(gcw);
+        gcr.accept(gcHook, 0);
+        if (gcHook.updateMethodCount != 1 || gcHook.tickReturnCount != 1) {
             throw new IllegalStateException("Main/GameCanvas.update()V: expected exactly 1 method and 1 RETURN, found "
-                    + tick.targetMethodCount + " methods and " + tick.returnCount + " RETURNs — refusing to write");
+                    + gcHook.updateMethodCount + " methods and " + gcHook.tickReturnCount + " RETURNs — refusing to write");
+        }
+        if (gcHook.connectMethodCount != 1 || gcHook.connectGuardCount != 1) {
+            throw new IllegalStateException("Main/GameCanvas.connect()V: expected exactly 1 method and 1 guard, found "
+                    + gcHook.connectMethodCount + " methods and " + gcHook.connectGuardCount + " guards — refusing to write");
         }
         writeClass(outDir, "Main/GameCanvas.class", gcw.toByteArray());
 
@@ -69,12 +76,12 @@ public final class PatchZeus {
         FieldWidener widenCmdList = new FieldWidener(mdw, "cmdList", "LCLib/mVector;");
         mdr.accept(widenCmdList, 0);
         if (widenCmdList.widenedCount != 1) {
-            throw new IllegalStateException("InterfaceComponents/MsgDialog.cmdList:LCLib/mVector; expected exactly once, found "
+            throw new IllegalStateException("InterfaceComponents/MsgDialog.cmdList expected exactly once, found "
                     + widenCmdList.widenedCount + " — refusing to write");
         }
         writeClass(outDir, "InterfaceComponents/MsgDialog.class", mdw.toByteArray());
 
-        // ── 4. Trace hook netcommand/Cmd_Message.send()V ─────────────────
+        // ── 4. Hook netcommand/Cmd_Message.send()V ──────────────────────────
         byte[] cmdBytes = readAll(zf.getInputStream(zf.getEntry("netcommand/Cmd_Message.class")));
         ClassReader cmdr = new ClassReader(cmdBytes);
         ClassWriter cmdw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
@@ -86,7 +93,7 @@ public final class PatchZeus {
         }
         writeClass(outDir, "netcommand/Cmd_Message.class", cmdw.toByteArray());
 
-        // ── 5. Menu hooks Model/Menu2 ───────────────────────────────────
+        // ── 5. Hook Model/Menu2 ─────────────────────────────────────────────
         byte[] menuBytes = readAll(zf.getInputStream(zf.getEntry("Model/Menu2.class")));
         ClassReader menur = new ClassReader(menuBytes);
         ClassWriter menuw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
@@ -114,118 +121,30 @@ public final class PatchZeus {
         }
         writeClass(outDir, "GameScreen/GameScreen.class", gsw.toByteArray());
 
-        // ── 7. Fail-closed host-miss patch GameScreen/LogoScreen.applyServerList ──
-        byte[] logoBytes = readAll(zf.getInputStream(zf.getEntry("GameScreen/LogoScreen.class")));
-        ClassReader logor = new ClassReader(logoBytes);
-        ClassWriter logow = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-        LogoHostMissHook logoHook = new LogoHostMissHook(logow);
-        logor.accept(logoHook, 0);
-        if (logoHook.patchedCount != 1 || logoHook.needLabelAfterLang) {
-            throw new IllegalStateException("GameScreen/LogoScreen.applyServerList: expected exactly 1 patch site, found "
-                    + logoHook.patchedCount + " — refusing to write");
+        // ── 7. LoginScreen.login(String, String)V serverTargetSafe guard ────
+        byte[] lsBytes = readAll(zf.getInputStream(zf.getEntry("GameScreen/LoginScreen.class")));
+        ClassReader lsr = new ClassReader(lsBytes);
+        ClassWriter lsw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        LoginScreenHook loginHook = new LoginScreenHook(lsw);
+        lsr.accept(loginHook, 0);
+        if (loginHook.targetMethodCount != 1 || loginHook.guardCount != 1) {
+            throw new IllegalStateException("GameScreen/LoginScreen.login(String,String): expected exactly 1 private method, found "
+                    + loginHook.targetMethodCount + " methods and " + loginHook.guardCount + " guards — refusing to write");
         }
-        writeClass(outDir, "GameScreen/LogoScreen.class", logow.toByteArray());
+        writeClass(outDir, "GameScreen/LoginScreen.class", lsw.toByteArray());
 
         zf.close();
-        System.out.println("PatchZeus complete: patched GameCanvas, SelectCharScreen, MsgDialog, Cmd_Message, Menu2, GameScreen, LogoScreen");
+        System.out.println("PatchZeus complete: patched GameCanvas, SelectCharScreen, MsgDialog, Cmd_Message, Menu2, GameScreen, LoginScreen");
     }
 
-    // ── Fail-closed host miss hook: LogoScreen.applyServerList ──────────
-    private static final class LogoHostMissHook extends ClassAdapter {
-        int patchedCount = 0;
-        boolean needLabelAfterLang = false;
+    // ── Main/GameCanvas hook: update() tick hook + connect() serverTargetSafe guard ──
+    private static final class GameCanvasHook extends ClassAdapter {
+        int updateMethodCount = 0;
+        int tickReturnCount = 0;
+        int connectMethodCount = 0;
+        int connectGuardCount = 0;
 
-        LogoHostMissHook(ClassWriter cw) {
-            super(cw);
-        }
-
-        public MethodVisitor visitMethod(int access, String name, String desc,
-                                         String signature, String[] exceptions) {
-            MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
-            if (mv == null || !"applyServerList".equals(name) || !"(Ljava/lang/String;Z)Z".equals(desc)) {
-                return mv;
-            }
-            return new MethodAdapter(mv) {
-                private boolean seenLangServerPut = false;
-                private boolean seenIfgeN = false;
-                private boolean pendingIconst0 = false;
-                private final Label labelAfterLang = new Label();
-
-                public void visitFieldInsn(int opcode, String owner, String name, String desc) {
-                    if (opcode == Opcodes.PUTSTATIC && "Main/GameCanvas".equals(owner) && "langServer".equals(name)) {
-                        seenLangServerPut = true;
-                    }
-                    super.visitFieldInsn(opcode, owner, name, desc);
-                    if (patchedCount == 1 && opcode == Opcodes.PUTSTATIC
-                            && "Main/GameCanvas".equals(owner) && "isVNLanguage".equals(name)) {
-                        needLabelAfterLang = true;
-                    }
-                }
-
-                public void visitJumpInsn(int opcode, Label label) {
-                    if (seenLangServerPut && opcode == Opcodes.IFGE) {
-                        seenIfgeN = true;
-                    }
-                    super.visitJumpInsn(opcode, label);
-                }
-
-                public void visitInsn(int opcode) {
-                    if (seenIfgeN && opcode == Opcodes.ICONST_0 && patchedCount == 0) {
-                        pendingIconst0 = true;
-                        return;
-                    }
-                    if (pendingIconst0) {
-                        pendingIconst0 = false;
-                        super.visitInsn(Opcodes.ICONST_0);
-                    }
-                    super.visitInsn(opcode);
-                }
-
-                public void visitVarInsn(int opcode, int var) {
-                    if (pendingIconst0) {
-                        pendingIconst0 = false;
-                        if (opcode == Opcodes.ISTORE && var == 9) {
-                            // Exact site: replace iconst_0; istore 9 with fail-closed check
-                            Label nullSavedHost = new Label();
-                            super.visitVarInsn(Opcodes.ALOAD, 2);
-                            super.visitJumpInsn(Opcodes.IFNULL, nullSavedHost);
-
-                            // Host miss branch: savedServerHost != null && n < 0 -> fail-closed sentinel -1
-                            super.visitInsn(Opcodes.ICONST_M1);
-                            super.visitFieldInsn(Opcodes.PUTSTATIC, "Main/GameCanvas", "IndexServer", "B");
-                            super.visitInsn(Opcodes.ICONST_1);
-                            super.visitFieldInsn(Opcodes.PUTSTATIC, "Main/GameCanvas", "isVNLanguage", "Z");
-                            super.visitJumpInsn(Opcodes.GOTO, labelAfterLang);
-
-                            // Null saved host branch: preserve official manual behavior (n = 0)
-                            super.visitLabel(nullSavedHost);
-                            super.visitInsn(Opcodes.ICONST_0);
-                            super.visitVarInsn(Opcodes.ISTORE, 9);
-                            patchedCount++;
-                            return;
-                        } else {
-                            super.visitInsn(Opcodes.ICONST_0);
-                        }
-                    }
-
-                    if (needLabelAfterLang && opcode == Opcodes.ALOAD && var == 0) {
-                        super.visitLabel(labelAfterLang);
-                        needLabelAfterLang = false;
-                    }
-
-                    super.visitVarInsn(opcode, var);
-                }
-            };
-        }
-    }
-
-
-    // ── GameCanvas.update() tick hook ───────────────────────────────────
-    private static final class TickHook extends ClassAdapter {
-        int targetMethodCount = 0;
-        int returnCount = 0;
-
-        TickHook(ClassWriter cw) {
+        GameCanvasHook(ClassWriter cw) {
             super(cw);
         }
 
@@ -233,15 +152,59 @@ public final class PatchZeus {
                                          String signature, String[] exceptions) {
             MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
             if (mv != null && "update".equals(name) && "()V".equals(desc)) {
-                targetMethodCount++;
+                updateMethodCount++;
                 return new MethodAdapter(mv) {
                     public void visitInsn(int opcode) {
                         if (opcode == Opcodes.RETURN) {
-                            returnCount++;
-                            visitMethodInsn(Opcodes.INVOKESTATIC,
-                                    "Zeus", "tick", "()V");
+                            tickReturnCount++;
+                            visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "tick", "()V");
                         }
                         super.visitInsn(opcode);
+                    }
+                };
+            }
+            if (mv != null && "connect".equals(name) && "()V".equals(desc)) {
+                connectMethodCount++;
+                return new MethodAdapter(mv) {
+                    public void visitCode() {
+                        super.visitCode();
+                        connectGuardCount++;
+                        Label proceed = new Label();
+                        visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "serverTargetSafe", "()Z");
+                        visitJumpInsn(Opcodes.IFNE, proceed);
+                        visitInsn(Opcodes.RETURN);
+                        visitLabel(proceed);
+                    }
+                };
+            }
+            return mv;
+        }
+    }
+
+    // ── GameScreen/LoginScreen hook: login(String, String) serverTargetSafe guard ──
+    private static final class LoginScreenHook extends ClassAdapter {
+        int targetMethodCount = 0;
+        int guardCount = 0;
+
+        LoginScreenHook(ClassWriter cw) {
+            super(cw);
+        }
+
+        public MethodVisitor visitMethod(int access, String name, String desc,
+                                         String signature, String[] exceptions) {
+            MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
+            if (mv != null && "login".equals(name) && "(Ljava/lang/String;Ljava/lang/String;)V".equals(desc)
+                    && (access & Opcodes.ACC_PRIVATE) != 0) {
+                targetMethodCount++;
+                return new MethodAdapter(mv) {
+                    public void visitCode() {
+                        super.visitCode();
+                        guardCount++;
+                        Label proceed = new Label();
+                        visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "serverTargetSafe", "()Z");
+                        visitJumpInsn(Opcodes.IFNE, proceed);
+                        visitInsn(Opcodes.RETURN);
+                        visitLabel(proceed);
                     }
                 };
             }

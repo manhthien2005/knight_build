@@ -942,7 +942,7 @@ impl JarManifest {
     pub const V403_CORE_R1_COMPATIBLE_JAR_SHA256: &'static str =
         "bd15eea2a6cb8c33f6868262aa8044572db2efbce8570aa679a98ace6068c918";
     pub const V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256: &'static str =
-        "3d8e2e3ecec612def76c6d59659b6a996a8c2f29b932dd89d81d712d89e67bb1";
+        "fb8880aa8b731fb92b9ea6348aac9c56a828638ba306fb5b33a3028d6ebc5df7";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;

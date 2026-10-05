@@ -254,14 +254,28 @@ fn user_pass_record(username: &str, password: &str) -> CoreResult<Vec<u8>> {
     Ok(complement(&plain))
 }
 
-/// The `isIndexServer` record: one index byte, complemented.
-/// For legacy IDs 0..7, this is the historical index.
-/// For Bạch Hổ ID 8, this is 8 (acting as fail-closed sentinel against static 8-server fallback).
-fn index_server_record(server_index: u8) -> CoreResult<Vec<u8>> {
-    if server_index >= SERVER_COUNT {
+/// Returns the safe client bootstrap index for a logical server ID.
+///
+/// IDs 0..7 retain their historical static-fallback index (0..7).
+/// Logical ID 8 (Bạch Hổ) returns bootstrap index 0 to stay within the official
+/// static 8-server array bounds (0..7) before dynamic host resolution.
+pub fn bootstrap_index_for_server(logical_id: u8) -> CoreResult<u8> {
+    if logical_id >= SERVER_COUNT {
         return Err(seed_error("rms_server_index_out_of_range"));
     }
-    Ok(complement(&[server_index]))
+    match logical_id {
+        0..=7 => Ok(logical_id),
+        8 => Ok(0),
+        _ => Err(seed_error("rms_server_index_out_of_range")),
+    }
+}
+
+/// The `isIndexServer` record: one bootstrap index byte, complemented.
+/// For legacy IDs 0..7, this is the historical index.
+/// For Bạch Hổ ID 8, this is bootstrap index 0 to keep the client within valid array bounds before dynamic host resolution.
+fn index_server_record(logical_id: u8) -> CoreResult<Vec<u8>> {
+    let bootstrap_index = bootstrap_index_for_server(logical_id)?;
+    Ok(complement(&[bootstrap_index]))
 }
 
 /// The `selectedServerHost` record: raw UTF-8 bytes of canonical host name, complemented.
@@ -388,10 +402,10 @@ pub fn clear_credentials(microemu_home: &Path) -> CoreResult<()> {
 mod tests {
     use super::{
         BOOTSTRAP_LIST_SERVER_RAW, CONFIG_DIRECTORY_NAME, SERVER_CATALOG, SERVER_COUNT,
-        SERVER_NAMES, SUITE_DIRECTORY_NAME, clear_credentials, complement, index_server_record,
-        list_server_record, parse_list_server_record, parse_selected_server_host_record,
-        record_store_bytes, seed_credentials, selected_server_host_record, server_spec,
-        user_pass_record, write_java_utf8,
+        SERVER_NAMES, SUITE_DIRECTORY_NAME, bootstrap_index_for_server, clear_credentials,
+        complement, index_server_record, list_server_record, parse_list_server_record,
+        parse_selected_server_host_record, record_store_bytes, seed_credentials,
+        selected_server_host_record, server_spec, user_pass_record, write_java_utf8,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -626,16 +640,44 @@ mod tests {
     }
 
     #[test]
+    fn test_bootstrap_index_mapping_and_server_distinguishability() {
+        assert_eq!(bootstrap_index_for_server(0).unwrap(), 0);
+        assert_eq!(bootstrap_index_for_server(1).unwrap(), 1);
+        assert_eq!(bootstrap_index_for_server(2).unwrap(), 2);
+        assert_eq!(bootstrap_index_for_server(3).unwrap(), 3);
+        assert_eq!(bootstrap_index_for_server(4).unwrap(), 4);
+        assert_eq!(bootstrap_index_for_server(5).unwrap(), 5);
+        assert_eq!(bootstrap_index_for_server(6).unwrap(), 6);
+        assert_eq!(bootstrap_index_for_server(7).unwrap(), 7);
+        assert_eq!(bootstrap_index_for_server(8).unwrap(), 0);
+        assert!(bootstrap_index_for_server(9).is_err());
+        assert!(bootstrap_index_for_server(255).is_err());
+
+        // Bạch Hổ stable account identity remains 8 even though RMS isIndexServer contains 0.
+        let rec8 = index_server_record(8).expect("ID 8 encodes");
+        assert_eq!(rec8, [!0]);
+        assert_eq!(complement(&rec8), [0]);
+
+        // Existing ID 0 and ID 8 remain distinguishable through selectedServerHost.
+        let host0 = server_spec(0).unwrap().host;
+        let host8 = server_spec(8).unwrap().host;
+        assert_ne!(host0, host8);
+        assert_eq!(host0, "hs1.teamobi.com");
+        assert_eq!(host8, "hs8.teamobi.com");
+
+        let host_rec0 = selected_server_host_record(host0).unwrap();
+        let host_rec8 = selected_server_host_record(host8).unwrap();
+        assert_ne!(host_rec0, host_rec8);
+        assert_eq!(parse_selected_server_host_record(&host_rec0).unwrap(), host0);
+        assert_eq!(parse_selected_server_host_record(&host_rec8).unwrap(), host8);
+    }
+
+    #[test]
     fn selected_server_host_and_list_server_records_round_trip() {
         assert_eq!(server_spec(0).unwrap().host, "hs1.teamobi.com");
         assert_eq!(server_spec(6).unwrap().host, "hs7.teamobi.com");
         assert_eq!(server_spec(7).unwrap().host, "hs4.teamobi.com");
         assert_eq!(server_spec(8).unwrap().host, "hs8.teamobi.com");
-
-        // ID 8 isIndexServer = 8 (complement 247).
-        let rec8 = index_server_record(8).expect("ID 8 encodes");
-        assert_eq!(rec8, [!8]);
-        assert_eq!(complement(&rec8), [8]);
 
         // selectedServerHost round trip
         for spec in SERVER_CATALOG.iter() {

@@ -50,6 +50,7 @@ jar xf "$OUT" \
     netcommand/Cmd_Message.class \
     Model/Menu2.class \
     GameScreen/LogoScreen.class \
+    GameScreen/LoginScreen.class \
     META-INF/MANIFEST.MF
 
 keys=$(javap -p -constants Zeus.class | grep -c 'static final int K_')
@@ -61,7 +62,15 @@ menu=$(javap -c Model/Menu2.class | grep -c 'invokestatic.*Zeus\.menu:(LCLib/mVe
 smenu=$(javap -c Model/Menu2.class | grep -c 'invokestatic.*Zeus\.serverMenu:(LCLib/mVector;IILjava/lang/String;)Z')
 sc_pub=$(javap -p GameScreen/SelectCharScreen.class | grep -c 'public int selectChar;')
 md_pub=$(javap -p InterfaceComponents/MsgDialog.class | grep -c 'public CLib.mVector cmdList;')
-host_miss=$(javap -c GameScreen/LogoScreen.class | grep -A 2 'iconst_m1' | grep -c 'putstatic.*IndexServer:B')
+mkdir -p vanilla_tmp
+(cd vanilla_tmp && jar xf /work/jar/vanilla.jar GameScreen/LogoScreen.class)
+vanilla_logo_sha=$(sha256sum vanilla_tmp/GameScreen/LogoScreen.class | cut -d' ' -f1)
+final_logo_sha=$(sha256sum GameScreen/LogoScreen.class | cut -d' ' -f1)
+logo_pristine=0
+[ "$final_logo_sha" = "$vanilla_logo_sha" ] && logo_pristine=1
+rm -rf vanilla_tmp
+gc_connect_guard=$(javap -c Main/GameCanvas.class | grep -c 'invokestatic.*Zeus\.serverTargetSafe:()Z')
+ls_login_guard=$(javap -c -p GameScreen/LoginScreen.class | grep -c 'invokestatic.*Zeus\.serverTargetSafe:()Z')
 midlet_ver=$(grep -oP 'MIDlet-Version: *\K[0-9.]+' META-INF/MANIFEST.MF)
 potato_class=$(jar tf "$OUT" | grep -c 'POTATO\.class' || true)
 bx_class=$(jar tf "$OUT" | grep -c '^bx\.class$' || true)
@@ -93,7 +102,9 @@ printf '   Zeus.menu              %s call sites (phai la 1)\n' "$menu"
 printf '   Zeus.serverMenu        %s call sites (phai la 1)\n' "$smenu"
 printf '   SelectChar.selectChar  %s public (phai la 1)\n' "$sc_pub"
 printf '   MsgDialog.cmdList      %s public (phai la 1)\n' "$md_pub"
-printf '   host-miss fail-closed  %s (phai la 1)\n' "$host_miss"
+printf '   LogoScreen pristine    %s (phai la 1)\n' "$logo_pristine"
+printf '   GameCanvas.connect     %s guard (phai la 1)\n' "$gc_connect_guard"
+printf '   LoginScreen.login      %s guard (phai la 1)\n' "$ls_login_guard"
 printf '   MIDlet-Version         %s (phai la 4.0.3)\n' "$midlet_ver"
 printf '   POTATO.class           %s (phai la 0)\n' "$potato_class"
 printf '   bx.class               %s (phai la 0)\n' "$bx_class"
@@ -112,7 +123,9 @@ rc=0
 [ "$smenu" = "1" ]         || { echo "   !! Zeus.serverMenu khong phai 1 call site"; rc=1; }
 [ "$sc_pub" = "1" ]        || { echo "   !! SelectCharScreen.selectChar khong phai public"; rc=1; }
 [ "$md_pub" = "1" ]        || { echo "   !! MsgDialog.cmdList khong phai public"; rc=1; }
-[ "$host_miss" = "1" ]     || { echo "   !! host-miss fail-closed patch khong phai 1"; rc=1; }
+[ "$logo_pristine" = "1" ]    || { echo "   !! LogoScreen.class khong trung vanilla"; rc=1; }
+[ "$gc_connect_guard" = "1" ] || { echo "   !! GameCanvas.connect serverTargetSafe guard khong phai 1 call site"; rc=1; }
+[ "$ls_login_guard" = "1" ]   || { echo "   !! LoginScreen.login serverTargetSafe guard khong phai 1 call site"; rc=1; }
 [ "$midlet_ver" = "4.0.3" ]|| { echo "   !! MIDlet-Version khong phai 4.0.3"; rc=1; }
 [ "$potato_class" = "0" ]  || { echo "   !! POTATO.class co mat trong jar"; rc=1; }
 [ "$bx_class" = "0" ]      || { echo "   !! legacy bx.class co mat trong jar"; rc=1; }

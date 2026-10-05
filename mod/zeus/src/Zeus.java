@@ -9416,4 +9416,66 @@ public final class Zeus {
         }
         return fallback;
     }
+
+    /**
+     * Canonical host guard for server connection and credential transmission.
+     *
+     * Validates that the runtime's currently selected server row matches the
+     * canonical host seeded in RMS selectedServerHost.
+     */
+    public static boolean serverTargetSafe() {
+        try {
+            byte[] bytes = Model.CRes.loadRMS("selectedServerHost");
+            if (bytes == null) {
+                // If loadRMS returned null, check whether the store is truly absent or exists but is empty/malformed.
+                boolean exists = false;
+                try {
+                    javax.microedition.rms.RecordStore rs =
+                            javax.microedition.rms.RecordStore.openRecordStore("selectedServerHost", false);
+                    exists = true;
+                    rs.closeRecordStore();
+                } catch (javax.microedition.rms.RecordStoreNotFoundException rsnfe) {
+                    exists = false;
+                } catch (Throwable t) {
+                    return false;
+                }
+                if (exists) {
+                    // Store exists but loadRMS returned null (empty or malformed) -> fail closed
+                    return false;
+                }
+                // If selectedServerHost store does not exist, return true to preserve official unmanaged/manual behavior.
+                return true;
+            }
+            if (bytes.length == 0) {
+                return false;
+            }
+            String savedHost = new String(bytes, "UTF-8").trim();
+            if (savedHost.length() == 0) {
+                return false;
+            }
+            int index = Main.GameCanvas.IndexServer;
+            if (index < 0) {
+                return false;
+            }
+            String[][] list = CLib.mSystem.listServer;
+            if (list == null || index >= list.length) {
+                return false;
+            }
+            String[] row = list[index];
+            if (row == null || row.length < 2) {
+                return false;
+            }
+            String currentHost = row[1];
+            if (currentHost == null) {
+                return false;
+            }
+            String trimmedCurrent = currentHost.trim();
+            if (trimmedCurrent.length() == 0) {
+                return false;
+            }
+            return savedHost.equalsIgnoreCase(trimmedCurrent);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
 }
