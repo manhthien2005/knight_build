@@ -792,7 +792,7 @@ fn handle_cloud_event(
                     acc.secret_sealed = ss.clone();
                 }
                 if let Some(si) = record["server_index"].as_i64() {
-                    acc.server_index = si.clamp(0, 7) as u8;
+                    acc.server_index = si.clamp(0, (zeus_core::SERVER_COUNT - 1) as i64) as u8;
                 }
                 if let Some(un) = record["username"].as_str() {
                     acc.username = un.to_string();
@@ -1078,8 +1078,8 @@ fn seed_account_credentials(
     let plaintext = crate::crypto::unseal(identity, &sealed)
         .map_err(|e| format!("unseal failed: {e}"))?;
 
-    // Kiểm tra server_index trong khoảng hợp lệ 0..7 — Issue #87
-    let server_index = acc.server_index.min(7);
+    // Kiểm tra server_index trong khoảng hợp lệ 0..8 (SERVER_COUNT=9) — Issue #87 / R2
+    let server_index = acc.server_index.min((zeus_core::SERVER_COUNT - 1) as u8);
 
     let paths = AccountPaths::for_slot(acc.slot_index);
     crate::crypto::seed_then_forget(&paths.home, plaintext, server_index)
@@ -2742,7 +2742,8 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
     rows.into_iter()
         .map(|row| {
             let id = row.id.clone();
-            let server_index = (row.server_index as i32).clamp(0, 7) as u8;
+            let server_index = (row.server_index as i32)
+                .clamp(0, (zeus_core::SERVER_COUNT - 1) as i32) as u8;
             let state = AccountState {
                 id: row.id,
                 slot_index: row.slot_index,
@@ -2781,7 +2782,8 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
 fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountState> {
     let id = record["id"].as_str()?.to_string();
     let slot_index = record["slot_index"].as_i64()? as i32;
-    let server_index = (record["server_index"].as_i64().unwrap_or(0) as i32).clamp(0, 7) as u8;
+    let server_index = (record["server_index"].as_i64().unwrap_or(0) as i32)
+        .clamp(0, (zeus_core::SERVER_COUNT - 1) as i32) as u8;
     let character_slot = record
         .get("character_slot")
         .and_then(|v| v.as_i64())

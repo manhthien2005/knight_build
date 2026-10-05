@@ -189,7 +189,20 @@ mod tests {
             assert!(!name.is_empty(), "index {index} rendered empty");
             assert_eq!(name, zeus_core::SERVER_NAMES[index]);
         }
+        // Historical 0..7 preserved
+        assert_eq!(server_name(0), "Chiến Thần");
+        assert_eq!(server_name(1), "Rồng Lửa");
+        assert_eq!(server_name(2), "Global Server");
+        assert_eq!(server_name(3), "Phượng Hoàng");
+        assert_eq!(server_name(4), "Nhân Mã");
+        assert_eq!(server_name(5), "Kì Lân");
+        assert_eq!(server_name(6), "Thiên Hà (New)");
+        assert_eq!(server_name(7), "Thách Đấu");
+        // Bạch Hổ New at logical ID 8
+        assert_eq!(server_name(8), "Bạch Hổ New");
+
         // One past the table is a placeholder rather than a panic or a wrong world.
+        assert_eq!(server_name(9), "Không rõ");
         assert_eq!(server_name(zeus_core::SERVER_NAMES.len() as u8), "Không rõ");
         assert_eq!(server_name(u8::MAX), "Không rõ");
     }

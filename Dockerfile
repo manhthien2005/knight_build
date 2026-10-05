@@ -182,7 +182,7 @@ RUN set -eu; \
     jar_sha="$(grep -oP '"jar_sha256":\s*"\K[0-9a-f]{64}' /opt/knight/game/zeus-jar.json)"; \
     printf '%s  %s\n' \
         dbd5f3eb8365d3e839d6a203149e0e3776fc1a0585e16ac1fc23f76c9fcae1c6 /opt/microemulator-2.0.4/microemulator.jar \
-        bd15eea2a6cb8c33f6868262aa8044572db2efbce8570aa679a98ace6068c918 /opt/knight/game/Zeus_Knight.jar \
+        3d8e2e3ecec612def76c6d59659b6a996a8c2f29b932dd89d81d712d89e67bb1 /opt/knight/game/Zeus_Knight.jar \
         a08cb795a1e8d11ea6c2dd6adf8c9edead9a7c3bbca07681dad79cc3eaec0ef4 /usr/local/bin/jattach \
         "$jar_sha" /opt/knight/game/Zeus_Knight.jar \
     | sha256sum -c - \

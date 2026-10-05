@@ -114,8 +114,109 @@ public final class PatchZeus {
         }
         writeClass(outDir, "GameScreen/GameScreen.class", gsw.toByteArray());
 
+        // ── 7. Fail-closed host-miss patch GameScreen/LogoScreen.applyServerList ──
+        byte[] logoBytes = readAll(zf.getInputStream(zf.getEntry("GameScreen/LogoScreen.class")));
+        ClassReader logor = new ClassReader(logoBytes);
+        ClassWriter logow = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        LogoHostMissHook logoHook = new LogoHostMissHook(logow);
+        logor.accept(logoHook, 0);
+        if (logoHook.patchedCount != 1 || logoHook.needLabelAfterLang) {
+            throw new IllegalStateException("GameScreen/LogoScreen.applyServerList: expected exactly 1 patch site, found "
+                    + logoHook.patchedCount + " — refusing to write");
+        }
+        writeClass(outDir, "GameScreen/LogoScreen.class", logow.toByteArray());
+
         zf.close();
-        System.out.println("PatchZeus complete: patched GameCanvas, SelectCharScreen, MsgDialog, Cmd_Message, Menu2, GameScreen");
+        System.out.println("PatchZeus complete: patched GameCanvas, SelectCharScreen, MsgDialog, Cmd_Message, Menu2, GameScreen, LogoScreen");
+    }
+
+    // ── Fail-closed host miss hook: LogoScreen.applyServerList ──────────
+    private static final class LogoHostMissHook extends ClassAdapter {
+        int patchedCount = 0;
+        boolean needLabelAfterLang = false;
+
+        LogoHostMissHook(ClassWriter cw) {
+            super(cw);
+        }
+
+        public MethodVisitor visitMethod(int access, String name, String desc,
+                                         String signature, String[] exceptions) {
+            MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
+            if (mv == null || !"applyServerList".equals(name) || !"(Ljava/lang/String;Z)Z".equals(desc)) {
+                return mv;
+            }
+            return new MethodAdapter(mv) {
+                private boolean seenLangServerPut = false;
+                private boolean seenIfgeN = false;
+                private boolean pendingIconst0 = false;
+                private final Label labelAfterLang = new Label();
+
+                public void visitFieldInsn(int opcode, String owner, String name, String desc) {
+                    if (opcode == Opcodes.PUTSTATIC && "Main/GameCanvas".equals(owner) && "langServer".equals(name)) {
+                        seenLangServerPut = true;
+                    }
+                    super.visitFieldInsn(opcode, owner, name, desc);
+                    if (patchedCount == 1 && opcode == Opcodes.PUTSTATIC
+                            && "Main/GameCanvas".equals(owner) && "isVNLanguage".equals(name)) {
+                        needLabelAfterLang = true;
+                    }
+                }
+
+                public void visitJumpInsn(int opcode, Label label) {
+                    if (seenLangServerPut && opcode == Opcodes.IFGE) {
+                        seenIfgeN = true;
+                    }
+                    super.visitJumpInsn(opcode, label);
+                }
+
+                public void visitInsn(int opcode) {
+                    if (seenIfgeN && opcode == Opcodes.ICONST_0 && patchedCount == 0) {
+                        pendingIconst0 = true;
+                        return;
+                    }
+                    if (pendingIconst0) {
+                        pendingIconst0 = false;
+                        super.visitInsn(Opcodes.ICONST_0);
+                    }
+                    super.visitInsn(opcode);
+                }
+
+                public void visitVarInsn(int opcode, int var) {
+                    if (pendingIconst0) {
+                        pendingIconst0 = false;
+                        if (opcode == Opcodes.ISTORE && var == 9) {
+                            // Exact site: replace iconst_0; istore 9 with fail-closed check
+                            Label nullSavedHost = new Label();
+                            super.visitVarInsn(Opcodes.ALOAD, 2);
+                            super.visitJumpInsn(Opcodes.IFNULL, nullSavedHost);
+
+                            // Host miss branch: savedServerHost != null && n < 0 -> fail-closed sentinel -1
+                            super.visitInsn(Opcodes.ICONST_M1);
+                            super.visitFieldInsn(Opcodes.PUTSTATIC, "Main/GameCanvas", "IndexServer", "B");
+                            super.visitInsn(Opcodes.ICONST_1);
+                            super.visitFieldInsn(Opcodes.PUTSTATIC, "Main/GameCanvas", "isVNLanguage", "Z");
+                            super.visitJumpInsn(Opcodes.GOTO, labelAfterLang);
+
+                            // Null saved host branch: preserve official manual behavior (n = 0)
+                            super.visitLabel(nullSavedHost);
+                            super.visitInsn(Opcodes.ICONST_0);
+                            super.visitVarInsn(Opcodes.ISTORE, 9);
+                            patchedCount++;
+                            return;
+                        } else {
+                            super.visitInsn(Opcodes.ICONST_0);
+                        }
+                    }
+
+                    if (needLabelAfterLang && opcode == Opcodes.ALOAD && var == 0) {
+                        super.visitLabel(labelAfterLang);
+                        needLabelAfterLang = false;
+                    }
+
+                    super.visitVarInsn(opcode, var);
+                }
+            };
+        }
     }
 
 

@@ -883,6 +883,17 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
             JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
         ],
     },
+    RuntimeContract {
+        name: "V403_BACH_HO_R2_ZEUS_ONLY",
+        jar_sha256: JarManifest::V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256,
+        ctl_version: 15,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+            JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+            JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
+        ],
+    },
 ];
 
 impl JarManifest {
@@ -930,6 +941,8 @@ impl JarManifest {
         "b18baf702ee119c1d950f1ab13ba67d87b9768eb8305d02bc8268980850a8091";
     pub const V403_CORE_R1_COMPATIBLE_JAR_SHA256: &'static str =
         "bd15eea2a6cb8c33f6868262aa8044572db2efbce8570aa679a98ace6068c918";
+    pub const V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256: &'static str =
+        "3d8e2e3ecec612def76c6d59659b6a996a8c2f29b932dd89d81d712d89e67bb1";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -1590,7 +1603,8 @@ impl AccountSnapshot {
             return;
         }
         self.username = fresh.username.clone();
-        self.server_index = (fresh.server_index as i32).clamp(0, 7) as u8;
+        self.server_index = (fresh.server_index as i32)
+            .clamp(0, (zeus_core::SERVER_COUNT - 1) as i32) as u8;
         self.secret_sealed = fresh.secret_sealed.clone();
         self.desired_state = fresh.desired_state.clone();
         self.control_version = fresh.control_version;
@@ -1616,7 +1630,8 @@ impl AccountSnapshot {
             id: row.id.clone(),
             slot_index: row.slot_index,
             username: row.username.clone(),
-            server_index: (row.server_index as i32).clamp(0, 7) as u8,
+            server_index: (row.server_index as i32)
+                .clamp(0, (zeus_core::SERVER_COUNT - 1) as i32) as u8,
             secret_sealed: row.secret_sealed.clone(),
             desired_state: row.desired_state.clone(),
             control_version: row.control_version,
@@ -3512,7 +3527,7 @@ mod tests {
 
         // 7. Test loading actual repository zeus-jar.json
         if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
-            assert_eq!(loaded_manifest.jar_sha256, JarManifest::V403_CORE_R1_COMPATIBLE_JAR_SHA256);
+            assert_eq!(loaded_manifest.jar_sha256, JarManifest::V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256);
             assert_eq!(loaded_manifest.ctl_version, 15);
             assert_eq!(loaded_manifest.ctl_key_count, 38);
             assert!(loaded_manifest.is_character_slot_compatible());
@@ -3553,7 +3568,7 @@ mod tests {
         assert!(historical_b18_manifest.is_enhancement_queue_compatible());
         assert!(historical_b18_manifest.is_enhancement_multilevel_compatible());
 
-        // 2. Manifest for final v4.0.3 R1 JAR resolves expected capabilities
+        // 2. Manifest for historical v4.0.3 R1 JAR resolves expected capabilities
         let v403_r1_manifest = JarManifest {
             jar_sha256: JarManifest::V403_CORE_R1_COMPATIBLE_JAR_SHA256.to_string(),
             jar_size: 1548397,
@@ -3579,7 +3594,33 @@ mod tests {
         assert!(v403_r1_manifest.is_enhancement_queue_compatible());
         assert!(v403_r1_manifest.is_enhancement_multilevel_compatible());
 
-        // 3. An unknown SHA with ctl_version=15 resolves no capabilities
+        // 3. Manifest for new v4.0.3 Bạch Hổ R2 Zeus-only JAR resolves expected capabilities
+        let v403_r2_manifest = JarManifest {
+            jar_sha256: JarManifest::V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1545033,
+            ctl_version: 15,
+            snapshot_version: 6,
+            ctl_key_count: 38,
+            snapshot_key_count: 49,
+            built_at: "2026-10-05T11:24:00Z".to_string(),
+            patcher_sha256: "293d9a8d2f28a6ebc7801a5f9f467a1b1850004172727b54b84f029dacd226a7".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert_eq!(
+            v403_r2_manifest.capabilities(),
+            &[
+                JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+                JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
+            ]
+        );
+        assert!(v403_r2_manifest.is_character_slot_compatible());
+        assert!(v403_r2_manifest.is_visual_qol_compatible());
+        assert!(v403_r2_manifest.is_enhancement_queue_compatible());
+        assert!(v403_r2_manifest.is_enhancement_multilevel_compatible());
+
+        // 4. An unknown SHA with ctl_version=15 resolves no capabilities
         let unknown_v15_manifest = JarManifest {
             jar_sha256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
             jar_size: 1548397,
@@ -3597,13 +3638,12 @@ mod tests {
         assert!(!unknown_v15_manifest.is_enhancement_queue_compatible());
         assert!(!unknown_v15_manifest.is_enhancement_multilevel_compatible());
 
-        // 4. Rollback from v4.0.3 JAR to b18... remains recognized by the same new agent binary
-        let current_release = v403_r1_manifest;
-        let rollback_target = historical_b18_manifest;
-        assert_eq!(current_release.capabilities(), rollback_target.capabilities());
+        // 5. Compatibility / Rollback across releases remains recognized
+        assert_eq!(v403_r2_manifest.capabilities(), v403_r1_manifest.capabilities());
+        assert_eq!(v403_r2_manifest.capabilities(), historical_b18_manifest.capabilities());
         assert_eq!(
-            current_release.advertised_agent_version(),
-            rollback_target.advertised_agent_version()
+            v403_r2_manifest.advertised_agent_version(),
+            historical_b18_manifest.advertised_agent_version()
         );
     }
 
@@ -4227,6 +4267,66 @@ mod tests {
         let old_f205947_version = "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2";
         assert!(!old_f205947_version.contains("enhancement-degrade-retry-v1"));
     }
+
+    #[test]
+    fn test_server_index_bounds_allow_dense_0_through_8_and_clamp_overflow() {
+        for expected_id in 0..=8u8 {
+            let row = AccountRow {
+                id: format!("acc-{expected_id}"),
+                slot_index: 0,
+                label: "Acc".to_string(),
+                username: "user".to_string(),
+                secret_sealed: serde_json::json!({}),
+                server_index: expected_id as i16,
+                desired_state: "stopped".to_string(),
+                control_version: 1,
+                control: serde_json::json!({}),
+                config_version: 1,
+                runtime: serde_json::json!({}),
+                character_slot: 1,
+            };
+            let snap = AccountSnapshot::from_row(&row);
+            assert_eq!(snap.server_index, expected_id);
+
+            let mut snap_merge = AccountSnapshot {
+                id: format!("acc-{expected_id}"),
+                slot_index: 0,
+                username: "user".to_string(),
+                server_index: 0,
+                secret_sealed: serde_json::json!({}),
+                desired_state: "stopped".to_string(),
+                control_version: 1,
+                control: serde_json::json!({}),
+                config_version: 1,
+                live_process_pid: None,
+                retiring: false,
+            };
+            snap_merge.merge_cloud_fields(&row);
+            assert_eq!(snap_merge.server_index, expected_id);
+        }
+
+        // Out-of-bounds index (e.g. 9 or 255) must clamp to 8 (SERVER_COUNT - 1)
+        let row_overflow = AccountRow {
+            id: "acc-overflow".to_string(),
+            slot_index: 0,
+            label: "Acc Overflow".to_string(),
+            username: "user".to_string(),
+            secret_sealed: serde_json::json!({}),
+            server_index: 9,
+            desired_state: "stopped".to_string(),
+            control_version: 1,
+            control: serde_json::json!({}),
+            config_version: 1,
+            runtime: serde_json::json!({}),
+            character_slot: 1,
+        };
+        let snap_overflow = AccountSnapshot::from_row(&row_overflow);
+        assert_eq!(snap_overflow.server_index, 8);
+
+        let mut snap_merge_overflow = snap_overflow.clone();
+        let mut row_high = row_overflow.clone();
+        row_high.server_index = 99;
+        snap_merge_overflow.merge_cloud_fields(&row_high);
+        assert_eq!(snap_merge_overflow.server_index, 8);
+    }
 }
-
-

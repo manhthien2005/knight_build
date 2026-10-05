@@ -37,14 +37,36 @@ printf '   PatchZeus   %s hook tai RETURN\n' \
 
 bash "$DST/build-zeus-jar.sh" "$OUT"
 
-echo "== nghiem thu v4.0.3 =="
+echo "== nghiem thu bytecode gates v4.0.3 =="
 TMP=$(mktemp -d)
 cd "$TMP"
-cp "/work/jar/$OUT" . && jar xf "$OUT" Zeus.class GameScreen/GameScreen.class
+cp "/work/jar/$OUT" .
+jar xf "$OUT" \
+    Zeus.class \
+    Main/GameCanvas.class \
+    GameScreen/GameScreen.class \
+    GameScreen/SelectCharScreen.class \
+    InterfaceComponents/MsgDialog.class \
+    netcommand/Cmd_Message.class \
+    Model/Menu2.class \
+    GameScreen/LogoScreen.class \
+    META-INF/MANIFEST.MF
 
 keys=$(javap -p -constants Zeus.class | grep -c 'static final int K_')
 ver=$(javap -p -constants Zeus.class | grep -oP 'CTL_VERSION = \K[0-9]+')
-paint=$(javap -c GameScreen/GameScreen.class | grep -c 'Zeus.paint')
+tick=$(javap -c Main/GameCanvas.class | grep -c 'invokestatic.*Zeus\.tick:()V')
+paint=$(javap -c GameScreen/GameScreen.class | grep -c 'invokestatic.*Zeus\.paint:(LCLib/mGraphics;)V')
+sent=$(javap -c netcommand/Cmd_Message.class | grep -c 'invokestatic.*Zeus\.sent:(Lnet/Message;)V')
+menu=$(javap -c Model/Menu2.class | grep -c 'invokestatic.*Zeus\.menu:(LCLib/mVector;Ljava/lang/String;)Z')
+smenu=$(javap -c Model/Menu2.class | grep -c 'invokestatic.*Zeus\.serverMenu:(LCLib/mVector;IILjava/lang/String;)Z')
+sc_pub=$(javap -p GameScreen/SelectCharScreen.class | grep -c 'public int selectChar;')
+md_pub=$(javap -p InterfaceComponents/MsgDialog.class | grep -c 'public CLib.mVector cmdList;')
+host_miss=$(javap -c GameScreen/LogoScreen.class | grep -A 2 'iconst_m1' | grep -c 'putstatic.*IndexServer:B')
+midlet_ver=$(grep -oP 'MIDlet-Version: *\K[0-9.]+' META-INF/MANIFEST.MF)
+potato_class=$(jar tf "$OUT" | grep -c 'POTATO\.class' || true)
+bx_class=$(jar tf "$OUT" | grep -c '^bx\.class$' || true)
+
+potato_calls=$(jar tf "$OUT" | grep '\.class$' | while read -r c; do javap -c "${c%.class}" 2>/dev/null; done | grep -cE 'POTATO\.(doRepaint|skipLayer|countDraw)' || true)
 
 pub_bytecode=$(javap -p -constants -c Zeus.class | awk '
   /^[ ]*private static void publish\(long\);/ { in_pub=1; next }
@@ -61,19 +83,48 @@ fi
 
 srckeys=$(grep -oE 'K_[A-Z_0-9]+ *= *[0-9]+' "$DST/src/Zeus.java" | sort -u | wc -l)
 
-printf '   K_* trong jar      %s  (source: %s)\n' "$keys" "$srckeys"
-printf '   CTL_VERSION        %s\n' "$ver"
-printf '   Zeus.paint sites   %s  (phai la 1 trong GameScreen.paint)\n' "$paint"
-printf '   snapshot           v%s, %s khoa\n' "$snapver" "$snapk"
+printf '   K_* trong jar          %s (source: %s)\n' "$keys" "$srckeys"
+printf '   CTL_VERSION            %s\n' "$ver"
+printf '   snapshot               v%s, %s khoa\n' "$snapver" "$snapk"
+printf '   Zeus.tick              %s call sites (phai la 1)\n' "$tick"
+printf '   Zeus.paint             %s call sites (phai la 1)\n' "$paint"
+printf '   Zeus.sent              %s call sites (phai la 1)\n' "$sent"
+printf '   Zeus.menu              %s call sites (phai la 1)\n' "$menu"
+printf '   Zeus.serverMenu        %s call sites (phai la 1)\n' "$smenu"
+printf '   SelectChar.selectChar  %s public (phai la 1)\n' "$sc_pub"
+printf '   MsgDialog.cmdList      %s public (phai la 1)\n' "$md_pub"
+printf '   host-miss fail-closed  %s (phai la 1)\n' "$host_miss"
+printf '   MIDlet-Version         %s (phai la 4.0.3)\n' "$midlet_ver"
+printf '   POTATO.class           %s (phai la 0)\n' "$potato_class"
+printf '   bx.class               %s (phai la 0)\n' "$bx_class"
+printf '   POTATO calls           %s (phai la 0)\n' "$potato_calls"
 
 rc=0
-[ "$keys" = "$srckeys" ] || { echo "   !! so khoa jar khac source"; rc=1; }
-[ "$ver" = "15" ]        || { echo "   !! CTL_VERSION khong phai 15"; rc=1; }
-[ "$paint" = "1" ]       || { echo "   !! Zeus.paint khong phai 1 call site"; rc=1; }
-[ "$snapver" = "6" ]     || { echo "   !! snapshot version khong phai 6"; rc=1; }
-[ "$snapk" = "49" ]      || { echo "   !! snapshot key count khong phai 49"; rc=1; }
+[ "$keys" = "$srckeys" ]   || { echo "   !! so khoa jar khac source"; rc=1; }
+[ "$ver" = "15" ]          || { echo "   !! CTL_VERSION khong phai 15"; rc=1; }
+[ "$keys" = "38" ]         || { echo "   !! CTL key count khong phai 38"; rc=1; }
+[ "$snapver" = "6" ]       || { echo "   !! snapshot version khong phai 6"; rc=1; }
+[ "$snapk" = "49" ]        || { echo "   !! snapshot key count khong phai 49"; rc=1; }
+[ "$tick" = "1" ]          || { echo "   !! Zeus.tick khong phai 1 call site"; rc=1; }
+[ "$paint" = "1" ]         || { echo "   !! Zeus.paint khong phai 1 call site"; rc=1; }
+[ "$sent" = "1" ]          || { echo "   !! Zeus.sent khong phai 1 call site"; rc=1; }
+[ "$menu" = "1" ]          || { echo "   !! Zeus.menu khong phai 1 call site"; rc=1; }
+[ "$smenu" = "1" ]         || { echo "   !! Zeus.serverMenu khong phai 1 call site"; rc=1; }
+[ "$sc_pub" = "1" ]        || { echo "   !! SelectCharScreen.selectChar khong phai public"; rc=1; }
+[ "$md_pub" = "1" ]        || { echo "   !! MsgDialog.cmdList khong phai public"; rc=1; }
+[ "$host_miss" = "1" ]     || { echo "   !! host-miss fail-closed patch khong phai 1"; rc=1; }
+[ "$midlet_ver" = "4.0.3" ]|| { echo "   !! MIDlet-Version khong phai 4.0.3"; rc=1; }
+[ "$potato_class" = "0" ]  || { echo "   !! POTATO.class co mat trong jar"; rc=1; }
+[ "$bx_class" = "0" ]      || { echo "   !! legacy bx.class co mat trong jar"; rc=1; }
+[ "$potato_calls" = "0" ]  || { echo "   !! POTATO calls con ton tai trong jar"; rc=1; }
 
 if [ "$rc" = 0 ]; then
+    echo "== running ServerFailClosedTest =="
+    javac -encoding UTF-8 -cp "/work/jar/$OUT:/work/jar/microemulator.jar" -d "$TMP" \
+        "$DST/tools/ServerFailClosedTest.java"
+    java -Djava.awt.headless=true -cp "$TMP:/work/jar/$OUT:/work/jar/microemulator.jar" \
+        ServerFailClosedTest
+
     JAR_PATH="/work/jar/$OUT"
     jar_sha=$(sha256sum "$JAR_PATH" | cut -d' ' -f1)
     jar_sz=$(stat -c %s "$JAR_PATH")

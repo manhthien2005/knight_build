@@ -44,26 +44,118 @@ const SUITE_DIRECTORY_NAME: &str = "suite-null";
 const USER_PASS_STORE: &str = "user_pass";
 
 /// Store the connection code reads the server index from, written by `bs.h()`.
-const INDEX_SERVER_STORE: &str = "isIndexServer";
+pub(crate) const INDEX_SERVER_STORE: &str = "isIndexServer";
 
-/// Number of entries in the client's server table `dx.b`, which bounds a valid index.
-pub(crate) const SERVER_COUNT: u8 = 8;
+/// Store the official v4.0.3 LogoScreen reads for server re-identification by host, written by `LogoScreen.saveSelectedServer()`.
+pub(crate) const SELECTED_SERVER_HOST_STORE: &str = "selectedServerHost";
 
-/// Display names of the client's server table `dx.b`, in index order.
+/// Store the official v4.0.3 LogoScreen reads for offline server table cache, written by `LogoScreen.saveListServer()`.
+pub(crate) const LIST_SERVER_STORE: &str = "listServer";
+
+/// Number of stable logical server entries, bounding valid logical IDs (0..=8).
+pub const SERVER_COUNT: u8 = 9;
+
+/// Specification of one stable logical server world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerSpec {
+    pub logical_id: u8,
+    pub name: &'static str,
+    pub host: &'static str,
+    pub port: u16,
+    pub lang: u8,
+}
+
+/// Dense stable logical server catalog (0..=8).
 ///
-/// Copied from the vanilla table so the operator picks the same world the client will connect to. The
-/// host names deliberately do not appear here: the index is all the record store carries, and the
-/// client resolves the host itself.
-pub const SERVER_NAMES: [&str; SERVER_COUNT as usize] = [
-    "Chiến Thần",
-    "Rồng Lửa",
-    "Global Server",
-    "Phượng Hoàng",
-    "Nhân Mã",
-    "Kì Lân",
-    "Thiên Hà (New)",
-    "Thách Đấu",
+/// Persistent logical IDs 0..7 preserve their historical meanings and world assignments.
+/// Bạch Hổ New is assigned stable logical ID 8 (current publisher live index 0).
+pub const SERVER_CATALOG: [ServerSpec; SERVER_COUNT as usize] = [
+    ServerSpec {
+        logical_id: 0,
+        name: "Chiến Thần",
+        host: "hs1.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 1,
+        name: "Rồng Lửa",
+        host: "hs2.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 2,
+        name: "Global Server",
+        host: "hsglobal.teamobi.com",
+        port: 19129,
+        lang: 1,
+    },
+    ServerSpec {
+        logical_id: 3,
+        name: "Phượng Hoàng",
+        host: "hs3.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 4,
+        name: "Nhân Mã",
+        host: "hs5.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 5,
+        name: "Kì Lân",
+        host: "hs6.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 6,
+        name: "Thiên Hà (New)",
+        host: "hs7.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 7,
+        name: "Thách Đấu",
+        host: "hs4.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 8,
+        name: "Bạch Hổ New",
+        host: "hs8.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
 ];
+
+/// Display names of the client's stable logical catalog, in logical ID order.
+pub const SERVER_NAMES: [&str; SERVER_COUNT as usize] = [
+    SERVER_CATALOG[0].name,
+    SERVER_CATALOG[1].name,
+    SERVER_CATALOG[2].name,
+    SERVER_CATALOG[3].name,
+    SERVER_CATALOG[4].name,
+    SERVER_CATALOG[5].name,
+    SERVER_CATALOG[6].name,
+    SERVER_CATALOG[7].name,
+    SERVER_CATALOG[8].name,
+];
+
+/// Returns the stable `ServerSpec` for a logical server ID, or `None` if out of bounds.
+pub fn server_spec(logical_id: u8) -> Option<&'static ServerSpec> {
+    SERVER_CATALOG.get(logical_id as usize)
+}
+
+/// Official captured 9-server list payload used as RMS bootstrap cache.
+pub const BOOTSTRAP_LIST_SERVER_RAW: &str =
+    "Bạch Hổ New:hs8.teamobi.com:19129:0,Chiến Thần:hs1.teamobi.com:19129:0,Rồng Lửa:hs2.teamobi.com:19129:0,Global Server:hsglobal.teamobi.com:19129:1,Phượng Hoàng:hs3.teamobi.com:19129:0,Nhân Mã:hs5.teamobi.com:19129:0,Kì Lân:hs6.teamobi.com:19129:0,Thiên Hà:hs7.teamobi.com:19129:0,Thách Đấu:hs4.teamobi.com:19129:0,";
 
 /// Extension `FileRecordStoreManager.recordStoreName2FileName` appends.
 const STORE_EXTENSION: &str = "rs";
@@ -162,12 +254,51 @@ fn user_pass_record(username: &str, password: &str) -> CoreResult<Vec<u8>> {
     Ok(complement(&plain))
 }
 
-/// The `isIndexServer` record: one index byte into `dx.b`, complemented. Mirrors `bs.h()`.
+/// The `isIndexServer` record: one index byte, complemented.
+/// For legacy IDs 0..7, this is the historical index.
+/// For Bạch Hổ ID 8, this is 8 (acting as fail-closed sentinel against static 8-server fallback).
 fn index_server_record(server_index: u8) -> CoreResult<Vec<u8>> {
     if server_index >= SERVER_COUNT {
         return Err(seed_error("rms_server_index_out_of_range"));
     }
     Ok(complement(&[server_index]))
+}
+
+/// The `selectedServerHost` record: raw UTF-8 bytes of canonical host name, complemented.
+/// Mirrors `LogoScreen.saveSelectedServer()` / `CRes.saveRMS("selectedServerHost", host.getBytes("UTF-8"))`.
+pub fn selected_server_host_record(host: &str) -> CoreResult<Vec<u8>> {
+    if host.is_empty() {
+        return Err(seed_error("rms_host_empty"));
+    }
+    Ok(complement(host.as_bytes()))
+}
+
+/// Decodes a `selectedServerHost` record back to canonical host string.
+pub fn parse_selected_server_host_record(record: &[u8]) -> CoreResult<String> {
+    let plain = complement(record);
+    String::from_utf8(plain).map_err(|_| seed_error("rms_host_invalid_utf8"))
+}
+
+/// The `listServer` record: `writeUTF(raw_list)`, complemented.
+/// Mirrors `LogoScreen.saveListServer(raw_list)` / `CRes.saveRMS("listServer", byteArrayOutputStream.toByteArray())`.
+pub fn list_server_record(raw_list: &str) -> CoreResult<Vec<u8>> {
+    let mut plain = Vec::new();
+    write_java_utf8(raw_list, &mut plain)?;
+    Ok(complement(&plain))
+}
+
+/// Decodes a `listServer` record back to raw list string.
+pub fn parse_list_server_record(record: &[u8]) -> CoreResult<String> {
+    let plain = complement(record);
+    if plain.len() < 2 {
+        return Err(seed_error("rms_list_server_too_short"));
+    }
+    let length = u16::from_be_bytes([plain[0], plain[1]]) as usize;
+    if plain.len() < 2 + length {
+        return Err(seed_error("rms_list_server_length_mismatch"));
+    }
+    String::from_utf8(plain[2..2 + length].to_vec())
+        .map_err(|_| seed_error("rms_list_server_invalid_utf8"))
 }
 
 /// Directory the stores for one profile live in.
@@ -201,11 +332,16 @@ fn write_record_store(directory: &Path, name: &str, records: &[Vec<u8>]) -> Core
     Ok(())
 }
 
-/// Writes both stores the client's auto-login path reads.
+/// Writes all stores the official v4.0.3 client's server-selection and auto-login paths read.
 ///
-/// The server store is written first: a present `user_pass` with a stale server index would connect
-/// the account to the wrong world, whereas a present server index with no credentials just leaves
-/// the login screen waiting.
+/// Enforces strict fail-closed sequencing:
+/// 1. Validate inputs and construct all records in memory first.
+/// 2. Seed `listServer` (cached 9-server table for offline resilience).
+/// 3. Seed `selectedServerHost` (canonical host for dynamic list matching).
+/// 4. Seed `isIndexServer` (legacy ID or sentinel 8).
+/// 5. Seed `user_pass` LAST.
+///
+/// If any server identity store fails to write, credentials are never placed on disk.
 pub fn seed_credentials(
     microemu_home: &Path,
     username: &str,
@@ -215,17 +351,29 @@ pub fn seed_credentials(
     if username.is_empty() || password.is_empty() {
         return Err(seed_error("rms_credentials_empty"));
     }
+    let spec = server_spec(server_index).ok_or_else(|| seed_error("rms_server_index_out_of_range"))?;
+
+    let list_record = list_server_record(BOOTSTRAP_LIST_SERVER_RAW)?;
+    let host_record = selected_server_host_record(spec.host)?;
     let index_record = index_server_record(server_index)?;
     let credential_record = user_pass_record(username, password)?;
+
     let directory = suite_directory(microemu_home);
+    write_record_store(&directory, LIST_SERVER_STORE, &[list_record])?;
+    write_record_store(&directory, SELECTED_SERVER_HOST_STORE, &[host_record])?;
     write_record_store(&directory, INDEX_SERVER_STORE, &[index_record])?;
     write_record_store(&directory, USER_PASS_STORE, &[credential_record])
 }
 
-/// Removes both seeded stores, so a stopped account leaves no credential material on disk.
+/// Removes all seeded stores, so a stopped account leaves no credential or server identity material on disk.
 pub fn clear_credentials(microemu_home: &Path) -> CoreResult<()> {
     let directory = suite_directory(microemu_home);
-    for name in [USER_PASS_STORE, INDEX_SERVER_STORE] {
+    for name in [
+        USER_PASS_STORE,
+        INDEX_SERVER_STORE,
+        SELECTED_SERVER_HOST_STORE,
+        LIST_SERVER_STORE,
+    ] {
         let path = directory.join(format!("{name}.{STORE_EXTENSION}"));
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -239,9 +387,11 @@ pub fn clear_credentials(microemu_home: &Path) -> CoreResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFIG_DIRECTORY_NAME, SERVER_COUNT, SUITE_DIRECTORY_NAME, clear_credentials, complement,
-        index_server_record, record_store_bytes, seed_credentials, user_pass_record,
-        write_java_utf8,
+        BOOTSTRAP_LIST_SERVER_RAW, CONFIG_DIRECTORY_NAME, SERVER_CATALOG, SERVER_COUNT,
+        SERVER_NAMES, SUITE_DIRECTORY_NAME, clear_credentials, complement, index_server_record,
+        list_server_record, parse_list_server_record, parse_selected_server_host_record,
+        record_store_bytes, seed_credentials, selected_server_host_record, server_spec,
+        user_pass_record, write_java_utf8,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -426,7 +576,82 @@ mod tests {
     }
 
     #[test]
-    fn seeding_writes_both_stores_where_the_emulator_looks_and_leaves_no_temporary() {
+    fn server_catalog_is_dense_nine_entries_with_unique_hosts_and_historical_integrity() {
+        assert_eq!(SERVER_CATALOG.len(), 9);
+        assert_eq!(SERVER_COUNT, 9);
+        assert_eq!(SERVER_NAMES.len(), 9);
+
+        // Every logical_id equals its stable catalog position.
+        for (index, spec) in SERVER_CATALOG.iter().enumerate() {
+            assert_eq!(spec.logical_id, index as u8);
+            assert_eq!(spec.name, SERVER_NAMES[index]);
+            assert!(!spec.name.is_empty());
+            assert!(!spec.host.is_empty());
+            assert_eq!(spec.port, 19129);
+        }
+
+        // IDs 0..7 preserve historical world/host meanings.
+        assert_eq!(SERVER_CATALOG[0].name, "Chiến Thần");
+        assert_eq!(SERVER_CATALOG[0].host, "hs1.teamobi.com");
+        assert_eq!(SERVER_CATALOG[1].name, "Rồng Lửa");
+        assert_eq!(SERVER_CATALOG[1].host, "hs2.teamobi.com");
+        assert_eq!(SERVER_CATALOG[2].name, "Global Server");
+        assert_eq!(SERVER_CATALOG[2].host, "hsglobal.teamobi.com");
+        assert_eq!(SERVER_CATALOG[3].name, "Phượng Hoàng");
+        assert_eq!(SERVER_CATALOG[3].host, "hs3.teamobi.com");
+        assert_eq!(SERVER_CATALOG[4].name, "Nhân Mã");
+        assert_eq!(SERVER_CATALOG[4].host, "hs5.teamobi.com");
+        assert_eq!(SERVER_CATALOG[5].name, "Kì Lân");
+        assert_eq!(SERVER_CATALOG[5].host, "hs6.teamobi.com");
+        assert_eq!(SERVER_CATALOG[6].name, "Thiên Hà (New)");
+        assert_eq!(SERVER_CATALOG[6].host, "hs7.teamobi.com");
+        assert_eq!(SERVER_CATALOG[7].name, "Thách Đấu");
+        assert_eq!(SERVER_CATALOG[7].host, "hs4.teamobi.com");
+
+        // ID 8 is Bạch Hổ New / hs8.teamobi.com.
+        assert_eq!(SERVER_CATALOG[8].name, "Bạch Hổ New");
+        assert_eq!(SERVER_CATALOG[8].host, "hs8.teamobi.com");
+        assert_eq!(SERVER_CATALOG[8].lang, 0);
+
+        // All canonical hosts are unique.
+        let mut hosts: Vec<&str> = SERVER_CATALOG.iter().map(|s| s.host).collect();
+        hosts.sort();
+        let before_dedup = hosts.len();
+        hosts.dedup();
+        assert_eq!(hosts.len(), before_dedup);
+
+        // Logical ID 9 is rejected.
+        assert!(server_spec(9).is_none());
+        assert!(server_spec(u8::MAX).is_none());
+    }
+
+    #[test]
+    fn selected_server_host_and_list_server_records_round_trip() {
+        assert_eq!(server_spec(0).unwrap().host, "hs1.teamobi.com");
+        assert_eq!(server_spec(6).unwrap().host, "hs7.teamobi.com");
+        assert_eq!(server_spec(7).unwrap().host, "hs4.teamobi.com");
+        assert_eq!(server_spec(8).unwrap().host, "hs8.teamobi.com");
+
+        // ID 8 isIndexServer = 8 (complement 247).
+        let rec8 = index_server_record(8).expect("ID 8 encodes");
+        assert_eq!(rec8, [!8]);
+        assert_eq!(complement(&rec8), [8]);
+
+        // selectedServerHost round trip
+        for spec in SERVER_CATALOG.iter() {
+            let host_rec = selected_server_host_record(spec.host).expect("host encodes");
+            let decoded = parse_selected_server_host_record(&host_rec).expect("host decodes");
+            assert_eq!(decoded, spec.host);
+        }
+
+        // listServer round trip to exact captured 9-server payload
+        let list_rec = list_server_record(BOOTSTRAP_LIST_SERVER_RAW).expect("listServer encodes");
+        let decoded_list = parse_list_server_record(&list_rec).expect("listServer decodes");
+        assert_eq!(decoded_list, BOOTSTRAP_LIST_SERVER_RAW);
+    }
+
+    #[test]
+    fn seeding_writes_all_four_stores_where_the_emulator_looks_and_leaves_no_temporary() {
         let home = TestHome::new("seed");
         seed_credentials(home.path(), SAMPLE_ACCOUNT, "secret", 6).expect("seeding succeeds");
         let suite = home
@@ -444,8 +669,16 @@ mod tests {
             })
             .collect();
         names.sort();
-        // Exactly the two stores: an atomic write must not leave its temporary behind.
-        assert_eq!(names, vec!["isIndexServer.rs", "user_pass.rs"]);
+        // Exactly the four stores: isIndexServer, listServer, selectedServerHost, user_pass.
+        assert_eq!(
+            names,
+            vec![
+                "isIndexServer.rs",
+                "listServer.rs",
+                "selectedServerHost.rs",
+                "user_pass.rs"
+            ]
+        );
 
         let stored =
             fs::read(suite.join("user_pass.rs")).expect("the credential store is readable");
@@ -454,15 +687,24 @@ mod tests {
         // The password must never appear in cleartext on disk.
         assert!(!stored.windows(6).any(|window| window == b"secret"));
 
-        // Seeding again replaces rather than duplicating, so a re-run stays at two stores.
+        // Verify selectedServerHost store content for ID 6
+        let host_store = fs::read(suite.join("selectedServerHost.rs")).expect("host store readable");
+        assert_eq!(read_java_utf8(&host_store, 0).0, "selectedServerHost");
+
+        // Verify listServer store content
+        let list_store = fs::read(suite.join("listServer.rs")).expect("listServer store readable");
+        assert_eq!(read_java_utf8(&list_store, 0).0, "listServer");
+
+        // Seeding again replaces rather than duplicating, so a re-run stays at 4 stores.
         seed_credentials(home.path(), SAMPLE_ACCOUNT, "other", 1).expect("re-seeding succeeds");
         assert_eq!(
             fs::read_dir(&suite)
                 .expect("the suite directory still exists")
                 .count(),
-            2
+            4
         );
 
+        // Clear removes all four stores.
         clear_credentials(home.path()).expect("clearing succeeds");
         assert_eq!(
             fs::read_dir(&suite)

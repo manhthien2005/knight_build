@@ -15,6 +15,17 @@ pub const ID_CANCEL: u16 = 0x2006;
 /// id maps back to the chosen index without a side table.
 pub const ID_SERVER_FIRST: u16 = 0x2010;
 
+/// Bounding rectangle (x, y, width, height) in reference DPI for the server picker group box.
+pub const SERVER_GROUP_BOX_RECT: (i32, i32, i32, i32) = (16, 62, 408, 144);
+
+/// Placement coordinates (x, y, width, height) in reference DPI for server radio button `index`.
+/// Uses a 3x3 layout (3 columns, 3 rows, column-major) that cleanly fits all 9 servers across 100%, 125%, and 150% DPI.
+pub const fn server_radio_placement(index: usize) -> (i32, i32, i32, i32) {
+    let column = index / 3;
+    let row = index % 3;
+    (28 + column as i32 * 132, 88 + row as i32 * 34, 124, 24)
+}
+
 /// Config dialog control ids. Each one is read back by id, so no side table can drift from the layout.
 pub const ID_CFG_MODE: u16 = 0x2020;
 pub const ID_CFG_SPOT: u16 = 0x2021;
@@ -960,5 +971,65 @@ mod tests {
             validate_dungeon_window("20:00", "20:00"),
             Err(FieldError::DungeonTimeOrderInvalid)
         );
+    }
+
+    #[test]
+    fn server_picker_has_nine_options_and_geometry_fits_group_box_at_all_dpis() {
+        assert_eq!(zeus_core::SERVER_NAMES.len(), 9);
+        assert_eq!(zeus_core::SERVER_NAMES[8], "Bạch Hổ New");
+
+        let (gb_x, gb_y, gb_w, gb_h) = SERVER_GROUP_BOX_RECT;
+        let test_dpis = [96u32, 120, 144]; // 100%, 125%, 150%
+
+        for &dpi in &test_dpis {
+            let group_left = crate::windows::metrics::scale(gb_x, dpi);
+            let group_top = crate::windows::metrics::scale(gb_y, dpi);
+            let group_right = group_left + crate::windows::metrics::scale(gb_w, dpi);
+            let group_bottom = group_top + crate::windows::metrics::scale(gb_h, dpi);
+
+            let mut rects = Vec::new();
+
+            for index in 0..zeus_core::SERVER_NAMES.len() {
+                let (bx, by, bw, bh) = server_radio_placement(index);
+                let left = crate::windows::metrics::scale(bx, dpi);
+                let top = crate::windows::metrics::scale(by, dpi);
+                let right = left + crate::windows::metrics::scale(bw, dpi);
+                let bottom = top + crate::windows::metrics::scale(bh, dpi);
+
+                // No radio button may escape the group box.
+                assert!(
+                    left >= group_left,
+                    "index {index} escaped left at {dpi} DPI: {left} < {group_left}"
+                );
+                assert!(
+                    right <= group_right,
+                    "index {index} escaped right at {dpi} DPI: {right} > {group_right}"
+                );
+                assert!(
+                    top >= group_top,
+                    "index {index} escaped top at {dpi} DPI: {top} < {group_top}"
+                );
+                assert!(
+                    bottom <= group_bottom,
+                    "index {index} escaped bottom at {dpi} DPI: {bottom} > {group_bottom}"
+                );
+
+                rects.push((left, top, right, bottom));
+            }
+
+            // No controls overlap.
+            for i in 0..rects.len() {
+                for j in (i + 1)..rects.len() {
+                    let (l1, t1, r1, b1) = rects[i];
+                    let (l2, t2, r2, b2) = rects[j];
+                    let overlap = l1 < r2 && r1 > l2 && t1 < b2 && b1 > t2;
+                    assert!(
+                        !overlap,
+                        "server radio buttons {i} and {j} overlap at {dpi} DPI: rect {i}={:?}, rect {j}={:?}",
+                        rects[i], rects[j]
+                    );
+                }
+            }
+        }
     }
 }

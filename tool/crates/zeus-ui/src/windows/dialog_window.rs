@@ -558,19 +558,19 @@ fn build_controls(window: HWND) {
         DialogKind::Server => {
             label("🌐 HSO MANAGER — CHỌN MÁY CHỦ", ID_MESSAGE + 50, 20, 14, 400);
             label(dialogs::SERVER_PROMPT, ID_MESSAGE, 20, 36, 400);
+            let (gb_x, gb_y, gb_w, gb_h) = dialogs::SERVER_GROUP_BOX_RECT;
             let group_box = create_child(
                 window,
                 WC_BUTTONW,
                 "Danh sách máy chủ",
                 BS_GROUPBOX as u32,
-                at(16, 62, 408, 144),
+                at(gb_x, gb_y, gb_w, gb_h),
                 ID_MESSAGE + 52,
             );
             set_font(group_box, font);
 
             for (index, name) in zeus_core::SERVER_NAMES.iter().enumerate() {
-                let column = index / 4;
-                let row = index % 4;
+                let (bx, by, bw, bh) = dialogs::server_radio_placement(index);
                 let mut style = BS_AUTORADIOBUTTON as u32 | WS_TABSTOP;
                 if index == 0 {
                     style |= WS_GROUP;
@@ -580,7 +580,7 @@ fn build_controls(window: HWND) {
                     WC_BUTTONW,
                     name,
                     style,
-                    at(32 + column as i32 * 200, 88 + row as i32 * 28, 180, 24),
+                    at(bx, by, bw, bh),
                     dialogs::ID_SERVER_FIRST as isize + index as isize,
                 );
                 set_font(button, font);
