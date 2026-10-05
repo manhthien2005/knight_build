@@ -154,6 +154,9 @@ pub struct LaunchSpec {
     pub headless: bool,
     /// 1-based account character slot (1, 2, or 3).
     pub character_slot: i16,
+    /// Canonical authoritative server host derived from stable logical server ID.
+    /// Omitted for unmanaged/manual mode.
+    pub canonical_server_host: Option<String>,
 }
 
 impl LaunchSpec {
@@ -172,7 +175,20 @@ impl LaunchSpec {
             heap: HeapConfig::default(),
             headless: false,
             character_slot: 1,
+            canonical_server_host: None,
         }
+    }
+
+    /// Sets the authoritative canonical server host derived from the stable logical server ID.
+    ///
+    /// Resolves the host strictly via `zeus_core::server_spec(logical_server_id)`.
+    /// Returns an error if the logical server ID is out of bounds (>= 9), ensuring
+    /// an invalid logical ID cannot produce a managed launch spec.
+    pub fn set_managed_server(&mut self, logical_server_id: u8) -> Result<(), String> {
+        let spec = zeus_core::server_spec(logical_server_id)
+            .ok_or_else(|| format!("invalid logical server ID: {logical_server_id}"))?;
+        self.canonical_server_host = Some(spec.host.to_string());
+        Ok(())
     }
 
     /// Assembles argv in the exact measured order.
@@ -205,6 +221,10 @@ impl LaunchSpec {
                 "-Dzeus.auth.slot={}",
                 self.character_slot - 1
             ));
+
+        if let Some(ref host) = self.canonical_server_host {
+            command.arg(format!("-Dzeus.server.host={host}"));
+        }
 
         if self.headless {
             command.arg("-Djava.awt.headless=true");
@@ -326,6 +346,7 @@ mod tests {
             heap: HeapConfig::default(),
             headless: false,
             character_slot: 1,
+            canonical_server_host: None,
         }
     }
 
@@ -468,6 +489,54 @@ mod tests {
         assert_eq!(paths.health_file(), paths.home.join(HEALTH_FILE_NAME));
         assert_eq!(paths.health_file().file_name().unwrap(), HEALTH_FILE_NAME);
         assert_eq!(HEALTH_FILE_NAME, "zeus-health.txt");
+    }
+
+    #[test]
+    fn managed_server_launch_property_invariants() {
+        // Logical ID 0 launch args contain exactly one -Dzeus.server.host=hs1.teamobi.com
+        let mut s0 = spec();
+        s0.set_managed_server(0).expect("logical ID 0 valid");
+        let args0 = argv(&s0);
+        assert!(args0.contains(&"-Dzeus.server.host=hs1.teamobi.com".to_string()));
+        assert_eq!(
+            args0.iter().filter(|a| a.starts_with("-Dzeus.server.host=")).count(),
+            1
+        );
+
+        // Logical ID 7 launch args contain exactly one -Dzeus.server.host=hs4.teamobi.com
+        let mut s7 = spec();
+        s7.set_managed_server(7).expect("logical ID 7 valid");
+        let args7 = argv(&s7);
+        assert!(args7.contains(&"-Dzeus.server.host=hs4.teamobi.com".to_string()));
+        assert_eq!(
+            args7.iter().filter(|a| a.starts_with("-Dzeus.server.host=")).count(),
+            1
+        );
+
+        // Logical ID 8 launch args contain exactly one -Dzeus.server.host=hs8.teamobi.com
+        let mut s8 = spec();
+        s8.set_managed_server(8).expect("logical ID 8 valid");
+        let args8 = argv(&s8);
+        assert!(args8.contains(&"-Dzeus.server.host=hs8.teamobi.com".to_string()));
+        assert_eq!(
+            args8.iter().filter(|a| a.starts_with("-Dzeus.server.host=")).count(),
+            1
+        );
+
+        // Unmanaged / manual launch omits zeus.server.host
+        let unmanaged = spec();
+        let args_unmanaged = argv(&unmanaged);
+        assert!(!args_unmanaged.iter().any(|a| a.starts_with("-Dzeus.server.host=")));
+
+        // Invalid logical IDs cannot produce a managed launch spec
+        let mut sinvalid = spec();
+        assert!(sinvalid.set_managed_server(9).is_err());
+        assert!(sinvalid.set_managed_server(255).is_err());
+        assert_eq!(sinvalid.canonical_server_host, None);
+
+        // No password or credentials appear in argv
+        assert!(!args0.iter().any(|a| a.to_lowercase().contains("pass")));
+        assert!(!args8.iter().any(|a| a.to_lowercase().contains("pass")));
     }
 }
 

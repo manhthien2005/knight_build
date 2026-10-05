@@ -349,19 +349,29 @@ fn write_record_store(directory: &Path, name: &str, records: &[Vec<u8>]) -> Core
 /// Writes all stores the official v4.0.3 client's server-selection and auto-login paths read.
 ///
 /// Enforces strict fail-closed sequencing:
-/// 1. Validate inputs and construct all records in memory first.
-/// 2. Seed `listServer` (cached 9-server table for offline resilience).
-/// 3. Seed `selectedServerHost` (canonical host for dynamic list matching).
-/// 4. Seed `isIndexServer` (legacy ID or sentinel 8).
-/// 5. Seed `user_pass` LAST.
+/// 1. Remove any pre-existing `user_pass` before beginning re-seed.
+/// 2. Validate inputs and construct all records in memory first.
+/// 3. Seed `listServer` (cached 9-server table for offline resilience).
+/// 4. Seed `selectedServerHost` (canonical host for dynamic list matching).
+/// 5. Seed `isIndexServer` (legacy ID or sentinel 8).
+/// 6. Seed `user_pass` LAST.
 ///
-/// If any server identity store fails to write, credentials are never placed on disk.
+/// If any server identity store fails to write or inputs are invalid, `user_pass` is guaranteed absent.
 pub fn seed_credentials(
     microemu_home: &Path,
     username: &str,
     password: &str,
     server_index: u8,
 ) -> CoreResult<()> {
+    let directory = suite_directory(microemu_home);
+    let user_pass_path = directory.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+
+    // Hardening: Always ensure pre-existing user_pass cannot survive if validation
+    // or any subsequent server-identity write fails.
+    if user_pass_path.exists() {
+        let _ = fs::remove_file(&user_pass_path);
+    }
+
     if username.is_empty() || password.is_empty() {
         return Err(seed_error("rms_credentials_empty"));
     }
@@ -372,10 +382,21 @@ pub fn seed_credentials(
     let index_record = index_server_record(server_index)?;
     let credential_record = user_pass_record(username, password)?;
 
-    let directory = suite_directory(microemu_home);
-    write_record_store(&directory, LIST_SERVER_STORE, &[list_record])?;
-    write_record_store(&directory, SELECTED_SERVER_HOST_STORE, &[host_record])?;
-    write_record_store(&directory, INDEX_SERVER_STORE, &[index_record])?;
+    // Write server identity stores first. If any write fails, ensure user_pass remains absent.
+    if let Err(err) = write_record_store(&directory, LIST_SERVER_STORE, &[list_record]) {
+        let _ = fs::remove_file(&user_pass_path);
+        return Err(err);
+    }
+    if let Err(err) = write_record_store(&directory, SELECTED_SERVER_HOST_STORE, &[host_record]) {
+        let _ = fs::remove_file(&user_pass_path);
+        return Err(err);
+    }
+    if let Err(err) = write_record_store(&directory, INDEX_SERVER_STORE, &[index_record]) {
+        let _ = fs::remove_file(&user_pass_path);
+        return Err(err);
+    }
+
+    // Write user_pass LAST.
     write_record_store(&directory, USER_PASS_STORE, &[credential_record])
 }
 
@@ -401,11 +422,12 @@ pub fn clear_credentials(microemu_home: &Path) -> CoreResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOTSTRAP_LIST_SERVER_RAW, CONFIG_DIRECTORY_NAME, SERVER_CATALOG, SERVER_COUNT,
-        SERVER_NAMES, SUITE_DIRECTORY_NAME, bootstrap_index_for_server, clear_credentials,
+        BOOTSTRAP_LIST_SERVER_RAW, CONFIG_DIRECTORY_NAME, INDEX_SERVER_STORE, LIST_SERVER_STORE,
+        SELECTED_SERVER_HOST_STORE, SERVER_CATALOG, SERVER_COUNT, SERVER_NAMES, STORE_EXTENSION,
+        SUITE_DIRECTORY_NAME, USER_PASS_STORE, bootstrap_index_for_server, clear_credentials,
         complement, index_server_record, list_server_record, parse_list_server_record,
         parse_selected_server_host_record, record_store_bytes, seed_credentials,
-        selected_server_host_record, server_spec, user_pass_record, write_java_utf8,
+        selected_server_host_record, server_spec, suite_directory, user_pass_record, write_java_utf8,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -774,5 +796,98 @@ mod tests {
             .expect_err("an index past the table fails");
         // The index is validated before the first write, so no partial seed survives.
         assert!(!home.path().join(CONFIG_DIRECTORY_NAME).exists());
+    }
+
+    #[test]
+    fn pre_existing_user_pass_with_forced_list_server_failure_leaves_no_user_pass() {
+        let home = TestHome::new("forced-list-fail");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        // Write pre-existing user_pass
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"stale_credentials").unwrap();
+        assert!(user_pass_file.exists());
+
+        // Force listServer write failure by placing a directory where listServer.rs should be
+        let list_server_path = suite.join(format!("{LIST_SERVER_STORE}.{STORE_EXTENSION}"));
+        fs::create_dir_all(&list_server_path).unwrap();
+
+        let err = seed_credentials(home.path(), "user", "pass", 8);
+        assert!(err.is_err(), "seed_credentials must fail when listServer write fails");
+        assert!(!user_pass_file.exists(), "user_pass must be absent after listServer write failure");
+    }
+
+    #[test]
+    fn pre_existing_user_pass_with_forced_selected_server_host_failure_leaves_no_user_pass() {
+        let home = TestHome::new("forced-host-fail");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        // Write pre-existing user_pass
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"stale_credentials").unwrap();
+        assert!(user_pass_file.exists());
+
+        // Force selectedServerHost write failure by placing a directory where selectedServerHost.rs should be
+        let host_path = suite.join(format!("{SELECTED_SERVER_HOST_STORE}.{STORE_EXTENSION}"));
+        fs::create_dir_all(&host_path).unwrap();
+
+        let err = seed_credentials(home.path(), "user", "pass", 8);
+        assert!(err.is_err(), "seed_credentials must fail when selectedServerHost write fails");
+        assert!(!user_pass_file.exists(), "user_pass must be absent after selectedServerHost write failure");
+    }
+
+    #[test]
+    fn pre_existing_user_pass_with_forced_is_index_server_failure_leaves_no_user_pass() {
+        let home = TestHome::new("forced-index-fail");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        // Write pre-existing user_pass
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"stale_credentials").unwrap();
+        assert!(user_pass_file.exists());
+
+        // Force isIndexServer write failure by placing a directory where isIndexServer.rs should be
+        let index_path = suite.join(format!("{INDEX_SERVER_STORE}.{STORE_EXTENSION}"));
+        fs::create_dir_all(&index_path).unwrap();
+
+        let err = seed_credentials(home.path(), "user", "pass", 8);
+        assert!(err.is_err(), "seed_credentials must fail when isIndexServer write fails");
+        assert!(!user_pass_file.exists(), "user_pass must be absent after isIndexServer write failure");
+    }
+
+    #[test]
+    fn successful_seed_writes_all_four_stores_and_user_pass_last() {
+        let home = TestHome::new("seed-success");
+        let suite = suite_directory(home.path());
+        seed_credentials(home.path(), "newuser", "newpass", 8).expect("successful seed");
+        assert!(suite.join(format!("{LIST_SERVER_STORE}.{STORE_EXTENSION}")).exists());
+        assert!(suite.join(format!("{SELECTED_SERVER_HOST_STORE}.{STORE_EXTENSION}")).exists());
+        assert!(suite.join(format!("{INDEX_SERVER_STORE}.{STORE_EXTENSION}")).exists());
+        assert!(suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}")).exists());
+    }
+
+    #[test]
+    fn invalid_logical_server_id_leaves_no_user_pass() {
+        let home = TestHome::new("invalid-id-no-pass");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        // Pre-existing user_pass
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"stale_credentials").unwrap();
+        assert!(user_pass_file.exists());
+
+        // Seed with invalid logical ID 9
+        let err = seed_credentials(home.path(), "user", "pass", 9);
+        assert!(err.is_err());
+        assert!(!user_pass_file.exists(), "invalid logical server ID must leave no user_pass");
+
+        // Pre-existing user_pass again
+        fs::write(&user_pass_file, b"stale_credentials").unwrap();
+        assert!(user_pass_file.exists());
+
+        // Seed with invalid logical ID 255
+        let err2 = seed_credentials(home.path(), "user", "pass", 255);
+        assert!(err2.is_err());
+        assert!(!user_pass_file.exists(), "invalid logical server ID 255 must leave no user_pass");
     }
 }

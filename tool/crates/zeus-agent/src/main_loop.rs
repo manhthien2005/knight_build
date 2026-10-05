@@ -1078,11 +1078,9 @@ fn seed_account_credentials(
     let plaintext = crate::crypto::unseal(identity, &sealed)
         .map_err(|e| format!("unseal failed: {e}"))?;
 
-    // Kiểm tra server_index trong khoảng hợp lệ 0..8 (SERVER_COUNT=9) — Issue #87 / R2
-    let server_index = acc.server_index.min((zeus_core::SERVER_COUNT - 1) as u8);
-
+    // Seed credentials with server_index (validated strictly by zeus-core)
     let paths = AccountPaths::for_slot(acc.slot_index);
-    crate::crypto::seed_then_forget(&paths.home, plaintext, server_index)
+    crate::crypto::seed_then_forget(&paths.home, plaintext, acc.server_index)
         .map_err(|e| format!("seed_credentials failed: {e}"))?;
 
     // plaintext bị zero khi drop (PlaintextCredentials::Drop)
@@ -1467,6 +1465,21 @@ fn reconcile_desired_state_with_cause(
             // Đọc runtime config — Issue #49
             let mut spec = crate::launch::LaunchSpec::default_for_paths(paths.clone());
             spec.character_slot = acc.character_slot;
+
+            // R2.2: Bind managed login to immutable server host
+            if let Err(err_msg) = spec.set_managed_server(acc.server_index) {
+                eprintln!(
+                    "[reconcile] account={} invalid server_index={}: {}, aborting spawn",
+                    acc.id, acc.server_index, err_msg
+                );
+                let _ = rest.set_config_status(
+                    &acc.id,
+                    crate::supabase_rest::ConfigStatus::Error,
+                    Some(&format!("invalid server_index: {}", acc.server_index)),
+                    None,
+                );
+                return;
+            }
 
             // Áp dụng heap_max_mib và headless từ acc.runtime_config
             if let Some(heap_mib) = acc.runtime_config["heap_max_mib"].as_u64() {

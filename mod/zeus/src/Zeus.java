@@ -9420,39 +9420,33 @@ public final class Zeus {
     /**
      * Canonical host guard for server connection and credential transmission.
      *
-     * Validates that the runtime's currently selected server row matches the
-     * canonical host seeded in RMS selectedServerHost.
+     * In managed mode (System.getProperty("zeus.server.host") is set), socket connection
+     * and opcode-1 credential submission are allowed ONLY when:
+     *   expected property == RMS selectedServerHost == mSystem.listServer[GameCanvas.IndexServer][1]
+     *
+     * In unmanaged/manual mode (property is null), official behavior is preserved (returns true).
      */
     public static boolean serverTargetSafe() {
         try {
-            byte[] bytes = Model.CRes.loadRMS("selectedServerHost");
-            if (bytes == null) {
-                // If loadRMS returned null, check whether the store is truly absent or exists but is empty/malformed.
-                boolean exists = false;
-                try {
-                    javax.microedition.rms.RecordStore rs =
-                            javax.microedition.rms.RecordStore.openRecordStore("selectedServerHost", false);
-                    exists = true;
-                    rs.closeRecordStore();
-                } catch (javax.microedition.rms.RecordStoreNotFoundException rsnfe) {
-                    exists = false;
-                } catch (Throwable t) {
-                    return false;
-                }
-                if (exists) {
-                    // Store exists but loadRMS returned null (empty or malformed) -> fail closed
-                    return false;
-                }
-                // If selectedServerHost store does not exist, return true to preserve official unmanaged/manual behavior.
+            String expectedHost = System.getProperty("zeus.server.host");
+            if (expectedHost == null) {
+                // Unmanaged official / manual mode: preserve official behavior
                 return true;
             }
-            if (bytes.length == 0) {
+            expectedHost = expectedHost.trim();
+            if (expectedHost.length() == 0) {
+                return false;
+            }
+
+            byte[] bytes = Model.CRes.loadRMS("selectedServerHost");
+            if (bytes == null || bytes.length == 0) {
                 return false;
             }
             String savedHost = new String(bytes, "UTF-8").trim();
-            if (savedHost.length() == 0) {
+            if (savedHost.length() == 0 || !expectedHost.equalsIgnoreCase(savedHost)) {
                 return false;
             }
+
             int index = Main.GameCanvas.IndexServer;
             if (index < 0) {
                 return false;
@@ -9473,7 +9467,8 @@ public final class Zeus {
             if (trimmedCurrent.length() == 0) {
                 return false;
             }
-            return savedHost.equalsIgnoreCase(trimmedCurrent);
+
+            return expectedHost.equalsIgnoreCase(trimmedCurrent);
         } catch (Throwable t) {
             return false;
         }
