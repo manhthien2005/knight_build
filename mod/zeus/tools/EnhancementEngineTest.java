@@ -1649,8 +1649,10 @@ public class EnhancementEngineTest {
             GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
         }
         GameScreen.player.Action = 0; // alive (4 is dead)
-        GameScreen.player.typePk = 0;
+        GameScreen.player.typePk = -1; // realistic peaceful v4.0.3 player
         GameScreen.player.typeBoss = 0;
+        GameScreen.player.x = 100;
+        GameScreen.player.y = 100;
         try {
             Field rst = Class.forName("Zeus").getDeclaredField("readySettleTicks");
             rst.setAccessible(true);

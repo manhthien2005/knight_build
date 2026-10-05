@@ -368,5 +368,6 @@ public class ServerFailClosedTest {
         System.out.println("  [PASS] Case 15: both connect and login proceed normally when host validation is true");
 
         System.out.println("ALL 15 ServerFailClosedTest CHECKS PASSED!");
+        System.exit(0);
     }
 }

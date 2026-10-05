@@ -3735,7 +3735,7 @@ public final class Zeus {
      */
     public static boolean gameReady() {
         if (!inGame() || !sceneReady() || !alive() || captcha() || !noDialog()
-                || GameScreen.player == null || GameScreen.player.typePk < 0 || GameScreen.player.typeBoss < 0 || GameCanvas.loadmap == null || GameCanvas.loadmap.idMap < 0) {
+                || GameScreen.player == null || GameScreen.player.x < 0 || GameScreen.player.y < 0 || GameCanvas.loadmap == null || GameCanvas.loadmap.idMap < 0) {
             return false;
         }
         return readySettleTicks >= GAME_READY_SETTLE_TICKS;

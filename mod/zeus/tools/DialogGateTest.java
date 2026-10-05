@@ -153,8 +153,10 @@ public class DialogGateTest {
             GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
         }
         GameScreen.player.Action = (byte) 0; // alive
-        GameScreen.player.typePk = 100;
-        GameScreen.player.typeBoss = 100;
+        GameScreen.player.typePk = -1; // realistic peaceful v4.0.3 player
+        GameScreen.player.typeBoss = 0; // standard non-boss player
+        GameScreen.player.x = 100;
+        GameScreen.player.y = 100;
         GameScreen.ObjFocus = null; // no captcha
         GameCanvas.currentDialog = null;
         GameCanvas.subDialog = null;
@@ -292,6 +294,62 @@ public class DialogGateTest {
         set("atkMode", Integer.valueOf(0)); // Off
         check("goal() returns navTarget (8) when atkMode=0",
                 ((Integer) goalMethod.invoke(null)).intValue() == 8);
+
+        // =====================================================================
+        // Test 8: Realistic peaceful player v4.0.3 gameReady() contract
+        // =====================================================================
+        System.out.println("--- Test 8: Realistic Peaceful Player gameReady() Contract ---");
+        setupWorldState(); // player has typePk = -1, typeBoss = 0, x = 100, y = 100
+        call("sessionReset");
+        for (int i = 0; i < 12; i++) {
+            call("tick");
+        }
+        check("8a: peaceful player + valid coordinates + settled world => gameReady true", boolCall("gameReady"));
+
+        // 8b: Negative x coordinate => gameReady false
+        GameScreen.player.x = -1;
+        check("8b: negative x coordinate => gameReady false", !boolCall("gameReady"));
+        GameScreen.player.x = 100;
+
+        // 8c: Negative y coordinate => gameReady false
+        GameScreen.player.y = -1;
+        check("8c: negative y coordinate => gameReady false", !boolCall("gameReady"));
+        GameScreen.player.y = 100;
+
+        // 8d: Dialog open => gameReady false
+        TestTarget dummyTarget = new TestTarget();
+        GameCanvas.currentDialog = makeDialog("Some dialog", dummyTarget, "Dong");
+        check("8d: dialog open => gameReady false", !boolCall("gameReady"));
+        GameCanvas.currentDialog = null;
+
+        // 8e: Dead player (Action = 4) => gameReady false
+        GameScreen.player.Action = (byte) 4;
+        check("8e: dead player (Action=4) => gameReady false", !boolCall("gameReady"));
+        GameScreen.player.Action = (byte) 0;
+
+        // 8f: Captcha active (ObjFocus != null && ObjFocus.typeBoss == 2) => gameReady false
+        MainObject captchaMob = new MainObject(999, (byte) 1, "Con Ma", 100, 100);
+        captchaMob.typeBoss = (byte) 2;
+        GameScreen.ObjFocus = captchaMob;
+        check("8f: captcha monster => gameReady false", !boolCall("gameReady"));
+        GameScreen.ObjFocus = null;
+
+        // 8g: Loading / not sceneReady => gameReady false
+        LoadMapScreen.isNextMap = false;
+        check("8g: loading / not sceneReady => gameReady false", !boolCall("gameReady"));
+        LoadMapScreen.isNextMap = true;
+
+        // 8h: Settle threshold not reached => gameReady false
+        call("sessionReset");
+        check("8h: settle threshold not reached (0 ticks) => gameReady false", !boolCall("gameReady"));
+        for (int i = 0; i < 5; i++) {
+            call("tick");
+        }
+        check("8h: settle threshold not reached (5 ticks < 10) => gameReady false", !boolCall("gameReady"));
+        for (int i = 0; i < 7; i++) {
+            call("tick");
+        }
+        check("8h: settle threshold reached (12 ticks >= 10) => gameReady true", boolCall("gameReady"));
 
         System.out.println(failures == 0 ? "ALL PASS" : (failures + " FAILURES"));
         System.exit(failures == 0 ? 0 : 1);

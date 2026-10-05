@@ -154,8 +154,8 @@ public class ReconnectTravelTest {
             GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
         }
         GameScreen.player.Action = (byte) 0; // alive
-        GameScreen.player.typePk = 100;
-        GameScreen.player.typeBoss = 100;
+        GameScreen.player.typePk = -1; // realistic peaceful v4.0.3 player
+        GameScreen.player.typeBoss = 0; // standard non-boss player
         GameScreen.player.x = 100;
         GameScreen.player.y = 100;
         GameScreen.ObjFocus = null;
