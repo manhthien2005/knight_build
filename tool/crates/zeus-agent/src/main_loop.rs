@@ -145,6 +145,17 @@ struct AccountState {
     logical_watchdog: crate::logical_reconnect_watchdog::LogicalReconnectWatchdog,
 }
 
+#[cfg(unix)]
+impl crate::supabase_rest::ManagedIdentity {
+    pub(crate) fn from_account(acc: &AccountState) -> Self {
+        Self {
+            server_index: acc.server_index,
+            username: acc.username.clone(),
+            secret_sealed: acc.secret_sealed.clone(),
+        }
+    }
+}
+
 /// Cấu hình môi trường agent. Đọc từ biến môi trường lúc boot.
 #[cfg(unix)]
 pub struct AgentConfig {
@@ -774,7 +785,26 @@ fn handle_cloud_event(
                     eprintln!("[cloud] account {account_id} is retiring, ignoring update");
                     return;
                 }
-                // Cập nhật config từ record nếu có
+                let old_identity = crate::supabase_rest::ManagedIdentity::from_account(acc);
+                let incoming_raw_si = record.get("server_index").and_then(|v| v.as_i64());
+                let incoming_un = record.get("username").and_then(|v| v.as_str());
+                let incoming_sealed = record.get("secret_sealed");
+
+                let (has_process, is_alive) = acc
+                    .process
+                    .as_ref()
+                    .map(|p| (true, p.pgid_alive()))
+                    .unwrap_or((false, false));
+
+                let intent = crate::supabase_rest::evaluate_account_change_intent(
+                    &old_identity,
+                    is_alive,
+                    incoming_raw_si,
+                    incoming_un,
+                    incoming_sealed,
+                );
+
+                // Cập nhật config/control từ record nếu có
                 if let Some(cv) = record["control_version"].as_i64() {
                     acc.control_version = cv as i32;
                 }
@@ -787,21 +817,106 @@ fn handle_cloud_event(
                 if let Some(ds) = record["desired_state"].as_str() {
                     acc.desired_state = ds.to_string();
                 }
-                // Cập nhật credentials nếu thay đổi — Issue #41
-                if let Some(ss) = record.get("secret_sealed") {
-                    acc.secret_sealed = ss.clone();
-                }
-                if let Some(si) = record["server_index"].as_i64() {
-                    acc.server_index = si.clamp(0, (zeus_core::SERVER_COUNT - 1) as i64) as u8;
-                }
-                if let Some(un) = record["username"].as_str() {
-                    acc.username = un.to_string();
-                }
 
-                // Apply config nếu version mới (B5)
-                let _ = try_apply_config(acc, jar_ctl_version, rest);
-                // Reconcile desired_state (B7.3)
-                reconcile_desired_state(acc, rest, identity);
+                match intent {
+                    crate::supabase_rest::IdentityChangeAction::RejectInvalidServerIndex { raw_index } => {
+                        eprintln!(
+                            "[cloud] account {account_id} invalid server_index={raw_index} (must be 0..{}), rejecting update",
+                            zeus_core::SERVER_COUNT - 1
+                        );
+                        let _ = rest.set_config_status(
+                            &account_id,
+                            crate::supabase_rest::ConfigStatus::Error,
+                            Some(&format!("invalid server_index {raw_index}: out of range")),
+                            None,
+                        );
+                        return;
+                    }
+                    crate::supabase_rest::IdentityChangeAction::NoIdentityChange => {
+                        // Apply config nếu version mới (B5)
+                        let _ = try_apply_config(acc, jar_ctl_version, rest);
+                        // Reconcile desired_state (B7.3)
+                        reconcile_desired_state(acc, rest, identity);
+                    }
+                    crate::supabase_rest::IdentityChangeAction::ApplyWithoutRestart {
+                        target_server,
+                        target_username,
+                        target_sealed,
+                    } => {
+                        acc.server_index = target_server;
+                        acc.username = target_username;
+                        acc.secret_sealed = target_sealed;
+
+                        let paths = AccountPaths::for_slot(acc.slot_index);
+                        if acc.desired_state == "stopped" {
+                            let _ = clear_credentials(&paths.home);
+                            let _ = clear_snapshot(&paths.home);
+                            let _ = clear_health(&paths.home);
+                            let _ = clear_reconnect_status(&paths.home);
+                        }
+
+                        let _ = try_apply_config(acc, jar_ctl_version, rest);
+                        reconcile_desired_state(acc, rest, identity);
+                    }
+                    crate::supabase_rest::IdentityChangeAction::StopRunningProcessForReplacement {
+                        target_server,
+                        target_username,
+                        target_sealed,
+                        ..
+                    } => {
+                        let child = acc.process.as_ref().unwrap();
+                        eprintln!(
+                            "[cloud] account={account_id} identity changed to server={target_server}, username={target_username}; stopping running JVM",
+                        );
+                        let stop_res = process_unix::stop(child, Duration::from_secs(5));
+                        let transition = evaluate_stop_transition(has_process, is_alive, Some(stop_res));
+                        match crate::supabase_rest::evaluate_replacement_stop(transition) {
+                            crate::supabase_rest::ReplacementStopResolution::ProceedWithReplacement => {
+                                eprintln!(
+                                    "[cloud] account={account_id} old JVM confirmed stopped, proceeding with replacement"
+                                );
+                                acc.process = None;
+                                acc.health_observer.reset_stopped();
+                                acc.reconnect_observer.reset_stopped();
+                                acc.game_loop_watchdog.on_explicit_user_stop_or_retirement();
+                                acc.logical_watchdog.on_explicit_user_stop_or_retirement();
+
+                                let paths = AccountPaths::for_slot(acc.slot_index);
+                                if let Err(e) = clear_credentials(&paths.home) {
+                                    eprintln!("[cloud] clear_credentials failed: {e}");
+                                }
+                                if let Err(e) = clear_snapshot(&paths.home) {
+                                    eprintln!("[cloud] clear_snapshot failed: {e}");
+                                }
+                                if let Err(e) = clear_health(&paths.home) {
+                                    eprintln!("[cloud] clear_health failed: {e}");
+                                }
+                                if let Err(e) = clear_reconnect_status(&paths.home) {
+                                    eprintln!("[cloud] clear_reconnect_status failed: {e}");
+                                }
+
+                                acc.server_index = target_server;
+                                acc.username = target_username;
+                                acc.secret_sealed = target_sealed;
+
+                                let _ = try_apply_config(acc, jar_ctl_version, rest);
+                                reconcile_desired_state(acc, rest, identity);
+                            }
+                            crate::supabase_rest::ReplacementStopResolution::AbortRetainProcess => {
+                                eprintln!(
+                                    "[cloud] account={account_id} stop failed during identity change, retaining process handle and aborting replacement"
+                                );
+                                let _ = rest.set_config_status(
+                                    &account_id,
+                                    crate::supabase_rest::ConfigStatus::Error,
+                                    Some("identity change replacement failed: old process could not be confirmed stopped"),
+                                    None,
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
             } else {
                 // Account mới (không có trong map hiện tại) — Issue #12
                 // Kiểm tra device_id thuộc về node này
@@ -1440,6 +1555,7 @@ fn reconcile_desired_state_with_cause(
 
             // Seed credentials trước khi start JVM — đảm bảo invariant trước khi spawn
             if let Err(e) = seed_account_credentials(acc, identity) {
+                let _ = clear_credentials(&paths.home);
                 eprintln!(
                     "[reconcile] account={} credential preparation failed: {e}, aborting spawn",
                     acc.id
@@ -2755,8 +2871,7 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
     rows.into_iter()
         .map(|row| {
             let id = row.id.clone();
-            let server_index = (row.server_index as i32)
-                .clamp(0, (zeus_core::SERVER_COUNT - 1) as i32) as u8;
+            let server_index = crate::supabase_rest::parse_strict_server_index(row.server_index as i64).unwrap_or(255);
             let state = AccountState {
                 id: row.id,
                 slot_index: row.slot_index,
@@ -2795,8 +2910,16 @@ fn account_states_from_rows(rows: Vec<crate::supabase_rest::AccountRow>) -> Hash
 fn make_account_state_from_record(record: &serde_json::Value) -> Option<AccountState> {
     let id = record["id"].as_str()?.to_string();
     let slot_index = record["slot_index"].as_i64()? as i32;
-    let server_index = (record["server_index"].as_i64().unwrap_or(0) as i32)
-        .clamp(0, (zeus_core::SERVER_COUNT - 1) as i32) as u8;
+    let server_index = match record.get("server_index").and_then(|v| v.as_i64()) {
+        Some(si) => match crate::supabase_rest::parse_strict_server_index(si) {
+            Ok(idx) => idx,
+            Err(err) => {
+                eprintln!("[make_account_state] invalid server_index={si}: {err}, rejecting account");
+                return None;
+            }
+        },
+        None => 0,
+    };
     let character_slot = record
         .get("character_slot")
         .and_then(|v| v.as_i64())
@@ -2860,14 +2983,70 @@ fn merge_account_states(
             existing.control = fresh_acc.control;
             existing.config_version = fresh_acc.config_version;
             existing.desired_state = fresh_acc.desired_state;
-            existing.secret_sealed = fresh_acc.secret_sealed;
-            existing.server_index = fresh_acc.server_index;
             existing.character_slot = fresh_acc.character_slot;
-            existing.username = fresh_acc.username;
             existing.runtime_config = fresh_acc.runtime_config;
-            // Preserves existing.process (supervised Child), existing.last_snapshot, existing.restarts, etc.
-            let _ = try_apply_config(existing, jar_ctl_version, rest);
-            reconcile_desired_state(existing, rest, identity);
+
+            let old_identity = crate::supabase_rest::ManagedIdentity::from_account(existing);
+            let (has_process, is_alive) = existing
+                .process
+                .as_ref()
+                .map(|p| (true, p.pgid_alive()))
+                .unwrap_or((false, false));
+
+            let identity_changed = old_identity.has_changed_from(
+                fresh_acc.server_index,
+                &fresh_acc.username,
+                &fresh_acc.secret_sealed,
+            );
+
+            if identity_changed && is_alive {
+                let child = existing.process.as_ref().unwrap();
+                eprintln!(
+                    "[reconcile] account={id} identity changed in background poll; stopping running JVM",
+                );
+                let stop_res = process_unix::stop(child, Duration::from_secs(5));
+                let transition = evaluate_stop_transition(has_process, is_alive, Some(stop_res));
+                match crate::supabase_rest::evaluate_replacement_stop(transition) {
+                    crate::supabase_rest::ReplacementStopResolution::ProceedWithReplacement => {
+                        existing.process = None;
+                        existing.health_observer.reset_stopped();
+                        existing.reconnect_observer.reset_stopped();
+                        existing.game_loop_watchdog.on_explicit_user_stop_or_retirement();
+                        existing.logical_watchdog.on_explicit_user_stop_or_retirement();
+
+                        let paths = AccountPaths::for_slot(existing.slot_index);
+                        let _ = clear_credentials(&paths.home);
+                        let _ = clear_snapshot(&paths.home);
+                        let _ = clear_health(&paths.home);
+                        let _ = clear_reconnect_status(&paths.home);
+
+                        existing.server_index = fresh_acc.server_index;
+                        existing.username = fresh_acc.username;
+                        existing.secret_sealed = fresh_acc.secret_sealed;
+
+                        let _ = try_apply_config(existing, jar_ctl_version, rest);
+                        reconcile_desired_state(existing, rest, identity);
+                    }
+                    crate::supabase_rest::ReplacementStopResolution::AbortRetainProcess => {
+                        eprintln!(
+                            "[reconcile] account={id} stop failed during poll identity change, retaining process handle",
+                        );
+                        let _ = rest.set_config_status(
+                            &id,
+                            crate::supabase_rest::ConfigStatus::Error,
+                            Some("identity change replacement failed: old process could not be confirmed stopped"),
+                            None,
+                        );
+                    }
+                }
+            } else {
+                existing.server_index = fresh_acc.server_index;
+                existing.username = fresh_acc.username;
+                existing.secret_sealed = fresh_acc.secret_sealed;
+
+                let _ = try_apply_config(existing, jar_ctl_version, rest);
+                reconcile_desired_state(existing, rest, identity);
+            }
         } else {
             // New account: initialize directories and clear old snapshot
             let paths = AccountPaths::for_slot(fresh_acc.slot_index);

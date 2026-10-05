@@ -1595,6 +1595,16 @@ pub struct AccountSnapshot {
     pub retiring: bool,
 }
 
+/// Strictly parses and validates a server index against zeus_core::SERVER_COUNT (9).
+/// Rejects negative numbers and values >= SERVER_COUNT (9..). Never clamps.
+pub fn parse_strict_server_index(raw: i64) -> Result<u8, &'static str> {
+    if (0..zeus_core::SERVER_COUNT as i64).contains(&raw) {
+        Ok(raw as u8)
+    } else {
+        Err("server_index out of range (must be 0..8)")
+    }
+}
+
 impl AccountSnapshot {
     /// Merges fresh cloud fields into self, strictly preserving local runtime state.
     /// A retiring account is monotonic and must never be updated or resurrected.
@@ -1603,8 +1613,7 @@ impl AccountSnapshot {
             return;
         }
         self.username = fresh.username.clone();
-        self.server_index = (fresh.server_index as i32)
-            .clamp(0, (zeus_core::SERVER_COUNT - 1) as i32) as u8;
+        self.server_index = parse_strict_server_index(fresh.server_index as i64).unwrap_or(255);
         self.secret_sealed = fresh.secret_sealed.clone();
         self.desired_state = fresh.desired_state.clone();
         self.control_version = fresh.control_version;
@@ -1630,8 +1639,7 @@ impl AccountSnapshot {
             id: row.id.clone(),
             slot_index: row.slot_index,
             username: row.username.clone(),
-            server_index: (row.server_index as i32)
-                .clamp(0, (zeus_core::SERVER_COUNT - 1) as i32) as u8,
+            server_index: parse_strict_server_index(row.server_index as i64).unwrap_or(255),
             secret_sealed: row.secret_sealed.clone(),
             desired_state: row.desired_state.clone(),
             control_version: row.control_version,
@@ -1640,6 +1648,122 @@ impl AccountSnapshot {
             live_process_pid: None,
             retiring: false,
         }
+    }
+}
+
+/// JVM-startup identity fields defining managed runtime credentials and immutable server target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedIdentity {
+    pub server_index: u8,
+    pub username: String,
+    pub secret_sealed: serde_json::Value,
+}
+
+impl ManagedIdentity {
+    pub fn new(server_index: u8, username: impl Into<String>, secret_sealed: serde_json::Value) -> Self {
+        Self {
+            server_index,
+            username: username.into(),
+            secret_sealed,
+        }
+    }
+
+    pub fn from_snapshot(snap: &AccountSnapshot) -> Self {
+        Self {
+            server_index: snap.server_index,
+            username: snap.username.clone(),
+            secret_sealed: snap.secret_sealed.clone(),
+        }
+    }
+
+    pub fn has_changed_from(
+        &self,
+        target_server: u8,
+        target_username: &str,
+        target_sealed: &serde_json::Value,
+    ) -> bool {
+        self.server_index != target_server
+            || self.username != target_username
+            || &self.secret_sealed != target_sealed
+    }
+}
+
+/// Action determined by evaluating incoming cloud AccountChanged against current account state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityChangeAction {
+    /// Server index was invalid (<0 or >=SERVER_COUNT); rejected, no state change, no restart.
+    RejectInvalidServerIndex { raw_index: i64 },
+    /// No identity field changed (e.g. control-only, config-only, or identical identity fields).
+    NoIdentityChange,
+    /// Identity changed, but no running process was alive; state updated directly, normal reconcile.
+    ApplyWithoutRestart {
+        target_server: u8,
+        target_username: String,
+        target_sealed: serde_json::Value,
+    },
+    /// Identity changed while running process was alive; must stop running process before applying replacement.
+    StopRunningProcessForReplacement {
+        old_identity: ManagedIdentity,
+        target_server: u8,
+        target_username: String,
+        target_sealed: serde_json::Value,
+    },
+}
+
+/// Evaluates incoming account change intent against current managed identity and process state.
+pub fn evaluate_account_change_intent(
+    current_identity: &ManagedIdentity,
+    is_process_alive: bool,
+    incoming_server_index_raw: Option<i64>,
+    incoming_username: Option<&str>,
+    incoming_secret_sealed: Option<&serde_json::Value>,
+) -> IdentityChangeAction {
+    let target_server = if let Some(raw_si) = incoming_server_index_raw {
+        match parse_strict_server_index(raw_si) {
+            Ok(si) => si,
+            Err(_) => return IdentityChangeAction::RejectInvalidServerIndex { raw_index: raw_si },
+        }
+    } else {
+        current_identity.server_index
+    };
+
+    let target_un = incoming_username.unwrap_or(&current_identity.username);
+    let target_sealed = incoming_secret_sealed.unwrap_or(&current_identity.secret_sealed);
+
+    if !current_identity.has_changed_from(target_server, target_un, target_sealed) {
+        return IdentityChangeAction::NoIdentityChange;
+    }
+
+    if is_process_alive {
+        IdentityChangeAction::StopRunningProcessForReplacement {
+            old_identity: current_identity.clone(),
+            target_server,
+            target_username: target_un.to_string(),
+            target_sealed: target_sealed.clone(),
+        }
+    } else {
+        IdentityChangeAction::ApplyWithoutRestart {
+            target_server,
+            target_username: target_un.to_string(),
+            target_sealed: target_sealed.clone(),
+        }
+    }
+}
+
+/// Resolution of a stop attempt during a managed identity replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementStopResolution {
+    /// Old process stopped successfully; proceed with RMS clear, identity update, and new launch.
+    ProceedWithReplacement,
+    /// Old process failed to stop; retain process handle, do NOT reseed RMS, do NOT launch second JVM.
+    AbortRetainProcess,
+}
+
+/// Evaluates whether an identity replacement may proceed based on the stop transition outcome.
+pub fn evaluate_replacement_stop(transition: StopTransition) -> ReplacementStopResolution {
+    match transition {
+        StopTransition::ConfirmedStopped => ReplacementStopResolution::ProceedWithReplacement,
+        StopTransition::FailedStillAlive => ReplacementStopResolution::AbortRetainProcess,
     }
 }
 
@@ -4269,7 +4393,7 @@ mod tests {
     }
 
     #[test]
-    fn test_server_index_bounds_allow_dense_0_through_8_and_clamp_overflow() {
+    fn test_server_index_bounds_allow_dense_0_through_8_and_fail_closed_overflow() {
         for expected_id in 0..=8u8 {
             let row = AccountRow {
                 id: format!("acc-{expected_id}"),
@@ -4305,28 +4429,196 @@ mod tests {
             assert_eq!(snap_merge.server_index, expected_id);
         }
 
-        // Out-of-bounds index (e.g. 9 or 255) must clamp to 8 (SERVER_COUNT - 1)
-        let row_overflow = AccountRow {
-            id: "acc-overflow".to_string(),
-            slot_index: 0,
-            label: "Acc Overflow".to_string(),
-            username: "user".to_string(),
-            secret_sealed: serde_json::json!({}),
-            server_index: 9,
-            desired_state: "stopped".to_string(),
-            control_version: 1,
-            control: serde_json::json!({}),
-            config_version: 1,
-            runtime: serde_json::json!({}),
-            character_slot: 1,
-        };
-        let snap_overflow = AccountSnapshot::from_row(&row_overflow);
-        assert_eq!(snap_overflow.server_index, 8);
+        // Out-of-bounds index (e.g. -1, 9, 99, 255) must fail closed to 255 and NEVER clamp/reinterpret to 8
+        for invalid_id in [-1i16, 9, 99, 255] {
+            let row_overflow = AccountRow {
+                id: format!("acc-overflow-{invalid_id}"),
+                slot_index: 0,
+                label: "Acc Overflow".to_string(),
+                username: "user".to_string(),
+                secret_sealed: serde_json::json!({}),
+                server_index: invalid_id,
+                desired_state: "stopped".to_string(),
+                control_version: 1,
+                control: serde_json::json!({}),
+                config_version: 1,
+                runtime: serde_json::json!({}),
+                character_slot: 1,
+            };
+            let snap_overflow = AccountSnapshot::from_row(&row_overflow);
+            assert_eq!(snap_overflow.server_index, 255);
+            assert_ne!(snap_overflow.server_index, 8, "out of bounds must never clamp to 8");
 
-        let mut snap_merge_overflow = snap_overflow.clone();
-        let mut row_high = row_overflow.clone();
-        row_high.server_index = 99;
-        snap_merge_overflow.merge_cloud_fields(&row_high);
-        assert_eq!(snap_merge_overflow.server_index, 8);
+            let mut snap_merge_overflow = snap_overflow.clone();
+            let mut row_high = row_overflow.clone();
+            row_high.server_index = invalid_id;
+            snap_merge_overflow.merge_cloud_fields(&row_high);
+            assert_eq!(snap_merge_overflow.server_index, 255);
+            assert_ne!(snap_merge_overflow.server_index, 8, "out of bounds must never clamp to 8");
+        }
+    }
+
+    #[test]
+    fn test_parse_strict_server_index_validation() {
+        // Valid indices
+        assert_eq!(parse_strict_server_index(0), Ok(0));
+        assert_eq!(parse_strict_server_index(7), Ok(7));
+        assert_eq!(parse_strict_server_index(8), Ok(8));
+
+        // Invalid indices: must fail closed, never clamp
+        assert!(parse_strict_server_index(-1).is_err());
+        assert!(parse_strict_server_index(9).is_err());
+        assert!(parse_strict_server_index(99).is_err());
+        assert!(parse_strict_server_index(255).is_err());
+    }
+
+    #[test]
+    fn test_managed_identity_change_detection() {
+        let sealed_a = serde_json::json!({"alg": "aes-gcm", "ct": "aaa"});
+        let sealed_b = serde_json::json!({"alg": "aes-gcm", "ct": "bbb"});
+
+        let identity = ManagedIdentity::new(6, "user_alpha", sealed_a.clone());
+
+        // 1. same server + same username + same sealed secret -> identity_changed false
+        assert!(
+            !identity.has_changed_from(6, "user_alpha", &sealed_a),
+            "same identity must not report change"
+        );
+
+        // 2. server 6 -> 8 -> true
+        assert!(
+            identity.has_changed_from(8, "user_alpha", &sealed_a),
+            "server 6 -> 8 must report change"
+        );
+
+        // 3. server 8 -> 6 -> true
+        let identity_8 = ManagedIdentity::new(8, "user_alpha", sealed_a.clone());
+        assert!(
+            identity_8.has_changed_from(6, "user_alpha", &sealed_a),
+            "server 8 -> 6 must report change"
+        );
+
+        // 4. username changed -> true
+        assert!(
+            identity.has_changed_from(6, "user_beta", &sealed_a),
+            "username changed must report change"
+        );
+
+        // 5. secret_sealed changed -> true
+        assert!(
+            identity.has_changed_from(6, "user_alpha", &sealed_b),
+            "secret_sealed changed must report change"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_account_change_intent_permutations() {
+        let sealed = serde_json::json!({"k": "v"});
+        let id = ManagedIdentity::new(6, "user_a", sealed.clone());
+
+        // Control-only update -> NoIdentityChange
+        let action = evaluate_account_change_intent(&id, true, None, None, None);
+        assert_eq!(action, IdentityChangeAction::NoIdentityChange);
+
+        // Explicit identical fields -> NoIdentityChange
+        let action = evaluate_account_change_intent(
+            &id,
+            true,
+            Some(6),
+            Some("user_a"),
+            Some(&sealed),
+        );
+        assert_eq!(action, IdentityChangeAction::NoIdentityChange);
+
+        // Server index 9 or negative -> RejectInvalidServerIndex (fail closed, never clamp)
+        let action_neg = evaluate_account_change_intent(&id, true, Some(-1), None, None);
+        assert_eq!(
+            action_neg,
+            IdentityChangeAction::RejectInvalidServerIndex { raw_index: -1 }
+        );
+        let action_9 = evaluate_account_change_intent(&id, true, Some(9), None, None);
+        assert_eq!(
+            action_9,
+            IdentityChangeAction::RejectInvalidServerIndex { raw_index: 9 }
+        );
+        let action_255 = evaluate_account_change_intent(&id, true, Some(255), None, None);
+        assert_eq!(
+            action_255,
+            IdentityChangeAction::RejectInvalidServerIndex { raw_index: 255 }
+        );
+
+        // Server changed 6 -> 8 while process is alive -> StopRunningProcessForReplacement
+        let action_server_live = evaluate_account_change_intent(&id, true, Some(8), None, None);
+        match action_server_live {
+            IdentityChangeAction::StopRunningProcessForReplacement {
+                target_server,
+                target_username,
+                ..
+            } => {
+                assert_eq!(target_server, 8);
+                assert_eq!(target_username, "user_a");
+            }
+            other => panic!("expected StopRunningProcessForReplacement, got {other:?}"),
+        }
+
+        // Server changed 8 -> 7 while process is alive -> StopRunningProcessForReplacement
+        let id_8 = ManagedIdentity::new(8, "user_a", sealed.clone());
+        let action_8_to_7 = evaluate_account_change_intent(&id_8, true, Some(7), None, None);
+        match action_8_to_7 {
+            IdentityChangeAction::StopRunningProcessForReplacement {
+                target_server,
+                target_username,
+                ..
+            } => {
+                assert_eq!(target_server, 7);
+                assert_eq!(target_username, "user_a");
+            }
+            other => panic!("expected StopRunningProcessForReplacement, got {other:?}"),
+        }
+
+        // Username changed while process is alive -> StopRunningProcessForReplacement
+        let action_user_live = evaluate_account_change_intent(&id, true, None, Some("user_b"), None);
+        match action_user_live {
+            IdentityChangeAction::StopRunningProcessForReplacement { target_username, .. } => {
+                assert_eq!(target_username, "user_b");
+            }
+            other => panic!("expected StopRunningProcessForReplacement, got {other:?}"),
+        }
+
+        // Password / secret_sealed changed while process is alive -> StopRunningProcessForReplacement
+        let new_sealed = serde_json::json!({"k": "v2"});
+        let action_pw_live = evaluate_account_change_intent(&id, true, None, None, Some(&new_sealed));
+        match action_pw_live {
+            IdentityChangeAction::StopRunningProcessForReplacement { target_sealed, .. } => {
+                assert_eq!(target_sealed, new_sealed);
+            }
+            other => panic!("expected StopRunningProcessForReplacement, got {other:?}"),
+        }
+
+        // Identity change when process is dead / not alive -> ApplyWithoutRestart
+        let action_dead = evaluate_account_change_intent(&id, false, Some(8), None, None);
+        assert_eq!(
+            action_dead,
+            IdentityChangeAction::ApplyWithoutRestart {
+                target_server: 8,
+                target_username: "user_a".to_string(),
+                target_sealed: sealed.clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_evaluate_replacement_stop_transitions() {
+        // ConfirmedStopped -> ProceedWithReplacement
+        assert_eq!(
+            evaluate_replacement_stop(StopTransition::ConfirmedStopped),
+            ReplacementStopResolution::ProceedWithReplacement
+        );
+
+        // FailedStillAlive -> AbortRetainProcess (retains process, forbids RMS reseed)
+        assert_eq!(
+            evaluate_replacement_stop(StopTransition::FailedStillAlive),
+            ReplacementStopResolution::AbortRetainProcess
+        );
     }
 }
