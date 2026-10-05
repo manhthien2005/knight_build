@@ -1,13 +1,5 @@
 #!/bin/bash
-# Sync the host source into the container, then build Zeus_Knight.jar.
-#
-# Exists because /work is container-internal, not a bind mount: only /host is.
-# Building straight from /work/zeus/src silently uses whatever was copied there
-# last — which is how a jar at CTL_VERSION 13 with 29 keys got deployed against
-# a source at CTL_VERSION 13 with 35 keys. docs/19 and docs/21 both warn about
-# that trap; this script removes it instead of warning about it.
-#
-#   docker exec knight-potato bash /host/docker-build/mod/zeus/sync-build.sh [out.jar]
+# Sync host source into container, then build Zeus_Knight.jar on official v4.0.3.
 #
 # $1 = output jar name (default Zeus_Knight.jar), written to /work/jar/
 set -euo pipefail
@@ -45,39 +37,44 @@ printf '   PatchZeus   %s hook tai RETURN\n' \
 
 bash "$DST/build-zeus-jar.sh" "$OUT"
 
-# Gate: the four properties that tell a good build from the one that shipped broken.
-echo "== nghiem thu =="
+echo "== nghiem thu v4.0.3 =="
 TMP=$(mktemp -d)
 cd "$TMP"
-cp "/work/jar/$OUT" . && jar xf "$OUT" Zeus.class cn.class
+cp "/work/jar/$OUT" . && jar xf "$OUT" Zeus.class GameScreen/GameScreen.class
 
 keys=$(javap -p -constants Zeus.class | grep -c 'static final int K_')
 ver=$(javap -p -constants Zeus.class | grep -oP 'CTL_VERSION = \K[0-9]+')
-paint=$(javap -c cn.class | grep -c 'Zeus.paint')
-snapv=$(javap -p -constants -c Zeus.class | grep -oE 'String v=[0-9]' | sort -u | tail -1)
-snapk=$(javap -p -constants -c Zeus.class | grep -coE 'String [a-z]+=')
+paint=$(javap -c GameScreen/GameScreen.class | grep -c 'Zeus.paint')
+
+pub_bytecode=$(javap -p -constants -c Zeus.class | awk '
+  /^[ ]*private static void publish\(long\);/ { in_pub=1; next }
+  in_pub && /^[ ]*(public|protected|private|static|\})/ { exit }
+  in_pub { print }
+')
+
+snapver=""
+snapk=0
+if [ -n "$pub_bytecode" ]; then
+    snapver=$(echo "$pub_bytecode" | grep -oP 'String v=\K[0-9]+' | sort -u | head -1)
+    snapk=$(echo "$pub_bytecode" | grep -coE 'String [a-z]+=')
+fi
 
 srckeys=$(grep -oE 'K_[A-Z_0-9]+ *= *[0-9]+' "$DST/src/Zeus.java" | sort -u | wc -l)
 
 printf '   K_* trong jar      %s  (source: %s)\n' "$keys" "$srckeys"
 printf '   CTL_VERSION        %s\n' "$ver"
-printf '   Zeus.paint sites   %s  (phai la 2; 1 = patcher cu bi loi)\n' "$paint"
-printf '   snapshot           %s, %s khoa\n' "$snapv" "$snapk"
+printf '   Zeus.paint sites   %s  (phai la 1 trong GameScreen.paint)\n' "$paint"
+printf '   snapshot           v%s, %s khoa\n' "$snapver" "$snapk"
 
 rc=0
 [ "$keys" = "$srckeys" ] || { echo "   !! so khoa jar khac source"; rc=1; }
-[ "$paint" = "2" ]       || { echo "   !! Zeus.paint khong phai 2 call site"; rc=1; }
+[ "$ver" = "15" ]        || { echo "   !! CTL_VERSION khong phai 15"; rc=1; }
+[ "$paint" = "1" ]       || { echo "   !! Zeus.paint khong phai 1 call site"; rc=1; }
+[ "$snapver" = "6" ]     || { echo "   !! snapshot version khong phai 6"; rc=1; }
+[ "$snapk" = "49" ]      || { echo "   !! snapshot key count khong phai 49"; rc=1; }
 
-# Build manifest (WIRE-CONTRACT.md §2.4). The agent reads this at boot to report
-# devices.jar_ctl_version / jar_snapshot_version and must NOT parse bytecode, so the four
-# numbers measured above are written down beside the jar and travel with it everywhere the
-# jar goes. Emitted only when the gate passed: a jar we refuse to deploy must not get a
-# manifest that looks deployable — fail-closed, like zeus-control.txt itself.
 if [ "$rc" = 0 ]; then
     JAR_PATH="/work/jar/$OUT"
-    # snapv is the whole grep match "String v=6"; strip up to and including the last
-    # "v=" so the manifest carries the bare integer the JSON schema expects.
-    snapver="${snapv##*v=}"
     jar_sha=$(sha256sum "$JAR_PATH" | cut -d' ' -f1)
     jar_sz=$(stat -c %s "$JAR_PATH")
     patcher_sha=$(sha256sum "$DST/tools/PatchZeus.java" | cut -d' ' -f1)

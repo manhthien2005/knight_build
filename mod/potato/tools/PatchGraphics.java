@@ -67,6 +67,15 @@ public final class PatchGraphics {
         GraphicsAdapter adapter = new GraphicsAdapter(cw);
         cr.accept(adapter, 0);
 
+        for (int i = 0; i < PRIMITIVES.length; i++) {
+            String key = PRIMITIVES[i][0] + PRIMITIVES[i][1];
+            Integer count = adapter.counts.get(key);
+            if (count == null || count.intValue() != 1) {
+                throw new IllegalStateException("expected primitive " + key + " exactly once, found "
+                        + count + " — refusing to write");
+            }
+        }
+
         if (adapter.totalPatched != PRIMITIVES.length) {
             throw new IllegalStateException("expected exactly " + PRIMITIVES.length
                     + " patched methods in " + TARGET + ", found " + adapter.totalPatched

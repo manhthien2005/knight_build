@@ -1,11 +1,18 @@
 #!/bin/bash
-# Build Zeus_Knight.jar from vanilla + Zeus source.
+# Build Zeus_Knight.jar from vanilla + Zeus source on official v4.0.3.
 #
-# Reuses the potato-build container infrastructure:
+# Build pipeline:
 #   - Compile PatchZeus (ASM from microemulator.jar)
-#   - Run PatchZeus FIRST to produce fu.class (tick hook) + x.class (k public)
-#   - Compile Zeus.java against the PATCHED classes, so javac sees x.k as public
+#   - Run PatchZeus to patch v4.0.3 bytecode:
+#       * Main/GameCanvas.update(): injects Zeus.tick()
+#       * GameScreen/SelectCharScreen.selectChar: widens to public
+#       * InterfaceComponents/MsgDialog.cmdList: widens to public
+#       * netcommand/Cmd_Message.send(): injects Zeus.sent()
+#       * Model/Menu2.startAt() & setinfoDynamic(): injects Zeus.menu() and Zeus.serverMenu()
+#       * GameScreen/GameScreen.paint(): injects Zeus.paint()
+#   - Compile Zeus.java against patched classes + vanilla + microemulator
 #   - Overlay patched classes + Zeus.class onto vanilla.jar
+#   - Repack final Zeus_Knight.jar
 #
 # $1 = output jar name (default Zeus_Knight.jar)
 set -euo pipefail
@@ -25,11 +32,11 @@ echo "== compiling PatchZeus =="
 javac -nowarn -encoding UTF-8 -cp "$JARS/microemulator.jar" -d "$BUILD/tools" \
     "$TOOLS"/PatchZeus.java
 
-echo "== patching fu.class (tick hook) + x.class (k public) =="
+echo "== running PatchZeus against v4.0.3 =="
 java -cp "$BUILD/tools:$JARS/microemulator.jar" PatchZeus \
     "$JARS/vanilla.jar" "$BUILD/classes"
 
-echo "== compiling Zeus.java against the patched classes (--release $RELEASE) =="
+echo "== compiling Zeus.java against patched classes (--release $RELEASE) =="
 javac -nowarn -encoding UTF-8 --release "$RELEASE" \
     -cp "$BUILD/classes:$CP" -d "$BUILD/classes" \
     "$SRC"/Zeus.java

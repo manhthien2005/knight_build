@@ -872,6 +872,17 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
             JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
         ],
     },
+    RuntimeContract {
+        name: "V403_CORE_R1",
+        jar_sha256: JarManifest::V403_CORE_R1_COMPATIBLE_JAR_SHA256,
+        ctl_version: 15,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+            JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+            JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
+        ],
+    },
 ];
 
 impl JarManifest {
@@ -916,7 +927,9 @@ impl JarManifest {
     pub const ENHANCEMENT_RESILIENT_COMPATIBLE_JAR_SHA256: &'static str =
         "3999f6b674c1780ac3f26d47ad035f5a2d749ef38cea5b256dcd8e1aec3c3504";
     pub const AUTO_DUNGEON_COMPATIBLE_JAR_SHA256: &'static str =
-        "ee4cbcf16356b7d848f8cc6bb3e8c7a73001aa30252bac8e15f8341cade892d3";
+        "b18baf702ee119c1d950f1ab13ba67d87b9768eb8305d02bc8268980850a8091";
+    pub const V403_CORE_R1_COMPATIBLE_JAR_SHA256: &'static str =
+        "bd15eea2a6cb8c33f6868262aa8044572db2efbce8570aa679a98ace6068c918";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -3499,7 +3512,7 @@ mod tests {
 
         // 7. Test loading actual repository zeus-jar.json
         if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
-            assert_eq!(loaded_manifest.jar_sha256, JarManifest::AUTO_DUNGEON_COMPATIBLE_JAR_SHA256);
+            assert_eq!(loaded_manifest.jar_sha256, JarManifest::V403_CORE_R1_COMPATIBLE_JAR_SHA256);
             assert_eq!(loaded_manifest.ctl_version, 15);
             assert_eq!(loaded_manifest.ctl_key_count, 38);
             assert!(loaded_manifest.is_character_slot_compatible());
@@ -3510,6 +3523,88 @@ mod tests {
             assert!(loaded_manifest.is_enhancement_degrade_retry_compatible());
             assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1");
         }
+    }
+
+    #[test]
+    fn test_v403_core_r1_and_historical_runtime_contract_resolution() {
+        // 1. Manifest for historical b18... JAR still resolves expected capabilities
+        let historical_b18_manifest = JarManifest {
+            jar_sha256: JarManifest::AUTO_DUNGEON_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1168097,
+            ctl_version: 15,
+            snapshot_version: 6,
+            ctl_key_count: 38,
+            snapshot_key_count: 49,
+            built_at: "2026-10-03T18:00:00Z".to_string(),
+            patcher_sha256: "historical".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert_eq!(
+            historical_b18_manifest.capabilities(),
+            &[
+                JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+                JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
+            ]
+        );
+        assert!(historical_b18_manifest.is_character_slot_compatible());
+        assert!(historical_b18_manifest.is_visual_qol_compatible());
+        assert!(historical_b18_manifest.is_enhancement_queue_compatible());
+        assert!(historical_b18_manifest.is_enhancement_multilevel_compatible());
+
+        // 2. Manifest for final v4.0.3 R1 JAR resolves expected capabilities
+        let v403_r1_manifest = JarManifest {
+            jar_sha256: JarManifest::V403_CORE_R1_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1548397,
+            ctl_version: 15,
+            snapshot_version: 6,
+            ctl_key_count: 38,
+            snapshot_key_count: 49,
+            built_at: "2026-10-05T10:19:00Z".to_string(),
+            patcher_sha256: "v403".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert_eq!(
+            v403_r1_manifest.capabilities(),
+            &[
+                JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+                JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
+            ]
+        );
+        assert!(v403_r1_manifest.is_character_slot_compatible());
+        assert!(v403_r1_manifest.is_visual_qol_compatible());
+        assert!(v403_r1_manifest.is_enhancement_queue_compatible());
+        assert!(v403_r1_manifest.is_enhancement_multilevel_compatible());
+
+        // 3. An unknown SHA with ctl_version=15 resolves no capabilities
+        let unknown_v15_manifest = JarManifest {
+            jar_sha256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            jar_size: 1548397,
+            ctl_version: 15,
+            snapshot_version: 6,
+            ctl_key_count: 38,
+            snapshot_key_count: 49,
+            built_at: "2026-10-05T10:19:00Z".to_string(),
+            patcher_sha256: "unknown".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert_eq!(unknown_v15_manifest.capabilities(), &[] as &[&str]);
+        assert!(!unknown_v15_manifest.is_character_slot_compatible());
+        assert!(!unknown_v15_manifest.is_visual_qol_compatible());
+        assert!(!unknown_v15_manifest.is_enhancement_queue_compatible());
+        assert!(!unknown_v15_manifest.is_enhancement_multilevel_compatible());
+
+        // 4. Rollback from v4.0.3 JAR to b18... remains recognized by the same new agent binary
+        let current_release = v403_r1_manifest;
+        let rollback_target = historical_b18_manifest;
+        assert_eq!(current_release.capabilities(), rollback_target.capabilities());
+        assert_eq!(
+            current_release.advertised_agent_version(),
+            rollback_target.advertised_agent_version()
+        );
     }
 
     #[test]

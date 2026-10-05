@@ -44,8 +44,9 @@ public final class PatchZeus {
         ClassWriter gcw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
         TickHook tick = new TickHook(gcw);
         gcr.accept(tick, 0);
-        if (!tick.hooked) {
-            throw new IllegalStateException("Main/GameCanvas.update()V: no RETURN found — refusing to write");
+        if (tick.targetMethodCount != 1 || tick.returnCount != 1) {
+            throw new IllegalStateException("Main/GameCanvas.update()V: expected exactly 1 method and 1 RETURN, found "
+                    + tick.targetMethodCount + " methods and " + tick.returnCount + " RETURNs — refusing to write");
         }
         writeClass(outDir, "Main/GameCanvas.class", gcw.toByteArray());
 
@@ -53,10 +54,11 @@ public final class PatchZeus {
         byte[] scBytes = readAll(zf.getInputStream(zf.getEntry("GameScreen/SelectCharScreen.class")));
         ClassReader scr = new ClassReader(scBytes);
         ClassWriter scw = new ClassWriter(0);
-        FieldWidener widenSelectChar = new FieldWidener(scw, "selectChar");
+        FieldWidener widenSelectChar = new FieldWidener(scw, "selectChar", "I");
         scr.accept(widenSelectChar, 0);
-        if (!widenSelectChar.widened) {
-            throw new IllegalStateException("GameScreen/SelectCharScreen.selectChar not found — refusing to write");
+        if (widenSelectChar.widenedCount != 1) {
+            throw new IllegalStateException("GameScreen/SelectCharScreen.selectChar:I expected exactly once, found "
+                    + widenSelectChar.widenedCount + " — refusing to write");
         }
         writeClass(outDir, "GameScreen/SelectCharScreen.class", scw.toByteArray());
 
@@ -64,10 +66,11 @@ public final class PatchZeus {
         byte[] mdBytes = readAll(zf.getInputStream(zf.getEntry("InterfaceComponents/MsgDialog.class")));
         ClassReader mdr = new ClassReader(mdBytes);
         ClassWriter mdw = new ClassWriter(0);
-        FieldWidener widenCmdList = new FieldWidener(mdw, "cmdList");
+        FieldWidener widenCmdList = new FieldWidener(mdw, "cmdList", "LCLib/mVector;");
         mdr.accept(widenCmdList, 0);
-        if (!widenCmdList.widened) {
-            throw new IllegalStateException("InterfaceComponents/MsgDialog.cmdList not found — refusing to write");
+        if (widenCmdList.widenedCount != 1) {
+            throw new IllegalStateException("InterfaceComponents/MsgDialog.cmdList:LCLib/mVector; expected exactly once, found "
+                    + widenCmdList.widenedCount + " — refusing to write");
         }
         writeClass(outDir, "InterfaceComponents/MsgDialog.class", mdw.toByteArray());
 
@@ -77,8 +80,9 @@ public final class PatchZeus {
         ClassWriter cmdw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
         SendHook sendHook = new SendHook(cmdw);
         cmdr.accept(sendHook, 0);
-        if (!sendHook.hooked) {
-            throw new IllegalStateException("netcommand/Cmd_Message.send()V not found — refusing to write");
+        if (sendHook.targetMethodCount != 1) {
+            throw new IllegalStateException("netcommand/Cmd_Message.send()V expected exactly 1 method, found "
+                    + sendHook.targetMethodCount + " — refusing to write");
         }
         writeClass(outDir, "netcommand/Cmd_Message.class", cmdw.toByteArray());
 
@@ -88,11 +92,13 @@ public final class PatchZeus {
         ClassWriter menuw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
         MenuHook menuHook = new MenuHook(menuw);
         menur.accept(menuHook, 0);
-        if (!menuHook.hooked) {
-            throw new IllegalStateException("Model/Menu2.startAt menu builder not found — refusing to write");
+        if (menuHook.localHookCount != 1) {
+            throw new IllegalStateException("Model/Menu2.startAt expected exactly 1 method, found "
+                    + menuHook.localHookCount + " — refusing to write");
         }
-        if (!menuHook.hookedServer) {
-            throw new IllegalStateException("Model/Menu2.setinfoDynamic server menu builder not found — refusing to write");
+        if (menuHook.serverHookCount != 1) {
+            throw new IllegalStateException("Model/Menu2.setinfoDynamic expected exactly 1 method, found "
+                    + menuHook.serverHookCount + " — refusing to write");
         }
         writeClass(outDir, "Model/Menu2.class", menuw.toByteArray());
 
@@ -102,8 +108,9 @@ public final class PatchZeus {
         ClassWriter gsw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
         PaintHook paintHook = new PaintHook(gsw);
         gsr.accept(paintHook, 0);
-        if (!paintHook.hooked) {
-            throw new IllegalStateException("GameScreen/GameScreen.paint(LCLib/mGraphics;)V not found — refusing to write");
+        if (paintHook.targetMethodCount != 1 || paintHook.returnCount != 1) {
+            throw new IllegalStateException("GameScreen/GameScreen.paint(LCLib/mGraphics;)V: expected exactly 1 method and 1 RETURN, found "
+                    + paintHook.targetMethodCount + " methods and " + paintHook.returnCount + " RETURNs — refusing to write");
         }
         writeClass(outDir, "GameScreen/GameScreen.class", gsw.toByteArray());
 
@@ -114,7 +121,8 @@ public final class PatchZeus {
 
     // ── GameCanvas.update() tick hook ───────────────────────────────────
     private static final class TickHook extends ClassAdapter {
-        boolean hooked = false;
+        int targetMethodCount = 0;
+        int returnCount = 0;
 
         TickHook(ClassWriter cw) {
             super(cw);
@@ -124,12 +132,13 @@ public final class PatchZeus {
                                          String signature, String[] exceptions) {
             MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
             if (mv != null && "update".equals(name) && "()V".equals(desc)) {
+                targetMethodCount++;
                 return new MethodAdapter(mv) {
                     public void visitInsn(int opcode) {
-                        if (opcode == Opcodes.RETURN && !hooked) {
+                        if (opcode == Opcodes.RETURN) {
+                            returnCount++;
                             visitMethodInsn(Opcodes.INVOKESTATIC,
                                     "Zeus", "tick", "()V");
-                            hooked = true;
                         }
                         super.visitInsn(opcode);
                     }
@@ -142,18 +151,24 @@ public final class PatchZeus {
     // ── Field widener (private/package-private -> public) ───────────────
     private static final class FieldWidener extends ClassAdapter {
         private final String targetName;
-        boolean widened = false;
+        private final String targetDesc;
+        int widenedCount = 0;
 
-        FieldWidener(ClassWriter cw, String name) {
+        FieldWidener(ClassWriter cw, String name, String desc) {
             super(cw);
             this.targetName = name;
+            this.targetDesc = desc;
         }
 
         public org.objectweb.asm.FieldVisitor visitField(int access, String name,
                 String desc, String signature, Object value) {
             if (targetName.equals(name)) {
+                if (!targetDesc.equals(desc)) {
+                    throw new IllegalStateException("field " + name + " found with unexpected descriptor: "
+                            + desc + " (expected " + targetDesc + ")");
+                }
                 access = (access & ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED)) | Opcodes.ACC_PUBLIC;
-                widened = true;
+                widenedCount++;
             }
             return super.visitField(access, name, desc, signature, value);
         }
@@ -161,7 +176,7 @@ public final class PatchZeus {
 
     // ── Send hook: Cmd_Message.send() ───────────────────────────────────
     private static final class SendHook extends ClassAdapter {
-        boolean hooked = false;
+        int targetMethodCount = 0;
 
         SendHook(ClassWriter cw) {
             super(cw);
@@ -173,7 +188,7 @@ public final class PatchZeus {
             if (mv == null || !"send".equals(name) || !"()V".equals(desc)) {
                 return mv;
             }
-            hooked = true;
+            targetMethodCount++;
             return new MethodAdapter(mv) {
                 public void visitCode() {
                     super.visitCode();
@@ -187,7 +202,8 @@ public final class PatchZeus {
 
     // ── Paint hook: GameScreen.paint(mGraphics) ─────────────────────────
     private static final class PaintHook extends ClassAdapter {
-        boolean hooked = false;
+        int targetMethodCount = 0;
+        int returnCount = 0;
 
         PaintHook(ClassWriter cw) {
             super(cw);
@@ -199,10 +215,11 @@ public final class PatchZeus {
             if (mv == null || !"paint".equals(name) || !"(LCLib/mGraphics;)V".equals(desc)) {
                 return mv;
             }
-            hooked = true;
+            targetMethodCount++;
             return new MethodAdapter(mv) {
                 public void visitInsn(int opcode) {
                     if (opcode == Opcodes.RETURN) {
+                        returnCount++;
                         visitVarInsn(Opcodes.ALOAD, 1);
                         visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "paint", "(LCLib/mGraphics;)V");
                     }
@@ -216,8 +233,8 @@ public final class PatchZeus {
     private static final class MenuHook extends ClassAdapter {
         private static final String LOCAL_DESC = "(LCLib/mVector;ILjava/lang/String;ZLCLib/mVector;)V";
         private static final String SERVER_DESC = "(LCLib/mVector;IIILjava/lang/String;)V";
-        boolean hooked = false;
-        boolean hookedServer = false;
+        int localHookCount = 0;
+        int serverHookCount = 0;
 
         MenuHook(ClassWriter cw) {
             super(cw);
@@ -230,7 +247,7 @@ public final class PatchZeus {
                 return mv;
             }
             if ("startAt".equals(name) && LOCAL_DESC.equals(desc)) {
-                hooked = true;
+                localHookCount++;
                 return new MethodAdapter(mv) {
                     public void visitCode() {
                         super.visitCode();
@@ -246,7 +263,7 @@ public final class PatchZeus {
                 };
             }
             if ("setinfoDynamic".equals(name) && SERVER_DESC.equals(desc)) {
-                hookedServer = true;
+                serverHookCount++;
                 return new MethodAdapter(mv) {
                     public void visitCode() {
                         super.visitCode();
