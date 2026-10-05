@@ -2,18 +2,19 @@
  * POTATO — local-only paint control for KnightOnline_402 (J2ME MIDlet).
  *
  * Owns exactly two things:
- *   1. Paint decoupled from tick. Vanilla com.silverknight.a.run() paints on
+ *   1. Paint decoupled from tick. Vanilla com.silverknight.TemCanvas.run() paints on
  *      every 40 ms iteration, so the only way to cut render cost was to
  *      lengthen the period — which also slowed game logic, and logic is what
  *      faces the server. Here the 40 ms period (25 Hz tick) is untouched and
  *      only painting is skipped.
- *   2. Draw accounting, so "lighter" is a measurement off bx — the single
+ *   2. Draw accounting, so "lighter" is a measurement off CLib.mGraphics — the single
  *      wrapper every draw passes through — not an estimate.
  *
  * Sends no packet, reads no packet, draws no RNG, and is unreachable from any
  * network handler. doRepaint is called from the canvas loop once per tick.
  */
 import javax.microedition.lcdui.Canvas;
+import Main.GameCanvas;
 
 public final class POTATO {
     /** paint 1 of every N ticks; 1 = vanilla, 0 = never paint. */
@@ -66,8 +67,8 @@ public final class POTATO {
      *
      * A set bit SKIPS that layer, so 0 is vanilla. Bits are assigned in
      * tools/PatchLayers.java, which injects the call site:
-     *   1 = ey.a(bx)  minimap
-     *   2 = br.a(bx)  effects
+     *   1 = Thread_More.MiniMap.paint(mGraphics)     minimap
+     *   2 = Model.EffectManager.paintAll(mGraphics)  effects
      */
     public static int layerMask = 0;
     /** layer draws skipped; surfaced in the report so gating is visible. */
@@ -130,7 +131,7 @@ public final class POTATO {
         return fallback;
     }
 
-    /** Called by bx on every primitive that reaches Graphics. */
+    /** Called by CLib.mGraphics on every primitive that reaches Graphics. */
     public static void countDraw() {
         ++draws;
     }
@@ -250,11 +251,9 @@ public final class POTATO {
      *
      * Guard: some vanilla logic lives inside the draw path, so paint cannot be
      * dropped unconditionally — not even at paintEvery 0, which is why the
-     * guard is checked before the never-paint case. cf.i(bx) advances the
-     * map-19/67 cutscene and ends it through n.b().c(); eq.a(bx) advances
-     * character-select animation. Both run only from a draw call, so those
-     * states keep painting regardless of paintEvery. Verified in
-     * mod/src_decomp/cf.java:1858 and mod/src_decomp/eq.java:158.
+     * guard is checked before the never-paint case. PaintInfoGameScreen advances the
+     * map-19/67 cutscene; SelectCharScreen advances character-select animation.
+     * Both run only from a draw call, so those states keep painting regardless of paintEvery.
      */
     public static boolean shouldPaint() {
         if (paintEvery == 1) {
@@ -271,11 +270,11 @@ public final class POTATO {
 
     private static boolean mustPaint() {
         try {
-            if (fu.a != fu.c) {
+            if (GameCanvas.currentScreen != GameCanvas.game) {
                 return true;    // any screen other than the game scene
             }
-            if (fu.q != null && (fu.q.d == 19 || fu.q.d == 67)) {
-                return true;    // cutscene advanced from cf.i(bx)
+            if (GameCanvas.loadmap != null && (GameCanvas.loadmap.idMap == 19 || GameCanvas.loadmap.idMap == 67)) {
+                return true;    // cutscene advanced from paint
             }
         } catch (Throwable t) {
             return true;        // never trade a stall for a saved frame
@@ -312,10 +311,10 @@ public final class POTATO {
     /** Coarse screen label, so the report is readable with no display. */
     private static String screenId() {
         try {
-            if (fu.a == fu.c) {
+            if (GameCanvas.currentScreen == GameCanvas.game) {
                 return "game";
             }
-            if (fu.a == fu.b) {
+            if (GameCanvas.currentScreen == GameCanvas.login) {
                 return "login";
             }
             return "other";

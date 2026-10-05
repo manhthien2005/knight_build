@@ -872,6 +872,28 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
             JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
         ],
     },
+    RuntimeContract {
+        name: "V403_CORE_R1",
+        jar_sha256: JarManifest::V403_CORE_R1_COMPATIBLE_JAR_SHA256,
+        ctl_version: 15,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+            JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+            JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
+        ],
+    },
+    RuntimeContract {
+        name: "V403_BACH_HO_R2_ZEUS_ONLY",
+        jar_sha256: JarManifest::V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256,
+        ctl_version: 15,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+            JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+            JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
+        ],
+    },
 ];
 
 impl JarManifest {
@@ -881,6 +903,7 @@ impl JarManifest {
     pub const ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN: &'static str = "enhancement-multilevel-v1";
     pub const ENHANCEMENT_QUEUE_V2_CAPABILITY_TOKEN: &'static str = "enhancement-queue-v2";
     pub const ENHANCEMENT_DEGRADE_RETRY_CAPABILITY_TOKEN: &'static str = "enhancement-degrade-retry-v1";
+    pub const MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN: &'static str = "managed-identity-restart-v1";
 
     /// Proves that this compiled Rust binary implements the 06F per-level continuation orchestrator.
     pub const RUST_ORCHESTRATOR_SUPPORTS_MULTILEVEL: bool = true;
@@ -888,6 +911,8 @@ impl JarManifest {
     pub const RUST_ORCHESTRATOR_SUPPORTS_QUEUE_V2: bool = true;
     /// Proves that this compiled Rust binary implements the 06H5 degrade-retry orchestrator with attempt cap.
     pub const RUST_ORCHESTRATOR_SUPPORTS_DEGRADE_RETRY: bool = true;
+    /// Proves that this compiled Rust binary implements managed identity restart independently of Java JAR.
+    pub const RUST_SUPPORTS_MANAGED_IDENTITY_RESTART: bool = true;
 
     pub const CHARACTER_SLOT_COMPATIBLE_JAR_SHA256: &'static str =
         "0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd";
@@ -917,6 +942,10 @@ impl JarManifest {
         "3999f6b674c1780ac3f26d47ad035f5a2d749ef38cea5b256dcd8e1aec3c3504";
     pub const AUTO_DUNGEON_COMPATIBLE_JAR_SHA256: &'static str =
         "b18baf702ee119c1d950f1ab13ba67d87b9768eb8305d02bc8268980850a8091";
+    pub const V403_CORE_R1_COMPATIBLE_JAR_SHA256: &'static str =
+        "bd15eea2a6cb8c33f6868262aa8044572db2efbce8570aa679a98ace6068c918";
+    pub const V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256: &'static str =
+        "4009f070808d72bde555b7763d9c9e2924e9385a62ac1a96494d71cc3c4b657d";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -993,6 +1022,7 @@ impl JarManifest {
                     || token == Self::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN
                     || token == Self::ENHANCEMENT_QUEUE_V2_CAPABILITY_TOKEN
                     || token == Self::ENHANCEMENT_DEGRADE_RETRY_CAPABILITY_TOKEN
+                    || token == Self::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN
                 {
                     continue;
                 }
@@ -1031,6 +1061,11 @@ impl JarManifest {
             && !tokens.contains(&Self::ENHANCEMENT_DEGRADE_RETRY_CAPABILITY_TOKEN)
         {
             tokens.push(Self::ENHANCEMENT_DEGRADE_RETRY_CAPABILITY_TOKEN);
+        }
+        if Self::RUST_SUPPORTS_MANAGED_IDENTITY_RESTART
+            && !tokens.contains(&Self::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN)
+        {
+            tokens.push(Self::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN);
         }
 
         if tokens.is_empty() {
@@ -1569,6 +1604,16 @@ pub struct AccountSnapshot {
     pub retiring: bool,
 }
 
+/// Strictly parses and validates a server index against zeus_core::SERVER_COUNT (9).
+/// Rejects negative numbers and values >= SERVER_COUNT (9..). Never clamps.
+pub fn parse_strict_server_index(raw: i64) -> Result<u8, &'static str> {
+    if (0..zeus_core::SERVER_COUNT as i64).contains(&raw) {
+        Ok(raw as u8)
+    } else {
+        Err("server_index out of range (must be 0..8)")
+    }
+}
+
 impl AccountSnapshot {
     /// Merges fresh cloud fields into self, strictly preserving local runtime state.
     /// A retiring account is monotonic and must never be updated or resurrected.
@@ -1577,7 +1622,7 @@ impl AccountSnapshot {
             return;
         }
         self.username = fresh.username.clone();
-        self.server_index = (fresh.server_index as i32).clamp(0, 7) as u8;
+        self.server_index = parse_strict_server_index(fresh.server_index as i64).unwrap_or(255);
         self.secret_sealed = fresh.secret_sealed.clone();
         self.desired_state = fresh.desired_state.clone();
         self.control_version = fresh.control_version;
@@ -1603,7 +1648,7 @@ impl AccountSnapshot {
             id: row.id.clone(),
             slot_index: row.slot_index,
             username: row.username.clone(),
-            server_index: (row.server_index as i32).clamp(0, 7) as u8,
+            server_index: parse_strict_server_index(row.server_index as i64).unwrap_or(255),
             secret_sealed: row.secret_sealed.clone(),
             desired_state: row.desired_state.clone(),
             control_version: row.control_version,
@@ -1612,6 +1657,122 @@ impl AccountSnapshot {
             live_process_pid: None,
             retiring: false,
         }
+    }
+}
+
+/// JVM-startup identity fields defining managed runtime credentials and immutable server target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedIdentity {
+    pub server_index: u8,
+    pub username: String,
+    pub secret_sealed: serde_json::Value,
+}
+
+impl ManagedIdentity {
+    pub fn new(server_index: u8, username: impl Into<String>, secret_sealed: serde_json::Value) -> Self {
+        Self {
+            server_index,
+            username: username.into(),
+            secret_sealed,
+        }
+    }
+
+    pub fn from_snapshot(snap: &AccountSnapshot) -> Self {
+        Self {
+            server_index: snap.server_index,
+            username: snap.username.clone(),
+            secret_sealed: snap.secret_sealed.clone(),
+        }
+    }
+
+    pub fn has_changed_from(
+        &self,
+        target_server: u8,
+        target_username: &str,
+        target_sealed: &serde_json::Value,
+    ) -> bool {
+        self.server_index != target_server
+            || self.username != target_username
+            || &self.secret_sealed != target_sealed
+    }
+}
+
+/// Action determined by evaluating incoming cloud AccountChanged against current account state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityChangeAction {
+    /// Server index was invalid (<0 or >=SERVER_COUNT); rejected, no state change, no restart.
+    RejectInvalidServerIndex { raw_index: i64 },
+    /// No identity field changed (e.g. control-only, config-only, or identical identity fields).
+    NoIdentityChange,
+    /// Identity changed, but no running process was alive; state updated directly, normal reconcile.
+    ApplyWithoutRestart {
+        target_server: u8,
+        target_username: String,
+        target_sealed: serde_json::Value,
+    },
+    /// Identity changed while running process was alive; must stop running process before applying replacement.
+    StopRunningProcessForReplacement {
+        old_identity: ManagedIdentity,
+        target_server: u8,
+        target_username: String,
+        target_sealed: serde_json::Value,
+    },
+}
+
+/// Evaluates incoming account change intent against current managed identity and process state.
+pub fn evaluate_account_change_intent(
+    current_identity: &ManagedIdentity,
+    is_process_alive: bool,
+    incoming_server_index_raw: Option<i64>,
+    incoming_username: Option<&str>,
+    incoming_secret_sealed: Option<&serde_json::Value>,
+) -> IdentityChangeAction {
+    let target_server = if let Some(raw_si) = incoming_server_index_raw {
+        match parse_strict_server_index(raw_si) {
+            Ok(si) => si,
+            Err(_) => return IdentityChangeAction::RejectInvalidServerIndex { raw_index: raw_si },
+        }
+    } else {
+        current_identity.server_index
+    };
+
+    let target_un = incoming_username.unwrap_or(&current_identity.username);
+    let target_sealed = incoming_secret_sealed.unwrap_or(&current_identity.secret_sealed);
+
+    if !current_identity.has_changed_from(target_server, target_un, target_sealed) {
+        return IdentityChangeAction::NoIdentityChange;
+    }
+
+    if is_process_alive {
+        IdentityChangeAction::StopRunningProcessForReplacement {
+            old_identity: current_identity.clone(),
+            target_server,
+            target_username: target_un.to_string(),
+            target_sealed: target_sealed.clone(),
+        }
+    } else {
+        IdentityChangeAction::ApplyWithoutRestart {
+            target_server,
+            target_username: target_un.to_string(),
+            target_sealed: target_sealed.clone(),
+        }
+    }
+}
+
+/// Resolution of a stop attempt during a managed identity replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementStopResolution {
+    /// Old process stopped successfully; proceed with RMS clear, identity update, and new launch.
+    ProceedWithReplacement,
+    /// Old process failed to stop; retain process handle, do NOT reseed RMS, do NOT launch second JVM.
+    AbortRetainProcess,
+}
+
+/// Evaluates whether an identity replacement may proceed based on the stop transition outcome.
+pub fn evaluate_replacement_stop(transition: StopTransition) -> ReplacementStopResolution {
+    match transition {
+        StopTransition::ConfirmedStopped => ReplacementStopResolution::ProceedWithReplacement,
+        StopTransition::FailedStillAlive => ReplacementStopResolution::AbortRetainProcess,
     }
 }
 
@@ -3444,7 +3605,8 @@ mod tests {
         // 1. Valid compatible JAR does advertise capability with the stable token
         assert!(compatible_manifest.is_character_slot_compatible());
         let advertised = compatible_manifest.advertised_agent_version();
-        assert_eq!(advertised, "0.1.0+character-slot-v1");
+        assert_eq!(advertised, "0.1.0+character-slot-v1.managed-identity-restart-v1");
+        assert!(advertised.contains(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN));
         assert!(advertised.contains(JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN));
 
         // 2. Old runtime JAR SHA (5048b590...) lacks the capability
@@ -3461,7 +3623,8 @@ mod tests {
         };
         assert!(!old_manifest.is_character_slot_compatible());
         let old_advertised = old_manifest.advertised_agent_version();
-        assert_eq!(old_advertised, "0.1.0");
+        assert_eq!(old_advertised, "0.1.0+managed-identity-restart-v1");
+        assert!(old_advertised.contains(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN));
         assert!(!old_advertised.contains(JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN));
 
         // 3. Invalid JAR SHA does not advertise capability
@@ -3479,7 +3642,8 @@ mod tests {
         // 5. No duplicate token across repeated announcements (deterministic)
         let mut already_advertised = compatible_manifest.clone();
         already_advertised.agent_version = "0.1.0+character-slot-v1".to_string();
-        assert_eq!(already_advertised.advertised_agent_version(), "0.1.0+character-slot-v1");
+        assert_eq!(already_advertised.advertised_agent_version(), "0.1.0+character-slot-v1.managed-identity-restart-v1");
+        assert_eq!(already_advertised.advertised_agent_version().matches(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN).count(), 1);
         assert_eq!(already_advertised.advertised_agent_version().matches(JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN).count(), 1);
 
         // 6. devices PATCH payload uses ONLY existing columns and preserves jar_sha256
@@ -3494,12 +3658,12 @@ mod tests {
             assert!(allowed_columns.contains(&key.as_str()), "Key {key} is not an existing devices column");
         }
         assert_eq!(patch_obj.get("jar_sha256").and_then(|v| v.as_str()), Some("0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd"));
-        assert_eq!(patch_obj.get("agent_version").and_then(|v| v.as_str()), Some("0.1.0+character-slot-v1"));
+        assert_eq!(patch_obj.get("agent_version").and_then(|v| v.as_str()), Some("0.1.0+character-slot-v1.managed-identity-restart-v1"));
         assert_eq!(patch_obj.get("status").and_then(|v| v.as_str()), Some("online"));
 
         // 7. Test loading actual repository zeus-jar.json
         if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
-            assert_eq!(loaded_manifest.jar_sha256, JarManifest::AUTO_DUNGEON_COMPATIBLE_JAR_SHA256);
+            assert_eq!(loaded_manifest.jar_sha256, JarManifest::V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256);
             assert_eq!(loaded_manifest.ctl_version, 15);
             assert_eq!(loaded_manifest.ctl_key_count, 38);
             assert!(loaded_manifest.is_character_slot_compatible());
@@ -3508,8 +3672,115 @@ mod tests {
             assert!(loaded_manifest.is_enhancement_multilevel_compatible());
             assert!(loaded_manifest.is_enhancement_queue_v2_compatible());
             assert!(loaded_manifest.is_enhancement_degrade_retry_compatible());
-            assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1");
+            assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1.managed-identity-restart-v1");
         }
+    }
+
+    #[test]
+    fn test_v403_core_r1_and_historical_runtime_contract_resolution() {
+        // 1. Manifest for historical b18... JAR still resolves expected capabilities
+        let historical_b18_manifest = JarManifest {
+            jar_sha256: JarManifest::AUTO_DUNGEON_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1168097,
+            ctl_version: 15,
+            snapshot_version: 6,
+            ctl_key_count: 38,
+            snapshot_key_count: 49,
+            built_at: "2026-10-03T18:00:00Z".to_string(),
+            patcher_sha256: "historical".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert_eq!(
+            historical_b18_manifest.capabilities(),
+            &[
+                JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+                JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
+            ]
+        );
+        assert!(historical_b18_manifest.is_character_slot_compatible());
+        assert!(historical_b18_manifest.is_visual_qol_compatible());
+        assert!(historical_b18_manifest.is_enhancement_queue_compatible());
+        assert!(historical_b18_manifest.is_enhancement_multilevel_compatible());
+
+        // 2. Manifest for historical v4.0.3 R1 JAR resolves expected capabilities
+        let v403_r1_manifest = JarManifest {
+            jar_sha256: JarManifest::V403_CORE_R1_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1548397,
+            ctl_version: 15,
+            snapshot_version: 6,
+            ctl_key_count: 38,
+            snapshot_key_count: 49,
+            built_at: "2026-10-05T10:19:00Z".to_string(),
+            patcher_sha256: "v403".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert_eq!(
+            v403_r1_manifest.capabilities(),
+            &[
+                JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+                JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
+            ]
+        );
+        assert!(v403_r1_manifest.is_character_slot_compatible());
+        assert!(v403_r1_manifest.is_visual_qol_compatible());
+        assert!(v403_r1_manifest.is_enhancement_queue_compatible());
+        assert!(v403_r1_manifest.is_enhancement_multilevel_compatible());
+
+        // 3. Manifest for new v4.0.3 Bạch Hổ R2 Zeus-only JAR resolves expected capabilities
+        let v403_r2_manifest = JarManifest {
+            jar_sha256: JarManifest::V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1545033,
+            ctl_version: 15,
+            snapshot_version: 6,
+            ctl_key_count: 38,
+            snapshot_key_count: 49,
+            built_at: "2026-10-05T11:24:00Z".to_string(),
+            patcher_sha256: "293d9a8d2f28a6ebc7801a5f9f467a1b1850004172727b54b84f029dacd226a7".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert_eq!(
+            v403_r2_manifest.capabilities(),
+            &[
+                JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+                JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+                JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
+            ]
+        );
+        assert!(v403_r2_manifest.is_character_slot_compatible());
+        assert!(v403_r2_manifest.is_visual_qol_compatible());
+        assert!(v403_r2_manifest.is_enhancement_queue_compatible());
+        assert!(v403_r2_manifest.is_enhancement_multilevel_compatible());
+
+        // 4. An unknown SHA with ctl_version=15 resolves no capabilities
+        let unknown_v15_manifest = JarManifest {
+            jar_sha256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            jar_size: 1548397,
+            ctl_version: 15,
+            snapshot_version: 6,
+            ctl_key_count: 38,
+            snapshot_key_count: 49,
+            built_at: "2026-10-05T10:19:00Z".to_string(),
+            patcher_sha256: "unknown".to_string(),
+            agent_version: "".to_string(),
+        };
+        assert_eq!(unknown_v15_manifest.capabilities(), &[] as &[&str]);
+        assert!(!unknown_v15_manifest.is_character_slot_compatible());
+        assert!(!unknown_v15_manifest.is_visual_qol_compatible());
+        assert!(!unknown_v15_manifest.is_enhancement_queue_compatible());
+        assert!(!unknown_v15_manifest.is_enhancement_multilevel_compatible());
+
+        // 5. Compatibility / Rollback across releases remains recognized
+        assert_eq!(v403_r2_manifest.capabilities(), v403_r1_manifest.capabilities());
+        assert_eq!(v403_r2_manifest.capabilities(), historical_b18_manifest.capabilities());
+        assert_eq!(
+            v403_r2_manifest.advertised_agent_version(),
+            historical_b18_manifest.advertised_agent_version()
+        );
     }
 
     #[test]
@@ -3530,7 +3801,7 @@ mod tests {
         assert!(v14_manifest.is_character_slot_compatible());
         assert_eq!(
             v14_manifest.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 1b. Inventory Catalog v14 JAR also advertises both tokens and neither advertises enhancement-queue-v1
@@ -3549,7 +3820,7 @@ mod tests {
         assert!(inventory_manifest.is_character_slot_compatible());
         assert_eq!(
             inventory_manifest.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
         assert!(!inventory_manifest.advertised_agent_version().contains("enhancement-queue"));
 
@@ -3569,7 +3840,7 @@ mod tests {
         assert!(enhancement_manifest.is_character_slot_compatible());
         assert_eq!(
             enhancement_manifest.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
         assert!(!enhancement_manifest.advertised_agent_version().contains("enhancement-queue"));
 
@@ -3589,7 +3860,7 @@ mod tests {
         assert!(!v13_manifest.is_visual_qol_compatible());
         assert_eq!(
             v13_manifest.advertised_agent_version(),
-            "0.1.0+character-slot-v1"
+            "0.1.0+character-slot-v1.managed-identity-restart-v1"
         );
         assert!(!v13_manifest.advertised_agent_version().contains("visual-qol-v1"));
 
@@ -3607,14 +3878,14 @@ mod tests {
         };
         assert!(!unknown_manifest.is_character_slot_compatible());
         assert!(!unknown_manifest.is_visual_qol_compatible());
-        assert_eq!(unknown_manifest.advertised_agent_version(), "0.1.0");
+        assert_eq!(unknown_manifest.advertised_agent_version(), "0.1.0+managed-identity-restart-v1");
 
         // 4. Deterministic multi-token serialization without duplicate tokens
         let mut already_advertised = v14_manifest.clone();
         already_advertised.agent_version = "0.1.0+visual-qol-v1.character-slot-v1".to_string();
         assert_eq!(
             already_advertised.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
         assert_eq!(
             already_advertised.advertised_agent_version().matches("character-slot-v1").count(),
@@ -3622,6 +3893,10 @@ mod tests {
         );
         assert_eq!(
             already_advertised.advertised_agent_version().matches("visual-qol-v1").count(),
+            1
+        );
+        assert_eq!(
+            already_advertised.advertised_agent_version().matches("managed-identity-restart-v1").count(),
             1
         );
     }
@@ -3641,7 +3916,7 @@ mod tests {
         };
         assert!(manifest_180a.is_character_slot_compatible(), "180a must be character-slot compatible");
         assert!(manifest_180a.is_visual_qol_compatible(), "180a must be visual-qol compatible");
-        assert_eq!(manifest_180a.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_180a.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
         assert!(!manifest_180a.capabilities().contains(&"enhancement-queue-v1"));
 
         let manifest_final = JarManifest {
@@ -3657,7 +3932,7 @@ mod tests {
         };
         assert!(manifest_final.is_character_slot_compatible(), "final must be character-slot compatible");
         assert!(manifest_final.is_visual_qol_compatible(), "final must be visual-qol compatible");
-        assert_eq!(manifest_final.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_final.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
         assert!(!manifest_final.capabilities().contains(&"enhancement-queue-v1"));
 
         let manifest_dry_run = JarManifest {
@@ -3673,7 +3948,7 @@ mod tests {
         };
         assert!(manifest_dry_run.is_character_slot_compatible(), "dry_run must be character-slot compatible");
         assert!(manifest_dry_run.is_visual_qol_compatible(), "dry_run must be visual-qol compatible");
-        assert_eq!(manifest_dry_run.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_dry_run.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
         assert!(!manifest_dry_run.capabilities().contains(&"enhancement-queue-v1"));
 
         let manifest_corrective = JarManifest {
@@ -3689,7 +3964,7 @@ mod tests {
         };
         assert!(manifest_corrective.is_character_slot_compatible(), "corrective must be character-slot compatible");
         assert!(manifest_corrective.is_visual_qol_compatible(), "corrective must be visual-qol compatible");
-        assert_eq!(manifest_corrective.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_corrective.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
         assert!(!manifest_corrective.capabilities().contains(&"enhancement-queue-v1"));
 
         let manifest_dialog_corrective = JarManifest {
@@ -3705,7 +3980,7 @@ mod tests {
         };
         assert!(manifest_dialog_corrective.is_character_slot_compatible(), "dialog_corrective must be character-slot compatible");
         assert!(manifest_dialog_corrective.is_visual_qol_compatible(), "dialog_corrective must be visual-qol compatible");
-        assert_eq!(manifest_dialog_corrective.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_dialog_corrective.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
         assert!(!manifest_dialog_corrective.capabilities().contains(&"enhancement-queue-v1"));
 
         let manifest_dialog_owned = JarManifest {
@@ -3723,7 +3998,7 @@ mod tests {
         assert!(manifest_dialog_owned.is_visual_qol_compatible(), "dialog_owned must be visual-qol compatible");
         assert!(!manifest_dialog_owned.is_enhancement_queue_compatible(), "old 5b8 JAR must NOT be enhancement-queue compatible");
         assert!(!manifest_dialog_owned.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
-        assert_eq!(manifest_dialog_owned.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_dialog_owned.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
 
         let manifest_reconciled = JarManifest {
             jar_sha256: "dc6a6548df170c7e674fbb1a27e8a4b1dbff805ac07ec81c3c23b67105b93e6c".to_string(),
@@ -3740,7 +4015,7 @@ mod tests {
         assert!(manifest_reconciled.is_visual_qol_compatible(), "reconciled must be visual-qol compatible");
         assert!(!manifest_reconciled.is_enhancement_queue_compatible(), "defective dc6a must NOT be enhancement-queue compatible");
         assert!(!manifest_reconciled.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
-        assert_eq!(manifest_reconciled.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_reconciled.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
 
         let manifest_monotonic = JarManifest {
             jar_sha256: "bdd40df18f29603f99402488b5d84c7c8c8dd87dfe6fd5e123fe13d6e0cf0919".to_string(),
@@ -3756,7 +4031,7 @@ mod tests {
         assert!(manifest_monotonic.is_character_slot_compatible(), "monotonic must be character-slot compatible");
         assert!(manifest_monotonic.is_visual_qol_compatible(), "monotonic must be visual-qol compatible");
         assert!(!manifest_monotonic.is_enhancement_queue_compatible(), "old monotonic must not be enhancement-queue compatible under new agent");
-        assert_eq!(manifest_monotonic.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_monotonic.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
 
         let manifest_resilient = JarManifest {
             jar_sha256: "3999f6b674c1780ac3f26d47ad035f5a2d749ef38cea5b256dcd8e1aec3c3504".to_string(),
@@ -3777,7 +4052,7 @@ mod tests {
         assert!(manifest_resilient.is_enhancement_degrade_retry_compatible(), "resilient must be enhancement-degrade-retry compatible");
         assert!(manifest_resilient.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
         assert!(manifest_resilient.capabilities().contains(&JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN));
-        assert_eq!(manifest_resilient.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1");
+        assert_eq!(manifest_resilient.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1.managed-identity-restart-v1");
 
         // Unknown JAR must fail closed
         let unknown = JarManifest {
@@ -3795,7 +4070,7 @@ mod tests {
         assert!(!unknown.is_character_slot_compatible());
         assert!(!unknown.is_visual_qol_compatible());
         assert!(!unknown.is_enhancement_queue_compatible());
-        assert_eq!(unknown.advertised_agent_version(), "0.1.0");
+        assert_eq!(unknown.advertised_agent_version(), "0.1.0+managed-identity-restart-v1");
     }
 
     #[test]
@@ -3829,7 +4104,7 @@ mod tests {
         );
         assert_eq!(
             manifest_resilient.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1.managed-identity-restart-v1"
         );
 
         // 0a. Old monotonic bdd40d JAR must NO LONGER receive enhancement-queue-v1 under the new agent
@@ -3856,7 +4131,7 @@ mod tests {
         );
         assert_eq!(
             manifest_monotonic.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 0b. Defective dc6a65 JAR must NO LONGER receive enhancement-queue-v1 under the new agent
@@ -3883,7 +4158,7 @@ mod tests {
         );
         assert_eq!(
             manifest_dc6.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 1. Old 5b8 JAR must NO LONGER advertise enhancement-queue-v1
@@ -3910,7 +4185,7 @@ mod tests {
         );
         assert_eq!(
             manifest_5b8.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 2. 99479d does not get enhancement-queue-v1
@@ -3930,7 +4205,7 @@ mod tests {
         assert!(!manifest_994.is_enhancement_queue_compatible());
         assert_eq!(
             manifest_994.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 3. 17fd2775 does not get enhancement-queue-v1
@@ -3950,7 +4225,7 @@ mod tests {
         assert!(!manifest_17fd.is_enhancement_queue_compatible());
         assert_eq!(
             manifest_17fd.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 4. Unknown JAR fails closed
@@ -3967,14 +4242,14 @@ mod tests {
         };
         assert_eq!(unknown.capabilities().len(), 0);
         assert!(!unknown.is_enhancement_queue_compatible());
-        assert_eq!(unknown.advertised_agent_version(), "0.1.0");
+        assert_eq!(unknown.advertised_agent_version(), "0.1.0+managed-identity-restart-v1");
 
         // 5. Deterministic token order preserved when metadata already had tokens in different order
         let mut disordered = manifest_resilient.clone();
         disordered.agent_version = "0.1.0+visual-qol-v1.enhancement-multilevel-v1.enhancement-queue-v1.character-slot-v1".to_string();
         assert_eq!(
             disordered.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1.managed-identity-restart-v1"
         );
         assert_eq!(disordered.advertised_agent_version().matches("enhancement-queue-v1").count(), 1);
         assert_eq!(disordered.advertised_agent_version().matches("enhancement-queue-v2").count(), 1);
@@ -3982,6 +4257,7 @@ mod tests {
         assert_eq!(disordered.advertised_agent_version().matches("enhancement-multilevel-v1").count(), 1);
         assert_eq!(disordered.advertised_agent_version().matches("character-slot-v1").count(), 1);
         assert_eq!(disordered.advertised_agent_version().matches("visual-qol-v1").count(), 1);
+        assert_eq!(disordered.advertised_agent_version().matches("managed-identity-restart-v1").count(), 1);
     }
 
     #[test]
@@ -4010,7 +4286,7 @@ mod tests {
         assert!(manifest_resilient.capabilities().contains(&JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN));
         assert_eq!(
             manifest_resilient.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1.managed-identity-restart-v1"
         );
 
         // 2. Modeled old agent contract (pre-06F 8f720fb) does NOT advertise enhancement-multilevel-v1
@@ -4132,6 +4408,293 @@ mod tests {
         let old_f205947_version = "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2";
         assert!(!old_f205947_version.contains("enhancement-degrade-retry-v1"));
     }
+
+    #[test]
+    fn test_server_index_bounds_allow_dense_0_through_8_and_fail_closed_overflow() {
+        for expected_id in 0..=8u8 {
+            let row = AccountRow {
+                id: format!("acc-{expected_id}"),
+                slot_index: 0,
+                label: "Acc".to_string(),
+                username: "user".to_string(),
+                secret_sealed: serde_json::json!({}),
+                server_index: expected_id as i16,
+                desired_state: "stopped".to_string(),
+                control_version: 1,
+                control: serde_json::json!({}),
+                config_version: 1,
+                runtime: serde_json::json!({}),
+                character_slot: 1,
+            };
+            let snap = AccountSnapshot::from_row(&row);
+            assert_eq!(snap.server_index, expected_id);
+
+            let mut snap_merge = AccountSnapshot {
+                id: format!("acc-{expected_id}"),
+                slot_index: 0,
+                username: "user".to_string(),
+                server_index: 0,
+                secret_sealed: serde_json::json!({}),
+                desired_state: "stopped".to_string(),
+                control_version: 1,
+                control: serde_json::json!({}),
+                config_version: 1,
+                live_process_pid: None,
+                retiring: false,
+            };
+            snap_merge.merge_cloud_fields(&row);
+            assert_eq!(snap_merge.server_index, expected_id);
+        }
+
+        // Out-of-bounds index (e.g. -1, 9, 99, 255) must fail closed to 255 and NEVER clamp/reinterpret to 8
+        for invalid_id in [-1i16, 9, 99, 255] {
+            let row_overflow = AccountRow {
+                id: format!("acc-overflow-{invalid_id}"),
+                slot_index: 0,
+                label: "Acc Overflow".to_string(),
+                username: "user".to_string(),
+                secret_sealed: serde_json::json!({}),
+                server_index: invalid_id,
+                desired_state: "stopped".to_string(),
+                control_version: 1,
+                control: serde_json::json!({}),
+                config_version: 1,
+                runtime: serde_json::json!({}),
+                character_slot: 1,
+            };
+            let snap_overflow = AccountSnapshot::from_row(&row_overflow);
+            assert_eq!(snap_overflow.server_index, 255);
+            assert_ne!(snap_overflow.server_index, 8, "out of bounds must never clamp to 8");
+
+            let mut snap_merge_overflow = snap_overflow.clone();
+            let mut row_high = row_overflow.clone();
+            row_high.server_index = invalid_id;
+            snap_merge_overflow.merge_cloud_fields(&row_high);
+            assert_eq!(snap_merge_overflow.server_index, 255);
+            assert_ne!(snap_merge_overflow.server_index, 8, "out of bounds must never clamp to 8");
+        }
+    }
+
+    #[test]
+    fn test_parse_strict_server_index_validation() {
+        // Valid indices
+        assert_eq!(parse_strict_server_index(0), Ok(0));
+        assert_eq!(parse_strict_server_index(7), Ok(7));
+        assert_eq!(parse_strict_server_index(8), Ok(8));
+
+        // Invalid indices: must fail closed, never clamp
+        assert!(parse_strict_server_index(-1).is_err());
+        assert!(parse_strict_server_index(9).is_err());
+        assert!(parse_strict_server_index(99).is_err());
+        assert!(parse_strict_server_index(255).is_err());
+    }
+
+    #[test]
+    fn test_managed_identity_change_detection() {
+        let sealed_a = serde_json::json!({"alg": "aes-gcm", "ct": "aaa"});
+        let sealed_b = serde_json::json!({"alg": "aes-gcm", "ct": "bbb"});
+
+        let identity = ManagedIdentity::new(6, "user_alpha", sealed_a.clone());
+
+        // 1. same server + same username + same sealed secret -> identity_changed false
+        assert!(
+            !identity.has_changed_from(6, "user_alpha", &sealed_a),
+            "same identity must not report change"
+        );
+
+        // 2. server 6 -> 8 -> true
+        assert!(
+            identity.has_changed_from(8, "user_alpha", &sealed_a),
+            "server 6 -> 8 must report change"
+        );
+
+        // 3. server 8 -> 6 -> true
+        let identity_8 = ManagedIdentity::new(8, "user_alpha", sealed_a.clone());
+        assert!(
+            identity_8.has_changed_from(6, "user_alpha", &sealed_a),
+            "server 8 -> 6 must report change"
+        );
+
+        // 4. username changed -> true
+        assert!(
+            identity.has_changed_from(6, "user_beta", &sealed_a),
+            "username changed must report change"
+        );
+
+        // 5. secret_sealed changed -> true
+        assert!(
+            identity.has_changed_from(6, "user_alpha", &sealed_b),
+            "secret_sealed changed must report change"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_account_change_intent_permutations() {
+        let sealed = serde_json::json!({"k": "v"});
+        let id = ManagedIdentity::new(6, "user_a", sealed.clone());
+
+        // Control-only update -> NoIdentityChange
+        let action = evaluate_account_change_intent(&id, true, None, None, None);
+        assert_eq!(action, IdentityChangeAction::NoIdentityChange);
+
+        // Explicit identical fields -> NoIdentityChange
+        let action = evaluate_account_change_intent(
+            &id,
+            true,
+            Some(6),
+            Some("user_a"),
+            Some(&sealed),
+        );
+        assert_eq!(action, IdentityChangeAction::NoIdentityChange);
+
+        // Server index 9 or negative -> RejectInvalidServerIndex (fail closed, never clamp)
+        let action_neg = evaluate_account_change_intent(&id, true, Some(-1), None, None);
+        assert_eq!(
+            action_neg,
+            IdentityChangeAction::RejectInvalidServerIndex { raw_index: -1 }
+        );
+        let action_9 = evaluate_account_change_intent(&id, true, Some(9), None, None);
+        assert_eq!(
+            action_9,
+            IdentityChangeAction::RejectInvalidServerIndex { raw_index: 9 }
+        );
+        let action_255 = evaluate_account_change_intent(&id, true, Some(255), None, None);
+        assert_eq!(
+            action_255,
+            IdentityChangeAction::RejectInvalidServerIndex { raw_index: 255 }
+        );
+
+        // Server changed 6 -> 8 while process is alive -> StopRunningProcessForReplacement
+        let action_server_live = evaluate_account_change_intent(&id, true, Some(8), None, None);
+        match action_server_live {
+            IdentityChangeAction::StopRunningProcessForReplacement {
+                target_server,
+                target_username,
+                ..
+            } => {
+                assert_eq!(target_server, 8);
+                assert_eq!(target_username, "user_a");
+            }
+            other => panic!("expected StopRunningProcessForReplacement, got {other:?}"),
+        }
+
+        // Server changed 8 -> 7 while process is alive -> StopRunningProcessForReplacement
+        let id_8 = ManagedIdentity::new(8, "user_a", sealed.clone());
+        let action_8_to_7 = evaluate_account_change_intent(&id_8, true, Some(7), None, None);
+        match action_8_to_7 {
+            IdentityChangeAction::StopRunningProcessForReplacement {
+                target_server,
+                target_username,
+                ..
+            } => {
+                assert_eq!(target_server, 7);
+                assert_eq!(target_username, "user_a");
+            }
+            other => panic!("expected StopRunningProcessForReplacement, got {other:?}"),
+        }
+
+        // Username changed while process is alive -> StopRunningProcessForReplacement
+        let action_user_live = evaluate_account_change_intent(&id, true, None, Some("user_b"), None);
+        match action_user_live {
+            IdentityChangeAction::StopRunningProcessForReplacement { target_username, .. } => {
+                assert_eq!(target_username, "user_b");
+            }
+            other => panic!("expected StopRunningProcessForReplacement, got {other:?}"),
+        }
+
+        // Password / secret_sealed changed while process is alive -> StopRunningProcessForReplacement
+        let new_sealed = serde_json::json!({"k": "v2"});
+        let action_pw_live = evaluate_account_change_intent(&id, true, None, None, Some(&new_sealed));
+        match action_pw_live {
+            IdentityChangeAction::StopRunningProcessForReplacement { target_sealed, .. } => {
+                assert_eq!(target_sealed, new_sealed);
+            }
+            other => panic!("expected StopRunningProcessForReplacement, got {other:?}"),
+        }
+
+        // Identity change when process is dead / not alive -> ApplyWithoutRestart
+        let action_dead = evaluate_account_change_intent(&id, false, Some(8), None, None);
+        assert_eq!(
+            action_dead,
+            IdentityChangeAction::ApplyWithoutRestart {
+                target_server: 8,
+                target_username: "user_a".to_string(),
+                target_sealed: sealed.clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_evaluate_replacement_stop_transitions() {
+        // ConfirmedStopped -> ProceedWithReplacement
+        assert_eq!(
+            evaluate_replacement_stop(StopTransition::ConfirmedStopped),
+            ReplacementStopResolution::ProceedWithReplacement
+        );
+
+        // FailedStillAlive -> AbortRetainProcess (retains process, forbids RMS reseed)
+        assert_eq!(
+            evaluate_replacement_stop(StopTransition::FailedStillAlive),
+            ReplacementStopResolution::AbortRetainProcess
+        );
+    }
+    #[test]
+    fn test_managed_identity_restart_capability_advertisement() {
+        assert_eq!(
+            JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN,
+            "managed-identity-restart-v1"
+        );
+        assert!(JarManifest::RUST_SUPPORTS_MANAGED_IDENTITY_RESTART);
+
+        // 1. Advertised agent version contains exactly one managed-identity-restart-v1 token
+        let v403_r2_manifest = JarManifest {
+            jar_sha256: JarManifest::V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1545629,
+            ctl_version: 15,
+            snapshot_version: 6,
+            ctl_key_count: 38,
+            snapshot_key_count: 49,
+            built_at: "2026-10-04T00:00:00Z".to_string(),
+            patcher_sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            agent_version: "".to_string(),
+        };
+        let advertised = v403_r2_manifest.advertised_agent_version();
+        assert!(advertised.contains(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN));
+        assert_eq!(
+            advertised.matches(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN).count(),
+            1
+        );
+
+        // 2. Existing character-slot/visual/enhancement capability tokens remain unchanged
+        assert!(v403_r2_manifest.is_character_slot_compatible());
+        assert!(v403_r2_manifest.is_visual_qol_compatible());
+        assert!(v403_r2_manifest.is_enhancement_queue_compatible());
+        assert!(v403_r2_manifest.is_enhancement_multilevel_compatible());
+        assert!(v403_r2_manifest.is_enhancement_queue_v2_compatible());
+        assert!(v403_r2_manifest.is_enhancement_degrade_retry_compatible());
+
+        // 3. Avoid duplicate capability token emission when existing metadata already contains it
+        let mut already_advertised = v403_r2_manifest.clone();
+        already_advertised.agent_version = "0.1.0+managed-identity-restart-v1.other-v1".to_string();
+        let adv_dedup = already_advertised.advertised_agent_version();
+        assert_eq!(
+            adv_dedup.matches(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN).count(),
+            1
+        );
+
+        // 4. Do not add managed-identity-restart-v1 to KNOWN_RUNTIME_CONTRACTS capabilities (agent-only)
+        for contract in KNOWN_RUNTIME_CONTRACTS {
+            assert!(
+                !contract.capabilities.contains(&JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN),
+                "Contract {} must not contain agent-only token",
+                contract.name
+            );
+        }
+
+        // 5. JAR SHA and runtime contracts remain unchanged
+        assert_eq!(
+            JarManifest::V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256,
+            "4009f070808d72bde555b7763d9c9e2924e9385a62ac1a96494d71cc3c4b657d"
+        );
+    }
 }
-
-

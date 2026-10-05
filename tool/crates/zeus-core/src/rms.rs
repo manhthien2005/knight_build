@@ -44,26 +44,118 @@ const SUITE_DIRECTORY_NAME: &str = "suite-null";
 const USER_PASS_STORE: &str = "user_pass";
 
 /// Store the connection code reads the server index from, written by `bs.h()`.
-const INDEX_SERVER_STORE: &str = "isIndexServer";
+pub(crate) const INDEX_SERVER_STORE: &str = "isIndexServer";
 
-/// Number of entries in the client's server table `dx.b`, which bounds a valid index.
-pub(crate) const SERVER_COUNT: u8 = 8;
+/// Store the official v4.0.3 LogoScreen reads for server re-identification by host, written by `LogoScreen.saveSelectedServer()`.
+pub(crate) const SELECTED_SERVER_HOST_STORE: &str = "selectedServerHost";
 
-/// Display names of the client's server table `dx.b`, in index order.
+/// Store the official v4.0.3 LogoScreen reads for offline server table cache, written by `LogoScreen.saveListServer()`.
+pub(crate) const LIST_SERVER_STORE: &str = "listServer";
+
+/// Number of stable logical server entries, bounding valid logical IDs (0..=8).
+pub const SERVER_COUNT: u8 = 9;
+
+/// Specification of one stable logical server world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerSpec {
+    pub logical_id: u8,
+    pub name: &'static str,
+    pub host: &'static str,
+    pub port: u16,
+    pub lang: u8,
+}
+
+/// Dense stable logical server catalog (0..=8).
 ///
-/// Copied from the vanilla table so the operator picks the same world the client will connect to. The
-/// host names deliberately do not appear here: the index is all the record store carries, and the
-/// client resolves the host itself.
-pub const SERVER_NAMES: [&str; SERVER_COUNT as usize] = [
-    "Chiến Thần",
-    "Rồng Lửa",
-    "Global Server",
-    "Phượng Hoàng",
-    "Nhân Mã",
-    "Kì Lân",
-    "Thiên Hà (New)",
-    "Thách Đấu",
+/// Persistent logical IDs 0..7 preserve their historical meanings and world assignments.
+/// Bạch Hổ New is assigned stable logical ID 8 (current publisher live index 0).
+pub const SERVER_CATALOG: [ServerSpec; SERVER_COUNT as usize] = [
+    ServerSpec {
+        logical_id: 0,
+        name: "Chiến Thần",
+        host: "hs1.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 1,
+        name: "Rồng Lửa",
+        host: "hs2.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 2,
+        name: "Global Server",
+        host: "hsglobal.teamobi.com",
+        port: 19129,
+        lang: 1,
+    },
+    ServerSpec {
+        logical_id: 3,
+        name: "Phượng Hoàng",
+        host: "hs3.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 4,
+        name: "Nhân Mã",
+        host: "hs5.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 5,
+        name: "Kì Lân",
+        host: "hs6.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 6,
+        name: "Thiên Hà (New)",
+        host: "hs7.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 7,
+        name: "Thách Đấu",
+        host: "hs4.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
+    ServerSpec {
+        logical_id: 8,
+        name: "Bạch Hổ New",
+        host: "hs8.teamobi.com",
+        port: 19129,
+        lang: 0,
+    },
 ];
+
+/// Display names of the client's stable logical catalog, in logical ID order.
+pub const SERVER_NAMES: [&str; SERVER_COUNT as usize] = [
+    SERVER_CATALOG[0].name,
+    SERVER_CATALOG[1].name,
+    SERVER_CATALOG[2].name,
+    SERVER_CATALOG[3].name,
+    SERVER_CATALOG[4].name,
+    SERVER_CATALOG[5].name,
+    SERVER_CATALOG[6].name,
+    SERVER_CATALOG[7].name,
+    SERVER_CATALOG[8].name,
+];
+
+/// Returns the stable `ServerSpec` for a logical server ID, or `None` if out of bounds.
+pub fn server_spec(logical_id: u8) -> Option<&'static ServerSpec> {
+    SERVER_CATALOG.get(logical_id as usize)
+}
+
+/// Official captured 9-server list payload used as RMS bootstrap cache.
+pub const BOOTSTRAP_LIST_SERVER_RAW: &str =
+    "Bạch Hổ New:hs8.teamobi.com:19129:0,Chiến Thần:hs1.teamobi.com:19129:0,Rồng Lửa:hs2.teamobi.com:19129:0,Global Server:hsglobal.teamobi.com:19129:1,Phượng Hoàng:hs3.teamobi.com:19129:0,Nhân Mã:hs5.teamobi.com:19129:0,Kì Lân:hs6.teamobi.com:19129:0,Thiên Hà:hs7.teamobi.com:19129:0,Thách Đấu:hs4.teamobi.com:19129:0,";
 
 /// Extension `FileRecordStoreManager.recordStoreName2FileName` appends.
 const STORE_EXTENSION: &str = "rs";
@@ -162,12 +254,65 @@ fn user_pass_record(username: &str, password: &str) -> CoreResult<Vec<u8>> {
     Ok(complement(&plain))
 }
 
-/// The `isIndexServer` record: one index byte into `dx.b`, complemented. Mirrors `bs.h()`.
-fn index_server_record(server_index: u8) -> CoreResult<Vec<u8>> {
-    if server_index >= SERVER_COUNT {
+/// Returns the safe client bootstrap index for a logical server ID.
+///
+/// IDs 0..7 retain their historical static-fallback index (0..7).
+/// Logical ID 8 (Bạch Hổ) returns bootstrap index 0 to stay within the official
+/// static 8-server array bounds (0..7) before dynamic host resolution.
+pub fn bootstrap_index_for_server(logical_id: u8) -> CoreResult<u8> {
+    if logical_id >= SERVER_COUNT {
         return Err(seed_error("rms_server_index_out_of_range"));
     }
-    Ok(complement(&[server_index]))
+    match logical_id {
+        0..=7 => Ok(logical_id),
+        8 => Ok(0),
+        _ => Err(seed_error("rms_server_index_out_of_range")),
+    }
+}
+
+/// The `isIndexServer` record: one bootstrap index byte, complemented.
+/// For legacy IDs 0..7, this is the historical index.
+/// For Bạch Hổ ID 8, this is bootstrap index 0 to keep the client within valid array bounds before dynamic host resolution.
+fn index_server_record(logical_id: u8) -> CoreResult<Vec<u8>> {
+    let bootstrap_index = bootstrap_index_for_server(logical_id)?;
+    Ok(complement(&[bootstrap_index]))
+}
+
+/// The `selectedServerHost` record: raw UTF-8 bytes of canonical host name, complemented.
+/// Mirrors `LogoScreen.saveSelectedServer()` / `CRes.saveRMS("selectedServerHost", host.getBytes("UTF-8"))`.
+pub fn selected_server_host_record(host: &str) -> CoreResult<Vec<u8>> {
+    if host.is_empty() {
+        return Err(seed_error("rms_host_empty"));
+    }
+    Ok(complement(host.as_bytes()))
+}
+
+/// Decodes a `selectedServerHost` record back to canonical host string.
+pub fn parse_selected_server_host_record(record: &[u8]) -> CoreResult<String> {
+    let plain = complement(record);
+    String::from_utf8(plain).map_err(|_| seed_error("rms_host_invalid_utf8"))
+}
+
+/// The `listServer` record: `writeUTF(raw_list)`, complemented.
+/// Mirrors `LogoScreen.saveListServer(raw_list)` / `CRes.saveRMS("listServer", byteArrayOutputStream.toByteArray())`.
+pub fn list_server_record(raw_list: &str) -> CoreResult<Vec<u8>> {
+    let mut plain = Vec::new();
+    write_java_utf8(raw_list, &mut plain)?;
+    Ok(complement(&plain))
+}
+
+/// Decodes a `listServer` record back to raw list string.
+pub fn parse_list_server_record(record: &[u8]) -> CoreResult<String> {
+    let plain = complement(record);
+    if plain.len() < 2 {
+        return Err(seed_error("rms_list_server_too_short"));
+    }
+    let length = u16::from_be_bytes([plain[0], plain[1]]) as usize;
+    if plain.len() < 2 + length {
+        return Err(seed_error("rms_list_server_length_mismatch"));
+    }
+    String::from_utf8(plain[2..2 + length].to_vec())
+        .map_err(|_| seed_error("rms_list_server_invalid_utf8"))
 }
 
 /// Directory the stores for one profile live in.
@@ -201,31 +346,80 @@ fn write_record_store(directory: &Path, name: &str, records: &[Vec<u8>]) -> Core
     Ok(())
 }
 
-/// Writes both stores the client's auto-login path reads.
+/// Writes all stores the official v4.0.3 client's server-selection and auto-login paths read.
+/// Attempts to delete the `user_pass` record store fail-closed.
+/// Returns Ok(()) if the file was deleted or did not exist.
+/// Returns CoreError if deletion failed for any other reason.
+fn delete_user_pass_store(directory: &Path) -> CoreResult<()> {
+    let path = directory.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(CoreError::io("delete pre-existing user_pass store", err)),
+    }
+}
+
+/// Seeds MicroEmulator RMS records needed for automated login and server selection.
 ///
-/// The server store is written first: a present `user_pass` with a stale server index would connect
-/// the account to the wrong world, whereas a present server index with no credentials just leaves
-/// the login screen waiting.
+/// Enforces strict fail-closed sequencing:
+/// 1. Remove any pre-existing `user_pass` before beginning re-seed.
+/// 2. Validate inputs and construct all records in memory first.
+/// 3. Seed `listServer` (cached 9-server table for offline resilience).
+/// 4. Seed `selectedServerHost` (canonical host for dynamic list matching).
+/// 5. Seed `isIndexServer` (legacy ID or Bạch Hổ safe bootstrap index 0).
+/// 6. Seed `user_pass` LAST.
+///
+/// If any server identity store fails to write or inputs are invalid, `user_pass` is guaranteed absent.
 pub fn seed_credentials(
     microemu_home: &Path,
     username: &str,
     password: &str,
     server_index: u8,
 ) -> CoreResult<()> {
+    let directory = suite_directory(microemu_home);
+
+    // Hardening: Always ensure pre-existing user_pass cannot survive if validation
+    // or any subsequent server-identity write fails.
+    // Fail closed if pre-existing user_pass cannot be removed.
+    delete_user_pass_store(&directory)?;
+
     if username.is_empty() || password.is_empty() {
         return Err(seed_error("rms_credentials_empty"));
     }
+    let spec = server_spec(server_index).ok_or_else(|| seed_error("rms_server_index_out_of_range"))?;
+
+    let list_record = list_server_record(BOOTSTRAP_LIST_SERVER_RAW)?;
+    let host_record = selected_server_host_record(spec.host)?;
     let index_record = index_server_record(server_index)?;
     let credential_record = user_pass_record(username, password)?;
-    let directory = suite_directory(microemu_home);
-    write_record_store(&directory, INDEX_SERVER_STORE, &[index_record])?;
+
+    // Write server identity stores first. If any write fails, ensure user_pass remains absent.
+    if let Err(err) = write_record_store(&directory, LIST_SERVER_STORE, &[list_record]) {
+        let _ = delete_user_pass_store(&directory);
+        return Err(err);
+    }
+    if let Err(err) = write_record_store(&directory, SELECTED_SERVER_HOST_STORE, &[host_record]) {
+        let _ = delete_user_pass_store(&directory);
+        return Err(err);
+    }
+    if let Err(err) = write_record_store(&directory, INDEX_SERVER_STORE, &[index_record]) {
+        let _ = delete_user_pass_store(&directory);
+        return Err(err);
+    }
+
+    // Write user_pass LAST.
     write_record_store(&directory, USER_PASS_STORE, &[credential_record])
 }
 
-/// Removes both seeded stores, so a stopped account leaves no credential material on disk.
+/// Removes all seeded stores, so a stopped account leaves no credential or server identity material on disk.
 pub fn clear_credentials(microemu_home: &Path) -> CoreResult<()> {
     let directory = suite_directory(microemu_home);
-    for name in [USER_PASS_STORE, INDEX_SERVER_STORE] {
+    for name in [
+        USER_PASS_STORE,
+        INDEX_SERVER_STORE,
+        SELECTED_SERVER_HOST_STORE,
+        LIST_SERVER_STORE,
+    ] {
         let path = directory.join(format!("{name}.{STORE_EXTENSION}"));
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -239,9 +433,12 @@ pub fn clear_credentials(microemu_home: &Path) -> CoreResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFIG_DIRECTORY_NAME, SERVER_COUNT, SUITE_DIRECTORY_NAME, clear_credentials, complement,
-        index_server_record, record_store_bytes, seed_credentials, user_pass_record,
-        write_java_utf8,
+        BOOTSTRAP_LIST_SERVER_RAW, CONFIG_DIRECTORY_NAME, INDEX_SERVER_STORE, LIST_SERVER_STORE,
+        SELECTED_SERVER_HOST_STORE, SERVER_CATALOG, SERVER_COUNT, SERVER_NAMES, STORE_EXTENSION,
+        SUITE_DIRECTORY_NAME, USER_PASS_STORE, bootstrap_index_for_server, clear_credentials,
+        complement, index_server_record, list_server_record, parse_list_server_record,
+        parse_selected_server_host_record, record_store_bytes, seed_credentials,
+        selected_server_host_record, server_spec, suite_directory, user_pass_record, write_java_utf8,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -426,7 +623,110 @@ mod tests {
     }
 
     #[test]
-    fn seeding_writes_both_stores_where_the_emulator_looks_and_leaves_no_temporary() {
+    fn server_catalog_is_dense_nine_entries_with_unique_hosts_and_historical_integrity() {
+        assert_eq!(SERVER_CATALOG.len(), 9);
+        assert_eq!(SERVER_COUNT, 9);
+        assert_eq!(SERVER_NAMES.len(), 9);
+
+        // Every logical_id equals its stable catalog position.
+        for (index, spec) in SERVER_CATALOG.iter().enumerate() {
+            assert_eq!(spec.logical_id, index as u8);
+            assert_eq!(spec.name, SERVER_NAMES[index]);
+            assert!(!spec.name.is_empty());
+            assert!(!spec.host.is_empty());
+            assert_eq!(spec.port, 19129);
+        }
+
+        // IDs 0..7 preserve historical world/host meanings.
+        assert_eq!(SERVER_CATALOG[0].name, "Chiến Thần");
+        assert_eq!(SERVER_CATALOG[0].host, "hs1.teamobi.com");
+        assert_eq!(SERVER_CATALOG[1].name, "Rồng Lửa");
+        assert_eq!(SERVER_CATALOG[1].host, "hs2.teamobi.com");
+        assert_eq!(SERVER_CATALOG[2].name, "Global Server");
+        assert_eq!(SERVER_CATALOG[2].host, "hsglobal.teamobi.com");
+        assert_eq!(SERVER_CATALOG[3].name, "Phượng Hoàng");
+        assert_eq!(SERVER_CATALOG[3].host, "hs3.teamobi.com");
+        assert_eq!(SERVER_CATALOG[4].name, "Nhân Mã");
+        assert_eq!(SERVER_CATALOG[4].host, "hs5.teamobi.com");
+        assert_eq!(SERVER_CATALOG[5].name, "Kì Lân");
+        assert_eq!(SERVER_CATALOG[5].host, "hs6.teamobi.com");
+        assert_eq!(SERVER_CATALOG[6].name, "Thiên Hà (New)");
+        assert_eq!(SERVER_CATALOG[6].host, "hs7.teamobi.com");
+        assert_eq!(SERVER_CATALOG[7].name, "Thách Đấu");
+        assert_eq!(SERVER_CATALOG[7].host, "hs4.teamobi.com");
+
+        // ID 8 is Bạch Hổ New / hs8.teamobi.com.
+        assert_eq!(SERVER_CATALOG[8].name, "Bạch Hổ New");
+        assert_eq!(SERVER_CATALOG[8].host, "hs8.teamobi.com");
+        assert_eq!(SERVER_CATALOG[8].lang, 0);
+
+        // All canonical hosts are unique.
+        let mut hosts: Vec<&str> = SERVER_CATALOG.iter().map(|s| s.host).collect();
+        hosts.sort();
+        let before_dedup = hosts.len();
+        hosts.dedup();
+        assert_eq!(hosts.len(), before_dedup);
+
+        // Logical ID 9 is rejected.
+        assert!(server_spec(9).is_none());
+        assert!(server_spec(u8::MAX).is_none());
+    }
+
+    #[test]
+    fn test_bootstrap_index_mapping_and_server_distinguishability() {
+        assert_eq!(bootstrap_index_for_server(0).unwrap(), 0);
+        assert_eq!(bootstrap_index_for_server(1).unwrap(), 1);
+        assert_eq!(bootstrap_index_for_server(2).unwrap(), 2);
+        assert_eq!(bootstrap_index_for_server(3).unwrap(), 3);
+        assert_eq!(bootstrap_index_for_server(4).unwrap(), 4);
+        assert_eq!(bootstrap_index_for_server(5).unwrap(), 5);
+        assert_eq!(bootstrap_index_for_server(6).unwrap(), 6);
+        assert_eq!(bootstrap_index_for_server(7).unwrap(), 7);
+        assert_eq!(bootstrap_index_for_server(8).unwrap(), 0);
+        assert!(bootstrap_index_for_server(9).is_err());
+        assert!(bootstrap_index_for_server(255).is_err());
+
+        // Bạch Hổ stable account identity remains 8 even though RMS isIndexServer contains 0.
+        let rec8 = index_server_record(8).expect("ID 8 encodes");
+        assert_eq!(rec8, [!0]);
+        assert_eq!(complement(&rec8), [0]);
+
+        // Existing ID 0 and ID 8 remain distinguishable through selectedServerHost.
+        let host0 = server_spec(0).unwrap().host;
+        let host8 = server_spec(8).unwrap().host;
+        assert_ne!(host0, host8);
+        assert_eq!(host0, "hs1.teamobi.com");
+        assert_eq!(host8, "hs8.teamobi.com");
+
+        let host_rec0 = selected_server_host_record(host0).unwrap();
+        let host_rec8 = selected_server_host_record(host8).unwrap();
+        assert_ne!(host_rec0, host_rec8);
+        assert_eq!(parse_selected_server_host_record(&host_rec0).unwrap(), host0);
+        assert_eq!(parse_selected_server_host_record(&host_rec8).unwrap(), host8);
+    }
+
+    #[test]
+    fn selected_server_host_and_list_server_records_round_trip() {
+        assert_eq!(server_spec(0).unwrap().host, "hs1.teamobi.com");
+        assert_eq!(server_spec(6).unwrap().host, "hs7.teamobi.com");
+        assert_eq!(server_spec(7).unwrap().host, "hs4.teamobi.com");
+        assert_eq!(server_spec(8).unwrap().host, "hs8.teamobi.com");
+
+        // selectedServerHost round trip
+        for spec in SERVER_CATALOG.iter() {
+            let host_rec = selected_server_host_record(spec.host).expect("host encodes");
+            let decoded = parse_selected_server_host_record(&host_rec).expect("host decodes");
+            assert_eq!(decoded, spec.host);
+        }
+
+        // listServer round trip to exact captured 9-server payload
+        let list_rec = list_server_record(BOOTSTRAP_LIST_SERVER_RAW).expect("listServer encodes");
+        let decoded_list = parse_list_server_record(&list_rec).expect("listServer decodes");
+        assert_eq!(decoded_list, BOOTSTRAP_LIST_SERVER_RAW);
+    }
+
+    #[test]
+    fn seeding_writes_all_four_stores_where_the_emulator_looks_and_leaves_no_temporary() {
         let home = TestHome::new("seed");
         seed_credentials(home.path(), SAMPLE_ACCOUNT, "secret", 6).expect("seeding succeeds");
         let suite = home
@@ -444,8 +744,16 @@ mod tests {
             })
             .collect();
         names.sort();
-        // Exactly the two stores: an atomic write must not leave its temporary behind.
-        assert_eq!(names, vec!["isIndexServer.rs", "user_pass.rs"]);
+        // Exactly the four stores: isIndexServer, listServer, selectedServerHost, user_pass.
+        assert_eq!(
+            names,
+            vec![
+                "isIndexServer.rs",
+                "listServer.rs",
+                "selectedServerHost.rs",
+                "user_pass.rs"
+            ]
+        );
 
         let stored =
             fs::read(suite.join("user_pass.rs")).expect("the credential store is readable");
@@ -454,15 +762,24 @@ mod tests {
         // The password must never appear in cleartext on disk.
         assert!(!stored.windows(6).any(|window| window == b"secret"));
 
-        // Seeding again replaces rather than duplicating, so a re-run stays at two stores.
+        // Verify selectedServerHost store content for ID 6
+        let host_store = fs::read(suite.join("selectedServerHost.rs")).expect("host store readable");
+        assert_eq!(read_java_utf8(&host_store, 0).0, "selectedServerHost");
+
+        // Verify listServer store content
+        let list_store = fs::read(suite.join("listServer.rs")).expect("listServer store readable");
+        assert_eq!(read_java_utf8(&list_store, 0).0, "listServer");
+
+        // Seeding again replaces rather than duplicating, so a re-run stays at 4 stores.
         seed_credentials(home.path(), SAMPLE_ACCOUNT, "other", 1).expect("re-seeding succeeds");
         assert_eq!(
             fs::read_dir(&suite)
                 .expect("the suite directory still exists")
                 .count(),
-            2
+            4
         );
 
+        // Clear removes all four stores.
         clear_credentials(home.path()).expect("clearing succeeds");
         assert_eq!(
             fs::read_dir(&suite)
@@ -490,5 +807,214 @@ mod tests {
             .expect_err("an index past the table fails");
         // The index is validated before the first write, so no partial seed survives.
         assert!(!home.path().join(CONFIG_DIRECTORY_NAME).exists());
+    }
+
+    #[test]
+    fn pre_existing_user_pass_with_forced_list_server_failure_leaves_no_user_pass() {
+        let home = TestHome::new("forced-list-fail");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        // Write pre-existing user_pass
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"stale_credentials").unwrap();
+        assert!(user_pass_file.exists());
+
+        // Force listServer write failure by placing a directory where listServer.rs should be
+        let list_server_path = suite.join(format!("{LIST_SERVER_STORE}.{STORE_EXTENSION}"));
+        fs::create_dir_all(&list_server_path).unwrap();
+
+        let err = seed_credentials(home.path(), "user", "pass", 8);
+        assert!(err.is_err(), "seed_credentials must fail when listServer write fails");
+        assert!(!user_pass_file.exists(), "user_pass must be absent after listServer write failure");
+    }
+
+    #[test]
+    fn pre_existing_user_pass_with_forced_selected_server_host_failure_leaves_no_user_pass() {
+        let home = TestHome::new("forced-host-fail");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        // Write pre-existing user_pass
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"stale_credentials").unwrap();
+        assert!(user_pass_file.exists());
+
+        // Force selectedServerHost write failure by placing a directory where selectedServerHost.rs should be
+        let host_path = suite.join(format!("{SELECTED_SERVER_HOST_STORE}.{STORE_EXTENSION}"));
+        fs::create_dir_all(&host_path).unwrap();
+
+        let err = seed_credentials(home.path(), "user", "pass", 8);
+        assert!(err.is_err(), "seed_credentials must fail when selectedServerHost write fails");
+        assert!(!user_pass_file.exists(), "user_pass must be absent after selectedServerHost write failure");
+    }
+
+    #[test]
+    fn pre_existing_user_pass_with_forced_is_index_server_failure_leaves_no_user_pass() {
+        let home = TestHome::new("forced-index-fail");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        // Write pre-existing user_pass
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"stale_credentials").unwrap();
+        assert!(user_pass_file.exists());
+
+        // Force isIndexServer write failure by placing a directory where isIndexServer.rs should be
+        let index_path = suite.join(format!("{INDEX_SERVER_STORE}.{STORE_EXTENSION}"));
+        fs::create_dir_all(&index_path).unwrap();
+
+        let err = seed_credentials(home.path(), "user", "pass", 8);
+        assert!(err.is_err(), "seed_credentials must fail when isIndexServer write fails");
+        assert!(!user_pass_file.exists(), "user_pass must be absent after isIndexServer write failure");
+    }
+
+    #[test]
+    fn successful_seed_writes_all_four_stores_and_user_pass_last() {
+        let home = TestHome::new("seed-success");
+        let suite = suite_directory(home.path());
+        seed_credentials(home.path(), "newuser", "newpass", 8).expect("successful seed");
+        assert!(suite.join(format!("{LIST_SERVER_STORE}.{STORE_EXTENSION}")).exists());
+        assert!(suite.join(format!("{SELECTED_SERVER_HOST_STORE}.{STORE_EXTENSION}")).exists());
+        assert!(suite.join(format!("{INDEX_SERVER_STORE}.{STORE_EXTENSION}")).exists());
+        assert!(suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}")).exists());
+    }
+
+    #[test]
+    fn invalid_logical_server_id_leaves_no_user_pass() {
+        let home = TestHome::new("invalid-id-no-pass");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        // Pre-existing user_pass
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"stale_credentials").unwrap();
+        assert!(user_pass_file.exists());
+
+        // Seed with invalid logical ID 9
+        let err = seed_credentials(home.path(), "user", "pass", 9);
+        assert!(err.is_err());
+        assert!(!user_pass_file.exists(), "invalid logical server ID must leave no user_pass");
+
+        // Pre-existing user_pass again
+        fs::write(&user_pass_file, b"stale_credentials").unwrap();
+        assert!(user_pass_file.exists());
+
+        // Seed with invalid logical ID 255
+        let err2 = seed_credentials(home.path(), "user", "pass", 255);
+        assert!(err2.is_err());
+        assert!(!user_pass_file.exists(), "invalid logical server ID 255 must leave no user_pass");
+    }
+
+    #[test]
+    fn missing_user_pass_seed_proceeds() {
+        let home = TestHome::new("missing-user-pass");
+        let suite = suite_directory(home.path());
+        assert!(!suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}")).exists());
+        seed_credentials(home.path(), "testuser", "testpass", 8).expect("seed proceeds when user_pass missing");
+        assert!(suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}")).exists());
+        assert!(suite.join(format!("{LIST_SERVER_STORE}.{STORE_EXTENSION}")).exists());
+    }
+
+    #[test]
+    fn existing_removable_user_pass_removed_then_successful_seed() {
+        let home = TestHome::new("existing-removable");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"old_stale_data").unwrap();
+        assert!(user_pass_file.exists());
+
+        seed_credentials(home.path(), "newuser", "newpass", 8).expect("successful seed replaces user_pass");
+        let content = fs::read(&user_pass_file).unwrap();
+        assert_ne!(content, b"old_stale_data");
+    }
+
+    #[test]
+    fn forced_user_pass_delete_failure_aborts_before_list_server_write() {
+        let home = TestHome::new("forced-user-pass-del-fail");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        let user_pass_dir = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::create_dir(&user_pass_dir).unwrap();
+        fs::write(user_pass_dir.join("sentinel"), b"locked").unwrap();
+
+        let err = seed_credentials(home.path(), "user", "pass", 8);
+        assert!(err.is_err(), "seed_credentials must fail when user_pass deletion fails");
+
+        let list_server_file = suite.join(format!("{LIST_SERVER_STORE}.{STORE_EXTENSION}"));
+        assert!(!list_server_file.exists(), "listServer must not be written when user_pass deletion fails");
+    }
+
+    #[test]
+    fn forced_user_pass_delete_failure_leaves_existing_credential_untouched_and_no_server_identity_written() {
+        let home = TestHome::new("readonly-user-pass-fail");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"original_credential").unwrap();
+
+        let mut perms = fs::metadata(&user_pass_file).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&user_pass_file, perms).unwrap();
+
+        let res = seed_credentials(home.path(), "newuser", "newpass", 8);
+        if res.is_err() {
+            assert_eq!(fs::read(&user_pass_file).unwrap(), b"original_credential");
+            let list_server_file = suite.join(format!("{LIST_SERVER_STORE}.{STORE_EXTENSION}"));
+            assert!(!list_server_file.exists(), "no server identity written when user_pass deletion fails");
+        }
+
+        let mut perms = fs::metadata(&user_pass_file).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        let _ = fs::set_permissions(&user_pass_file, perms);
+    }
+
+    #[test]
+    fn forced_list_server_failure_leaves_user_pass_absent() {
+        let home = TestHome::new("forced-list-server-fail");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"old_creds").unwrap();
+
+        let list_server_path = suite.join(format!("{LIST_SERVER_STORE}.{STORE_EXTENSION}"));
+        fs::create_dir(&list_server_path).unwrap();
+        fs::write(list_server_path.join("sentinel"), b"block").unwrap();
+
+        let err = seed_credentials(home.path(), "user", "pass", 8);
+        assert!(err.is_err());
+        assert!(!user_pass_file.exists(), "user_pass must be absent after listServer write failure");
+    }
+
+    #[test]
+    fn forced_selected_server_host_failure_leaves_user_pass_absent() {
+        let home = TestHome::new("forced-host-fail");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"old_creds").unwrap();
+
+        let host_path = suite.join(format!("{SELECTED_SERVER_HOST_STORE}.{STORE_EXTENSION}"));
+        fs::create_dir(&host_path).unwrap();
+        fs::write(host_path.join("sentinel"), b"block").unwrap();
+
+        let err = seed_credentials(home.path(), "user", "pass", 8);
+        assert!(err.is_err());
+        assert!(!user_pass_file.exists(), "user_pass must be absent after selectedServerHost write failure");
+    }
+
+    #[test]
+    fn forced_is_index_server_failure_leaves_user_pass_absent() {
+        let home = TestHome::new("forced-index-fail");
+        let suite = suite_directory(home.path());
+        fs::create_dir_all(&suite).unwrap();
+        let user_pass_file = suite.join(format!("{USER_PASS_STORE}.{STORE_EXTENSION}"));
+        fs::write(&user_pass_file, b"old_creds").unwrap();
+
+        let index_path = suite.join(format!("{INDEX_SERVER_STORE}.{STORE_EXTENSION}"));
+        fs::create_dir(&index_path).unwrap();
+        fs::write(index_path.join("sentinel"), b"block").unwrap();
+
+        let err = seed_credentials(home.path(), "user", "pass", 8);
+        assert!(err.is_err());
+        assert!(!user_pass_file.exists(), "user_pass must be absent after isIndexServer write failure");
     }
 }

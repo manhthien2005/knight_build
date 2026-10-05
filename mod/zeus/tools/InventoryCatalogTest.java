@@ -1,3 +1,89 @@
+import Main.GameCanvas;
+import GameScreen.GameScreen;
+import GameScreen.SelectCharScreen;
+import GameScreen.LoginScreen;
+import GameScreen.LoadMapScreen;
+import GameScreen.MainScreen;
+import GameScreen.PaintInfoGameScreen;
+import GameScreen.TabScreenNew;
+import GameObjects.Player;
+import GameObjects.MainObject;
+import GameObjects.MainMonster;
+import GameObjects.Item;
+import GameObjects.MainItem;
+import GameObjects.AutoGetItem;
+import GameObjects.MainClan;
+import GameObjects.MainRMS;
+import GameObjects.DelaySkill;
+import GameObjects.Other_Players;
+import InterfaceComponents.MsgDialog;
+import InterfaceComponents.MainDialog;
+import InterfaceComponents.InputDialog;
+import InterfaceComponents.ChatTextField;
+import InterfaceComponents.iCommand;
+import InterfaceComponents.TabRebuildItem;
+import InterfaceComponents.DataRebuildItem;
+import InterfaceComponents.TabShopNew;
+import InterfaceComponents.MainTabNew;
+import CLib.TField;
+import Model.Menu2;
+import Model.Point;
+import Model.T;
+import Model.mCamera;
+import Model.AvMain;
+import Thread_More.LoadMap;
+import Skill.HotKey;
+import CLib.mGraphics;
+import CLib.mVector;
+import CLib.mSystem;
+import CLib.Session_ME;
+import net.Message;
+import netcommand.Cmd_Message;
+import netcommand.global.GlobalService;
+import netcommand.global.GlobalLogicHandler;
+import Main.GameCanvas;
+import GameScreen.GameScreen;
+import GameScreen.SelectCharScreen;
+import GameScreen.LoginScreen;
+import GameScreen.LoadMapScreen;
+import GameScreen.MainScreen;
+import GameScreen.PaintInfoGameScreen;
+import GameScreen.TabScreenNew;
+import GameObjects.Player;
+import GameObjects.MainObject;
+import GameObjects.MainMonster;
+import GameObjects.Item;
+import GameObjects.MainItem;
+import GameObjects.AutoGetItem;
+import GameObjects.MainClan;
+import GameObjects.MainRMS;
+import GameObjects.DelaySkill;
+import GameObjects.Other_Players;
+import InterfaceComponents.MsgDialog;
+import InterfaceComponents.MainDialog;
+import InterfaceComponents.InputDialog;
+import InterfaceComponents.ChatTextField;
+import InterfaceComponents.iCommand;
+import InterfaceComponents.TabRebuildItem;
+import InterfaceComponents.DataRebuildItem;
+import InterfaceComponents.TabShopNew;
+import InterfaceComponents.MainTabNew;
+import CLib.TField;
+import Model.Menu2;
+import Model.Point;
+import Model.T;
+import Model.mCamera;
+import Model.AvMain;
+import Thread_More.LoadMap;
+import Skill.HotKey;
+import CLib.mGraphics;
+import CLib.mVector;
+import CLib.mSystem;
+import CLib.Session_ME;
+import net.Message;
+import netcommand.Cmd_Message;
+import netcommand.global.GlobalService;
+import netcommand.global.GlobalLogicHandler;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Vector;
@@ -32,10 +118,10 @@ public class InventoryCatalogTest {
 
     @SuppressWarnings("unchecked")
     static Vector<Object> queue() throws Exception {
-        Object link = l.a();
-        Field o = f(l.class, "o");
+        Object link = Session_ME.gI();
+        Field o = f(Session_ME.class, "sender");
         Object sender = o.get(link);
-        Field a = f(sender.getClass(), "a");
+        Field a = f(sender.getClass(), "sendingMessage");
         return (Vector<Object>) a.get(sender);
     }
 
@@ -48,25 +134,25 @@ public class InventoryCatalogTest {
         }
     }
 
-    static j fullItem(int id, int kind, String name, String baseName, int level, int tier, int count, short durability, byte bind, int icon) {
-        j it = new j();
-        it.O = id;
-        it.u = kind;
-        it.g = name;
-        it.i = baseName;
-        it.z = (byte) level;
-        it.N = tier;
-        it.K = count;
-        it.v = durability;
-        it.B = bind;
-        it.t = icon;
+    static MainItem fullItem(int id, int kind, String name, String baseName, int level, int tier, int count, short durability, byte bind, int icon) {
+        MainItem it = new MainItem();
+        it.Id = id;
+        it.ItemCatagory = kind;
+        it.itemName = name;
+        it.itemNameExcludeLv = baseName;
+        it.tier = (byte) level;
+        it.colorNameItem = tier;
+        it.numPotion = count;
+        it.IdTem = durability;
+        it.isLock = bind;
+        it.imageId = icon;
         return it;
     }
 
-    static et bag(bw... items) {
-        et v = new et("bag");
+    static mVector bag(Item... items) {
+        mVector v = new mVector("bag");
         for (int i = 0; i < items.length; i++) {
-            v.a(items[i]);
+            v.addElement(items[i]);
         }
         return v;
     }
@@ -74,14 +160,14 @@ public class InventoryCatalogTest {
     public static void main(String[] args) throws Exception {
         System.out.println("=== InventoryCatalogTest ===");
 
-        // Precondition: set capacity bq.x = 28
-        bq.x = 28;
+        // Precondition: set capacity Player.maxInven = 28
+        Player.maxInven = 28;
 
         // ---------------------------------------------------------------------
         // Test 1: Empty bag serializes a valid versioned catalog
         // ---------------------------------------------------------------------
         System.out.println("--- Test 1: Empty bag ---");
-        bw.V = bag();
+        Item.VecInvetoryPlayer = bag();
         String json1 = formatCatalog();
         check("catalog contains version 1", json1.indexOf("\"version\": 1") >= 0);
         check("catalog contains bag_capacity 28", json1.indexOf("\"bag_capacity\": 28") >= 0);
@@ -91,10 +177,10 @@ public class InventoryCatalogTest {
         // Test 2: Occupied slots retain their actual slot indexes and fields
         // ---------------------------------------------------------------------
         System.out.println("--- Test 2: Occupied slots and fields ---");
-        j equip = fullItem(101, 3, "Kiếm ngắn +5", "Kiếm ngắn", 5, 2, 1, (short) 500, (byte) 1, 12);
-        j mount = fullItem(62, 4, "Ngựa trắng", "Ngựa trắng", 0, 1, 1, (short) -1, (byte) 0, 25);
-        j potion = fullItem(1234, 6, "Bình HP", "Bình HP", 0, 0, 99, (short) -1, (byte) 0, 35);
-        bw.V = bag(equip, mount, potion);
+        MainItem equip = fullItem(101, 3, "Kiếm ngắn +5", "Kiếm ngắn", 5, 2, 1, (short) 500, (byte) 1, 12);
+        MainItem mount = fullItem(62, 4, "Ngựa trắng", "Ngựa trắng", 0, 1, 1, (short) -1, (byte) 0, 25);
+        MainItem potion = fullItem(1234, 6, "Bình HP", "Bình HP", 0, 0, 99, (short) -1, (byte) 0, 35);
+        Item.VecInvetoryPlayer = bag(equip, mount, potion);
 
         String json2 = formatCatalog();
         check("slot 0 present", json2.indexOf("\"slot\": 0") >= 0);
@@ -114,10 +200,10 @@ public class InventoryCatalogTest {
         // Test 3: Two visually identical items in different slots remain distinct
         // ---------------------------------------------------------------------
         System.out.println("--- Test 3: Two identical items remain distinct ---");
-        j swordA = fullItem(200, 3, "Đao +0", "Đao", 0, 1, 1, (short) 1000, (byte) 0, 50);
-        j placeholder = fullItem(999, 7, "Đá", "Đá", 0, 0, 1, (short) -1, (byte) 0, 1);
-        j swordB = fullItem(200, 3, "Đao +0", "Đao", 0, 1, 1, (short) 1000, (byte) 0, 50);
-        bw.V = bag(swordA, placeholder, swordB);
+        MainItem swordA = fullItem(200, 3, "Đao +0", "Đao", 0, 1, 1, (short) 1000, (byte) 0, 50);
+        MainItem placeholder = fullItem(999, 7, "Đá", "Đá", 0, 0, 1, (short) -1, (byte) 0, 1);
+        MainItem swordB = fullItem(200, 3, "Đao +0", "Đao", 0, 1, 1, (short) 1000, (byte) 0, 50);
+        Item.VecInvetoryPlayer = bag(swordA, placeholder, swordB);
 
         String json3 = formatCatalog();
         check("swordA at slot 0", json3.indexOf("\"slot\": 0") >= 0);
@@ -129,8 +215,8 @@ public class InventoryCatalogTest {
         // Test 4: Enhancement level is serialized as mutable state
         // ---------------------------------------------------------------------
         System.out.println("--- Test 4: Enhancement level mutation ---");
-        swordA.z = 7;
-        swordA.g = "Đao +7";
+        swordA.tier = 7;
+        swordA.itemName = "Đao +7";
         String json4 = formatCatalog();
         check("swordA level updated to 7", json4.indexOf("\"level\": 7") >= 0);
         check("swordA display name updated to +7", json4.indexOf("\"display_name\": \"Đao +7\"") >= 0);
@@ -154,13 +240,13 @@ public class InventoryCatalogTest {
         check("queue remains empty", q.isEmpty());
 
         // ---------------------------------------------------------------------
-        // Test 7: Catalog generation does not mutate bw.V items
+        // Test 7: Catalog generation does not mutate Item.VecInvetoryPlayer items
         // ---------------------------------------------------------------------
-        System.out.println("--- Test 7: No mutation of bw.V items ---");
-        check("bw.V size unchanged", bw.V.c() == 3);
-        check("swordA template unchanged", swordA.O == 200);
-        check("swordA level unchanged", swordA.z == 7);
-        check("swordA durability unchanged", swordA.v == 1000);
+        System.out.println("--- Test 7: No mutation of Item.VecInvetoryPlayer items ---");
+        check("Item.VecInvetoryPlayer size unchanged", Item.VecInvetoryPlayer.size() == 3);
+        check("swordA template unchanged", swordA.Id == 200);
+        check("swordA level unchanged", swordA.tier == 7);
+        check("swordA durability unchanged", swordA.IdTem == 1000);
 
         // ---------------------------------------------------------------------
         // Test 8: Change suppression hash
@@ -169,10 +255,10 @@ public class InventoryCatalogTest {
         Method hashMethod = Class.forName("Zeus").getDeclaredMethod("computeInventoryHash");
         hashMethod.setAccessible(true);
         long h1 = ((Long) hashMethod.invoke(null)).longValue();
-        swordB.z = 1;
+        swordB.tier = 1;
         long h2 = ((Long) hashMethod.invoke(null)).longValue();
         check("hash changes when item level changes", h1 != h2);
-        swordB.z = 0;
+        swordB.tier = 0;
         long h3 = ((Long) hashMethod.invoke(null)).longValue();
         check("hash reverts when item reverts", h1 == h3);
 

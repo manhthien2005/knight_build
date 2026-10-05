@@ -1,20 +1,13 @@
 /*
- * Patch com/silverknight/a.class at the bytecode level.
+ * Patch com/silverknight/TemCanvas.class at the bytecode level.
  *
- * Why bytecode and not source: class `a` lives in package com.silverknight but
- * calls fu, bl, bx, du and dx, which ProGuard left in the default package. Java
- * source in a named package cannot reference the default package at all, so the
- * decompiled a.java does not recompile. (fu.java is separately unrecompilable:
- * it references the class literally named `do`, a keyword.) Everything else in
- * this module is normal source; only this one class needs a transform.
- *
- * Transform, inside a.run() only:
- *   aload_0; invokevirtual a.repaint()V         -> aload_0; invokestatic POTATO.doRepaint(Canvas)V
- *   aload_0; invokevirtual a.serviceRepaints()V -> aload_0; pop
+ * Transform inside TemCanvas.run() only:
+ *   aload_0; invokevirtual Canvas.repaint()V         -> aload_0; invokestatic POTATO.doRepaint(Canvas)V
+ *   aload_0; invokevirtual Canvas.serviceRepaints()V -> aload_0; pop
  *
  * The already-pushed `this` becomes doRepaint's argument, and the second push is
  * popped, so the stack stays balanced. Net effect: the loop asks POTATO whether
- * to paint instead of always painting. Game logic (c.b()) and the 40 ms period
+ * to paint instead of always painting. Game logic (this.update()) and the 40 ms period
  * are untouched, so tick rate stays 25 Hz.
  *
  * Uses the ASM bundled in microemulator.jar (3.x: ClassAdapter/MethodAdapter).
@@ -23,7 +16,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.util.Enumeration;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -35,7 +27,7 @@ import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
 public final class PatchCanvas {
-    private static final String TARGET = "com/silverknight/a";
+    private static final String TARGET = "com/silverknight/TemCanvas";
     private static int replacedRepaint = 0;
     private static int replacedService = 0;
 

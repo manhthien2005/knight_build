@@ -60,7 +60,9 @@ pub use process_launch_spec::{
     PROCESS_ARGV_SCHEMA_VERSION, ProcessLaunchSpec, ProcessStdio,
 };
 pub use profile::{ProfilePage, ProfileRecord};
-pub use rms::SERVER_NAMES;
+pub use rms::{
+    BOOTSTRAP_LIST_SERVER_RAW, SERVER_CATALOG, SERVER_COUNT, SERVER_NAMES, ServerSpec, server_spec,
+};
 pub use runtime::{
     MAX_RUNTIME_PREFLIGHT_CACHE_ENTRIES, RuntimePreflightDiagnostics, RuntimePreflightMode,
 };

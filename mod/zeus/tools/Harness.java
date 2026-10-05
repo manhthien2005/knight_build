@@ -1,6 +1,92 @@
+import Main.GameCanvas;
+import GameScreen.GameScreen;
+import GameScreen.SelectCharScreen;
+import GameScreen.LoginScreen;
+import GameScreen.LoadMapScreen;
+import GameScreen.MainScreen;
+import GameScreen.PaintInfoGameScreen;
+import GameScreen.TabScreenNew;
+import GameObjects.Player;
+import GameObjects.MainObject;
+import GameObjects.MainMonster;
+import GameObjects.Item;
+import GameObjects.MainItem;
+import GameObjects.AutoGetItem;
+import GameObjects.MainClan;
+import GameObjects.MainRMS;
+import GameObjects.DelaySkill;
+import GameObjects.Other_Players;
+import InterfaceComponents.MsgDialog;
+import InterfaceComponents.MainDialog;
+import InterfaceComponents.InputDialog;
+import InterfaceComponents.ChatTextField;
+import InterfaceComponents.iCommand;
+import InterfaceComponents.TabRebuildItem;
+import InterfaceComponents.DataRebuildItem;
+import InterfaceComponents.TabShopNew;
+import InterfaceComponents.MainTabNew;
+import CLib.TField;
+import Model.Menu2;
+import Model.Point;
+import Model.T;
+import Model.mCamera;
+import Model.AvMain;
+import Thread_More.LoadMap;
+import Skill.HotKey;
+import CLib.mGraphics;
+import CLib.mVector;
+import CLib.mSystem;
+import CLib.Session_ME;
+import net.Message;
+import netcommand.Cmd_Message;
+import netcommand.global.GlobalService;
+import netcommand.global.GlobalLogicHandler;
+import Main.GameCanvas;
+import GameScreen.GameScreen;
+import GameScreen.SelectCharScreen;
+import GameScreen.LoginScreen;
+import GameScreen.LoadMapScreen;
+import GameScreen.MainScreen;
+import GameScreen.PaintInfoGameScreen;
+import GameScreen.TabScreenNew;
+import GameObjects.Player;
+import GameObjects.MainObject;
+import GameObjects.MainMonster;
+import GameObjects.Item;
+import GameObjects.MainItem;
+import GameObjects.AutoGetItem;
+import GameObjects.MainClan;
+import GameObjects.MainRMS;
+import GameObjects.DelaySkill;
+import GameObjects.Other_Players;
+import InterfaceComponents.MsgDialog;
+import InterfaceComponents.MainDialog;
+import InterfaceComponents.InputDialog;
+import InterfaceComponents.ChatTextField;
+import InterfaceComponents.iCommand;
+import InterfaceComponents.TabRebuildItem;
+import InterfaceComponents.DataRebuildItem;
+import InterfaceComponents.TabShopNew;
+import InterfaceComponents.MainTabNew;
+import CLib.TField;
+import Model.Menu2;
+import Model.Point;
+import Model.T;
+import Model.mCamera;
+import Model.AvMain;
+import Thread_More.LoadMap;
+import Skill.HotKey;
+import CLib.mGraphics;
+import CLib.mVector;
+import CLib.mSystem;
+import CLib.Session_ME;
+import net.Message;
+import netcommand.Cmd_Message;
+import netcommand.global.GlobalService;
+import netcommand.global.GlobalLogicHandler;
 // Throwaway harness: drives Zeus.revive() and Zeus.mount() offline.
 //
-// No network: q.a().b(...) enqueues an `ep` into l.a().o.a (a Vector) and the sender
+// No network: q.a().b(...) enqueues an `ep` into Session_ME.gI().o.a (a Vector) and the sender
 // thread only drains it once l.c is true, which it never is here. So the queue IS the
 // observation: one element per packet the module decided to send, with its opcode.
 import java.lang.reflect.Field;
@@ -37,10 +123,10 @@ public class Harness {
 
     @SuppressWarnings("unchecked")
     static Vector<Object> queue() throws Exception {
-        Object link = l.a();
-        Field o = f(l.class, "o");
+        Object link = Session_ME.gI();
+        Field o = f(Session_ME.class, "sender");
         Object sender = o.get(link);
-        Field a = f(sender.getClass(), "a");
+        Field a = f(sender.getClass(), "sendingMessage");
         return (Vector<Object>) a.get(sender);
     }
 
@@ -48,35 +134,35 @@ public class Harness {
         Vector<Object> q = queue();
         StringBuilder out = new StringBuilder();
         for (int i = 0; i < q.size(); i++) {
-            ep packet = (ep) q.elementAt(i);
+            Message packet = (Message) q.elementAt(i);
             if (out.length() > 0) {
                 out.append(',');
             }
-            out.append(packet.a);
+            out.append(packet.command);
         }
         q.removeAllElements();
         return out.toString();
     }
 
     /** One bag item: template id `id`, kind `kind`, display name `name`. */
-    static bw item(int id, int kind, String name) {
-        j it = new j();
-        it.O = id;
-        it.u = kind;
-        it.g = name;
+    static Item item(int id, int kind, String name) {
+        MainItem it = new MainItem();
+        it.Id = id;
+        it.ItemCatagory = kind;
+        it.itemName = name;
         return it;
     }
 
-    static et bag(bw... items) {
-        et v = new et("bag");
+    static mVector bag(Item... items) {
+        mVector v = new mVector("bag");
         for (int i = 0; i < items.length; i++) {
-            v.a(items[i]);
+            v.addElement(items[i]);
         }
         return v;
     }
 
     static void dead(boolean value) {
-        cn.g.cG = value ? (byte) 4 : (byte) 0;
+        GameScreen.player.Action = value ? (byte) 4 : (byte) 0;
     }
 
     static int tick(int times, String what) throws Exception {
@@ -102,8 +188,8 @@ public class Harness {
         set("reviveDelay", Integer.valueOf(0));
 
         // ---- 1. ticket path: 3 sends, then town, then nothing new but town ----
-        cn.g.ef = (byte) -1;
-        bw.V = bag(item(1234, 6, "Vé Hồi sinh tại chỗ"));
+        GameScreen.player.typeMount = (byte) -1;
+        Item.VecInvetoryPlayer = bag(item(1234, 6, "Vé Hồi sinh tại chỗ"));
         dead(true);
         drain();
         call("reviveReset");
@@ -133,35 +219,35 @@ public class Harness {
 
         // ---- 2. no ticket: one notice, straight to town ----
         call("reviveReset");
-        bw.V = bag(item(700, 4, "Ngựa trắng"));
-        int before = cn.k.c();
+        Item.VecInvetoryPlayer = bag(item(700, 4, "Ngựa trắng"));
+        int before = GameScreen.VecInfoServer.size();
         call("revive");
         check("no ticket goes to town at once", drain().equals("31"));
         check("noTicket flag latched", ((Boolean) get("reviveNoTicket")).booleanValue());
-        check("exactly one notice queued", cn.k.c() == before + 1);
+        check("exactly one notice queued", GameScreen.VecInfoServer.size() == before + 1);
         tick(60, "revive");
         call("revive");
         tick(60, "revive");
         check("still town", drain().equals("31"));
-        check("notice not repeated", cn.k.c() == before + 1);
+        check("notice not repeated", GameScreen.VecInfoServer.size() == before + 1);
 
         // ---- 3. UI clear at 40 ticks, once ----
         call("reviveReset");
-        bw.V = bag(item(1234, 6, "Vé Hồi sinh tại chỗ"));
-        fu.p.a = true;
-        fu.s = new ah();
-        fu.t = new ah();
+        Item.VecInvetoryPlayer = bag(item(1234, 6, "Vé Hồi sinh tại chỗ"));
+        GameCanvas.menu2.isShowMenu = true;
+        GameCanvas.currentDialog = new MsgDialog();
+        GameCanvas.subDialog = new MsgDialog();
         drain();
         tick(39, "revive");
-        check("UI still up before tick 40", fu.s != null && fu.p.a);
+        check("UI still up before tick 40", GameCanvas.currentDialog != null && GameCanvas.menu2.isShowMenu);
         call("revive");
-        check("menu closed at tick 40", !fu.p.a);
-        check("dialog dropped at tick 40", fu.s == null && fu.t == null);
+        check("menu closed at tick 40", !GameCanvas.menu2.isShowMenu);
+        check("dialog dropped at tick 40", GameCanvas.currentDialog == null && GameCanvas.subDialog == null);
         check("cleared flag latched", ((Boolean) get("reviveCleared")).booleanValue());
-        fu.p.a = true;
+        GameCanvas.menu2.isShowMenu = true;
         tick(60, "revive");
-        check("menu not closed a second time in the same death", fu.p.a);
-        fu.p.a = false;
+        check("menu not closed a second time in the same death", GameCanvas.menu2.isShowMenu);
+        GameCanvas.menu2.isShowMenu = false;
 
         // ---- 4. reset on standing up ----
         check("dead counter advanced", ((Integer) get("reviveDead")).intValue() > 40);
@@ -183,13 +269,13 @@ public class Harness {
         set("mountOn", Boolean.TRUE);
         set("mountId", Integer.valueOf(0));
         set("mountWait", Integer.valueOf(0));
-        bw.V = bag(item(1234, 6, "Vé Hồi sinh tại chỗ"));
+        Item.VecInvetoryPlayer = bag(item(1234, 6, "Vé Hồi sinh tại chỗ"));
         call("mount");
         check("empty bag sends nothing", drain().isEmpty());
         check("retry is 5 s (125 ticks), not 900", ((Integer) get("mountWait")).intValue() == 125);
         tick(125, "mount");
         // Mount picked up mid-period: the next look is 5 s away, not 36 s.
-        bw.V = bag(item(64, 4, "Tuần lộc"));
+        Item.VecInvetoryPlayer = bag(item(64, 4, "Tuần lộc"));
         call("mount");
         check("rides the only mount in the bag", drain().equals("32"));
         check("long period charged only for a real ride",
@@ -198,25 +284,25 @@ public class Harness {
         // ---- 7. mount: prefers the configured id ----
         set("mountId", Integer.valueOf(62));
         set("mountWait", Integer.valueOf(0));
-        bw.V = bag(item(65, 4, "Ngựa đen"), item(62, 4, "Ngựa trắng"));
+        Item.VecInvetoryPlayer = bag(item(65, 4, "Ngựa đen"), item(62, 4, "Ngựa trắng"));
         call("mount");
         check("prefers the wanted id when present", drain().equals("32"));
 
         // ---- 8. mount: ignores non-mount items and out-of-range ids ----
         set("mountWait", Integer.valueOf(0));
-        bw.V = bag(item(62, 6, "not a mount kind"), item(70, 4, "out of range"));
+        Item.VecInvetoryPlayer = bag(item(62, 6, "not a mount kind"), item(70, 4, "out of range"));
         call("mount");
         check("kind and range are both enforced", drain().isEmpty());
         check("and that is a short retry", ((Integer) get("mountWait")).intValue() == 125);
 
         // ---- 9. mount: already riding sends nothing ----
         set("mountWait", Integer.valueOf(0));
-        cn.g.ef = (byte) 0;
-        bw.V = bag(item(62, 4, "Ngựa trắng"));
+        GameScreen.player.typeMount = (byte) 0;
+        Item.VecInvetoryPlayer = bag(item(62, 4, "Ngựa trắng"));
         call("mount");
         check("riding already: no send", drain().isEmpty());
         check("and no period charged", ((Integer) get("mountWait")).intValue() == 0);
-        cn.g.ef = (byte) -1;
+        GameScreen.player.typeMount = (byte) -1;
 
         // ---- 10. mount off does nothing ----
         set("mountOn", Boolean.FALSE);
@@ -228,30 +314,30 @@ public class Harness {
         // ---- 10b. mount.id = 0 rides whatever is carried ----
         set("mountId", Integer.valueOf(0));
         set("mountWait", Integer.valueOf(0));
-        bw.V = bag(item(66, 4, "Hoả kì lân"));
+        Item.VecInvetoryPlayer = bag(item(66, 4, "Hoả kì lân"));
         call("mount");
         check("any-mount rides an id that was never configured", drain().equals("32"));
 
         // ---- 10c. a picked id that is not in the bag stays silent ----
         set("mountId", Integer.valueOf(63));
         set("mountWait", Integer.valueOf(0));
-        bw.V = bag(item(66, 4, "Hoả kì lân"));
+        Item.VecInvetoryPlayer = bag(item(66, 4, "Hoả kì lân"));
         call("mount");
         check("a specific mount is not substituted", drain().isEmpty());
         set("mountId", Integer.valueOf(0));
 
         // ---- 10d. the published list is what the tool offers by name ----
-        bw.V = bag(item(62, 4, "Ngựa trắng"), item(1234, 6, "Vé"), item(66, 4, "Hoả kì lân"));
+        Item.VecInvetoryPlayer = bag(item(62, 4, "Ngựa trắng"), item(1234, 6, "Vé"), item(66, 4, "Hoả kì lân"));
         check("only mounts are listed, id first",
                 text("mountList").equals("62:Ngựa trắng|66:Hoả kì lân"));
-        bw.V = bag(item(1234, 6, "Vé"));
+        Item.VecInvetoryPlayer = bag(item(1234, 6, "Vé"));
         check("no mounts is an empty field, not a missing one", text("mountList").isEmpty());
 
         // ---- 11. the operator's delay holds the first attempt, then everything proceeds ----
         dead(true);
         set("reviveOn", Boolean.TRUE);
         set("reviveDelay", Integer.valueOf(3));      // 3 s = 75 ticks at 25 ticks/s
-        bw.V = bag(item(1234, 6, "Vé Hồi sinh tại chỗ"));
+        Item.VecInvetoryPlayer = bag(item(1234, 6, "Vé Hồi sinh tại chỗ"));
         call("reviveReset");
         drain();
         tick(74, "revive");
@@ -262,11 +348,11 @@ public class Harness {
 
         // The UI clear is not on the delay's schedule: a frozen menu is worth closing first.
         call("reviveReset");
-        fu.p.a = true;
-        fu.s = new ah();
+        GameCanvas.menu2.isShowMenu = true;
+        GameCanvas.currentDialog = new MsgDialog();
         drain();
         tick(40, "revive");
-        check("UI cleared during the delay, not after it", !fu.p.a && fu.s == null);
+        check("UI cleared during the delay, not after it", !GameCanvas.menu2.isShowMenu && GameCanvas.currentDialog == null);
         check("and still nothing sent", drain().isEmpty());
 
         // ---- 12. standing up resets without attack() being involved ----
@@ -282,7 +368,7 @@ public class Harness {
         set("atkY", Integer.valueOf(-1));
         dead(true);
         call("reviveReset");
-        bw.V = bag(item(1234, 6, "Vé Hồi sinh tại chỗ"));
+        Item.VecInvetoryPlayer = bag(item(1234, 6, "Vé Hồi sinh tại chỗ"));
         drain();
         call("revive");
         check("revives with atk.mode=0 and no spot", drain().equals("-30"));

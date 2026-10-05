@@ -1,13 +1,6 @@
 /*
  * Inject a POTATO gate at the entry of individual draw-layer methods.
  *
- * Why bytecode and not source: every layer call site lives in cn.a(bx), and cn
- * does not survive a round trip through CFR (probe-layers.sh: "incompatible
- * types: possible lossy conversion from int to byte"). The layer classes ey and
- * br do recompile, but recompiling a decompiled class trades a verified .class
- * for a plausible one; a two-instruction prologue keeps every other byte of the
- * original method exactly as ProGuard emitted it.
- *
  * Injected at the head of each target, before its first instruction:
  *
  *     ldc <bit>
@@ -16,21 +9,9 @@
  *     return
  *   L: ...original body...
  *
- * Targets, and why each is safe to drop (all verified in mod/src_decomp):
- *
- *   ey.a(Lbx;)V   bit 1  minimap. Pure drawing: reads cn.j, ey.f, bq.N and the
- *                        player, writes nothing. Local n2/n3 clamping only.
- *   br.a(Lbx;)V   bit 2  effects. Dispatches dy.a(bx) over the live list. The
- *                        effect lifecycle is in br.a() and dy.a() — separate
- *                        methods, still driven every tick — so a skipped draw
- *                        cannot leak an effect. The one subclass that mutates
- *                        inside its draw (i.a(bx)) touches this.ax, a private
- *                        in-call marker read only as `ax == 0`, and this.f, a
- *                        frame index; retirement goes through this.x = true in
- *                        a(), which is untouched.
- *
- * Both are also the two classes that touch Graphics outside bx (ey directly),
- * so gating them here covers the minimap path bx never sees.
+ * Targets in official v4.0.3:
+ *   Thread_More/MiniMap.paint(LCLib/mGraphics;)V   bit 1  minimap
+ *   Model/EffectManager.paintAll(LCLib/mGraphics;)V bit 2  effects
  *
  * usage: PatchLayers <in.jar> <out-class-dir>
  */
@@ -53,8 +34,8 @@ public final class PatchLayers {
 
     /** class / method / descriptor / POTATO layer bit. */
     private static final String[][] TARGETS = {
-        { "ey", "a", "(Lbx;)V", "1" },
-        { "br", "a", "(Lbx;)V", "2" },
+        { "Thread_More/MiniMap", "paint", "(LCLib/mGraphics;)V", "1" },
+        { "Model/EffectManager", "paintAll", "(LCLib/mGraphics;)V", "2" },
     };
 
     public static void main(String[] args) throws Exception {
