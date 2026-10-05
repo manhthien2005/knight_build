@@ -903,6 +903,7 @@ impl JarManifest {
     pub const ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN: &'static str = "enhancement-multilevel-v1";
     pub const ENHANCEMENT_QUEUE_V2_CAPABILITY_TOKEN: &'static str = "enhancement-queue-v2";
     pub const ENHANCEMENT_DEGRADE_RETRY_CAPABILITY_TOKEN: &'static str = "enhancement-degrade-retry-v1";
+    pub const MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN: &'static str = "managed-identity-restart-v1";
 
     /// Proves that this compiled Rust binary implements the 06F per-level continuation orchestrator.
     pub const RUST_ORCHESTRATOR_SUPPORTS_MULTILEVEL: bool = true;
@@ -910,6 +911,8 @@ impl JarManifest {
     pub const RUST_ORCHESTRATOR_SUPPORTS_QUEUE_V2: bool = true;
     /// Proves that this compiled Rust binary implements the 06H5 degrade-retry orchestrator with attempt cap.
     pub const RUST_ORCHESTRATOR_SUPPORTS_DEGRADE_RETRY: bool = true;
+    /// Proves that this compiled Rust binary implements managed identity restart independently of Java JAR.
+    pub const RUST_SUPPORTS_MANAGED_IDENTITY_RESTART: bool = true;
 
     pub const CHARACTER_SLOT_COMPATIBLE_JAR_SHA256: &'static str =
         "0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd";
@@ -1019,6 +1022,7 @@ impl JarManifest {
                     || token == Self::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN
                     || token == Self::ENHANCEMENT_QUEUE_V2_CAPABILITY_TOKEN
                     || token == Self::ENHANCEMENT_DEGRADE_RETRY_CAPABILITY_TOKEN
+                    || token == Self::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN
                 {
                     continue;
                 }
@@ -1057,6 +1061,11 @@ impl JarManifest {
             && !tokens.contains(&Self::ENHANCEMENT_DEGRADE_RETRY_CAPABILITY_TOKEN)
         {
             tokens.push(Self::ENHANCEMENT_DEGRADE_RETRY_CAPABILITY_TOKEN);
+        }
+        if Self::RUST_SUPPORTS_MANAGED_IDENTITY_RESTART
+            && !tokens.contains(&Self::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN)
+        {
+            tokens.push(Self::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN);
         }
 
         if tokens.is_empty() {
@@ -3596,7 +3605,8 @@ mod tests {
         // 1. Valid compatible JAR does advertise capability with the stable token
         assert!(compatible_manifest.is_character_slot_compatible());
         let advertised = compatible_manifest.advertised_agent_version();
-        assert_eq!(advertised, "0.1.0+character-slot-v1");
+        assert_eq!(advertised, "0.1.0+character-slot-v1.managed-identity-restart-v1");
+        assert!(advertised.contains(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN));
         assert!(advertised.contains(JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN));
 
         // 2. Old runtime JAR SHA (5048b590...) lacks the capability
@@ -3613,7 +3623,8 @@ mod tests {
         };
         assert!(!old_manifest.is_character_slot_compatible());
         let old_advertised = old_manifest.advertised_agent_version();
-        assert_eq!(old_advertised, "0.1.0");
+        assert_eq!(old_advertised, "0.1.0+managed-identity-restart-v1");
+        assert!(old_advertised.contains(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN));
         assert!(!old_advertised.contains(JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN));
 
         // 3. Invalid JAR SHA does not advertise capability
@@ -3631,7 +3642,8 @@ mod tests {
         // 5. No duplicate token across repeated announcements (deterministic)
         let mut already_advertised = compatible_manifest.clone();
         already_advertised.agent_version = "0.1.0+character-slot-v1".to_string();
-        assert_eq!(already_advertised.advertised_agent_version(), "0.1.0+character-slot-v1");
+        assert_eq!(already_advertised.advertised_agent_version(), "0.1.0+character-slot-v1.managed-identity-restart-v1");
+        assert_eq!(already_advertised.advertised_agent_version().matches(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN).count(), 1);
         assert_eq!(already_advertised.advertised_agent_version().matches(JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN).count(), 1);
 
         // 6. devices PATCH payload uses ONLY existing columns and preserves jar_sha256
@@ -3646,7 +3658,7 @@ mod tests {
             assert!(allowed_columns.contains(&key.as_str()), "Key {key} is not an existing devices column");
         }
         assert_eq!(patch_obj.get("jar_sha256").and_then(|v| v.as_str()), Some("0bcd6917d8d87faf9fe78fa938abfe5cdf16c0153fcc876deb337d022bb036fd"));
-        assert_eq!(patch_obj.get("agent_version").and_then(|v| v.as_str()), Some("0.1.0+character-slot-v1"));
+        assert_eq!(patch_obj.get("agent_version").and_then(|v| v.as_str()), Some("0.1.0+character-slot-v1.managed-identity-restart-v1"));
         assert_eq!(patch_obj.get("status").and_then(|v| v.as_str()), Some("online"));
 
         // 7. Test loading actual repository zeus-jar.json
@@ -3660,7 +3672,7 @@ mod tests {
             assert!(loaded_manifest.is_enhancement_multilevel_compatible());
             assert!(loaded_manifest.is_enhancement_queue_v2_compatible());
             assert!(loaded_manifest.is_enhancement_degrade_retry_compatible());
-            assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1");
+            assert_eq!(loaded_manifest.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1.managed-identity-restart-v1");
         }
     }
 
@@ -3789,7 +3801,7 @@ mod tests {
         assert!(v14_manifest.is_character_slot_compatible());
         assert_eq!(
             v14_manifest.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 1b. Inventory Catalog v14 JAR also advertises both tokens and neither advertises enhancement-queue-v1
@@ -3808,7 +3820,7 @@ mod tests {
         assert!(inventory_manifest.is_character_slot_compatible());
         assert_eq!(
             inventory_manifest.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
         assert!(!inventory_manifest.advertised_agent_version().contains("enhancement-queue"));
 
@@ -3828,7 +3840,7 @@ mod tests {
         assert!(enhancement_manifest.is_character_slot_compatible());
         assert_eq!(
             enhancement_manifest.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
         assert!(!enhancement_manifest.advertised_agent_version().contains("enhancement-queue"));
 
@@ -3848,7 +3860,7 @@ mod tests {
         assert!(!v13_manifest.is_visual_qol_compatible());
         assert_eq!(
             v13_manifest.advertised_agent_version(),
-            "0.1.0+character-slot-v1"
+            "0.1.0+character-slot-v1.managed-identity-restart-v1"
         );
         assert!(!v13_manifest.advertised_agent_version().contains("visual-qol-v1"));
 
@@ -3866,14 +3878,14 @@ mod tests {
         };
         assert!(!unknown_manifest.is_character_slot_compatible());
         assert!(!unknown_manifest.is_visual_qol_compatible());
-        assert_eq!(unknown_manifest.advertised_agent_version(), "0.1.0");
+        assert_eq!(unknown_manifest.advertised_agent_version(), "0.1.0+managed-identity-restart-v1");
 
         // 4. Deterministic multi-token serialization without duplicate tokens
         let mut already_advertised = v14_manifest.clone();
         already_advertised.agent_version = "0.1.0+visual-qol-v1.character-slot-v1".to_string();
         assert_eq!(
             already_advertised.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
         assert_eq!(
             already_advertised.advertised_agent_version().matches("character-slot-v1").count(),
@@ -3881,6 +3893,10 @@ mod tests {
         );
         assert_eq!(
             already_advertised.advertised_agent_version().matches("visual-qol-v1").count(),
+            1
+        );
+        assert_eq!(
+            already_advertised.advertised_agent_version().matches("managed-identity-restart-v1").count(),
             1
         );
     }
@@ -3900,7 +3916,7 @@ mod tests {
         };
         assert!(manifest_180a.is_character_slot_compatible(), "180a must be character-slot compatible");
         assert!(manifest_180a.is_visual_qol_compatible(), "180a must be visual-qol compatible");
-        assert_eq!(manifest_180a.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_180a.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
         assert!(!manifest_180a.capabilities().contains(&"enhancement-queue-v1"));
 
         let manifest_final = JarManifest {
@@ -3916,7 +3932,7 @@ mod tests {
         };
         assert!(manifest_final.is_character_slot_compatible(), "final must be character-slot compatible");
         assert!(manifest_final.is_visual_qol_compatible(), "final must be visual-qol compatible");
-        assert_eq!(manifest_final.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_final.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
         assert!(!manifest_final.capabilities().contains(&"enhancement-queue-v1"));
 
         let manifest_dry_run = JarManifest {
@@ -3932,7 +3948,7 @@ mod tests {
         };
         assert!(manifest_dry_run.is_character_slot_compatible(), "dry_run must be character-slot compatible");
         assert!(manifest_dry_run.is_visual_qol_compatible(), "dry_run must be visual-qol compatible");
-        assert_eq!(manifest_dry_run.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_dry_run.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
         assert!(!manifest_dry_run.capabilities().contains(&"enhancement-queue-v1"));
 
         let manifest_corrective = JarManifest {
@@ -3948,7 +3964,7 @@ mod tests {
         };
         assert!(manifest_corrective.is_character_slot_compatible(), "corrective must be character-slot compatible");
         assert!(manifest_corrective.is_visual_qol_compatible(), "corrective must be visual-qol compatible");
-        assert_eq!(manifest_corrective.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_corrective.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
         assert!(!manifest_corrective.capabilities().contains(&"enhancement-queue-v1"));
 
         let manifest_dialog_corrective = JarManifest {
@@ -3964,7 +3980,7 @@ mod tests {
         };
         assert!(manifest_dialog_corrective.is_character_slot_compatible(), "dialog_corrective must be character-slot compatible");
         assert!(manifest_dialog_corrective.is_visual_qol_compatible(), "dialog_corrective must be visual-qol compatible");
-        assert_eq!(manifest_dialog_corrective.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_dialog_corrective.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
         assert!(!manifest_dialog_corrective.capabilities().contains(&"enhancement-queue-v1"));
 
         let manifest_dialog_owned = JarManifest {
@@ -3982,7 +3998,7 @@ mod tests {
         assert!(manifest_dialog_owned.is_visual_qol_compatible(), "dialog_owned must be visual-qol compatible");
         assert!(!manifest_dialog_owned.is_enhancement_queue_compatible(), "old 5b8 JAR must NOT be enhancement-queue compatible");
         assert!(!manifest_dialog_owned.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
-        assert_eq!(manifest_dialog_owned.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_dialog_owned.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
 
         let manifest_reconciled = JarManifest {
             jar_sha256: "dc6a6548df170c7e674fbb1a27e8a4b1dbff805ac07ec81c3c23b67105b93e6c".to_string(),
@@ -3999,7 +4015,7 @@ mod tests {
         assert!(manifest_reconciled.is_visual_qol_compatible(), "reconciled must be visual-qol compatible");
         assert!(!manifest_reconciled.is_enhancement_queue_compatible(), "defective dc6a must NOT be enhancement-queue compatible");
         assert!(!manifest_reconciled.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
-        assert_eq!(manifest_reconciled.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_reconciled.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
 
         let manifest_monotonic = JarManifest {
             jar_sha256: "bdd40df18f29603f99402488b5d84c7c8c8dd87dfe6fd5e123fe13d6e0cf0919".to_string(),
@@ -4015,7 +4031,7 @@ mod tests {
         assert!(manifest_monotonic.is_character_slot_compatible(), "monotonic must be character-slot compatible");
         assert!(manifest_monotonic.is_visual_qol_compatible(), "monotonic must be visual-qol compatible");
         assert!(!manifest_monotonic.is_enhancement_queue_compatible(), "old monotonic must not be enhancement-queue compatible under new agent");
-        assert_eq!(manifest_monotonic.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1");
+        assert_eq!(manifest_monotonic.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1");
 
         let manifest_resilient = JarManifest {
             jar_sha256: "3999f6b674c1780ac3f26d47ad035f5a2d749ef38cea5b256dcd8e1aec3c3504".to_string(),
@@ -4036,7 +4052,7 @@ mod tests {
         assert!(manifest_resilient.is_enhancement_degrade_retry_compatible(), "resilient must be enhancement-degrade-retry compatible");
         assert!(manifest_resilient.capabilities().contains(&JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN));
         assert!(manifest_resilient.capabilities().contains(&JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN));
-        assert_eq!(manifest_resilient.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1");
+        assert_eq!(manifest_resilient.advertised_agent_version(), "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1.managed-identity-restart-v1");
 
         // Unknown JAR must fail closed
         let unknown = JarManifest {
@@ -4054,7 +4070,7 @@ mod tests {
         assert!(!unknown.is_character_slot_compatible());
         assert!(!unknown.is_visual_qol_compatible());
         assert!(!unknown.is_enhancement_queue_compatible());
-        assert_eq!(unknown.advertised_agent_version(), "0.1.0");
+        assert_eq!(unknown.advertised_agent_version(), "0.1.0+managed-identity-restart-v1");
     }
 
     #[test]
@@ -4088,7 +4104,7 @@ mod tests {
         );
         assert_eq!(
             manifest_resilient.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1.managed-identity-restart-v1"
         );
 
         // 0a. Old monotonic bdd40d JAR must NO LONGER receive enhancement-queue-v1 under the new agent
@@ -4115,7 +4131,7 @@ mod tests {
         );
         assert_eq!(
             manifest_monotonic.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 0b. Defective dc6a65 JAR must NO LONGER receive enhancement-queue-v1 under the new agent
@@ -4142,7 +4158,7 @@ mod tests {
         );
         assert_eq!(
             manifest_dc6.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 1. Old 5b8 JAR must NO LONGER advertise enhancement-queue-v1
@@ -4169,7 +4185,7 @@ mod tests {
         );
         assert_eq!(
             manifest_5b8.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 2. 99479d does not get enhancement-queue-v1
@@ -4189,7 +4205,7 @@ mod tests {
         assert!(!manifest_994.is_enhancement_queue_compatible());
         assert_eq!(
             manifest_994.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 3. 17fd2775 does not get enhancement-queue-v1
@@ -4209,7 +4225,7 @@ mod tests {
         assert!(!manifest_17fd.is_enhancement_queue_compatible());
         assert_eq!(
             manifest_17fd.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.managed-identity-restart-v1"
         );
 
         // 4. Unknown JAR fails closed
@@ -4226,14 +4242,14 @@ mod tests {
         };
         assert_eq!(unknown.capabilities().len(), 0);
         assert!(!unknown.is_enhancement_queue_compatible());
-        assert_eq!(unknown.advertised_agent_version(), "0.1.0");
+        assert_eq!(unknown.advertised_agent_version(), "0.1.0+managed-identity-restart-v1");
 
         // 5. Deterministic token order preserved when metadata already had tokens in different order
         let mut disordered = manifest_resilient.clone();
         disordered.agent_version = "0.1.0+visual-qol-v1.enhancement-multilevel-v1.enhancement-queue-v1.character-slot-v1".to_string();
         assert_eq!(
             disordered.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1.managed-identity-restart-v1"
         );
         assert_eq!(disordered.advertised_agent_version().matches("enhancement-queue-v1").count(), 1);
         assert_eq!(disordered.advertised_agent_version().matches("enhancement-queue-v2").count(), 1);
@@ -4241,6 +4257,7 @@ mod tests {
         assert_eq!(disordered.advertised_agent_version().matches("enhancement-multilevel-v1").count(), 1);
         assert_eq!(disordered.advertised_agent_version().matches("character-slot-v1").count(), 1);
         assert_eq!(disordered.advertised_agent_version().matches("visual-qol-v1").count(), 1);
+        assert_eq!(disordered.advertised_agent_version().matches("managed-identity-restart-v1").count(), 1);
     }
 
     #[test]
@@ -4269,7 +4286,7 @@ mod tests {
         assert!(manifest_resilient.capabilities().contains(&JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN));
         assert_eq!(
             manifest_resilient.advertised_agent_version(),
-            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1"
+            "0.1.0+character-slot-v1.visual-qol-v1.enhancement-queue-v1.enhancement-multilevel-v1.enhancement-queue-v2.enhancement-degrade-retry-v1.managed-identity-restart-v1"
         );
 
         // 2. Modeled old agent contract (pre-06F 8f720fb) does NOT advertise enhancement-multilevel-v1
@@ -4619,6 +4636,65 @@ mod tests {
         assert_eq!(
             evaluate_replacement_stop(StopTransition::FailedStillAlive),
             ReplacementStopResolution::AbortRetainProcess
+        );
+    }
+    #[test]
+    fn test_managed_identity_restart_capability_advertisement() {
+        assert_eq!(
+            JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN,
+            "managed-identity-restart-v1"
+        );
+        assert!(JarManifest::RUST_SUPPORTS_MANAGED_IDENTITY_RESTART);
+
+        // 1. Advertised agent version contains exactly one managed-identity-restart-v1 token
+        let v403_r2_manifest = JarManifest {
+            jar_sha256: JarManifest::V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1545629,
+            ctl_version: 15,
+            snapshot_version: 6,
+            ctl_key_count: 38,
+            snapshot_key_count: 49,
+            built_at: "2026-10-04T00:00:00Z".to_string(),
+            patcher_sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            agent_version: "".to_string(),
+        };
+        let advertised = v403_r2_manifest.advertised_agent_version();
+        assert!(advertised.contains(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN));
+        assert_eq!(
+            advertised.matches(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN).count(),
+            1
+        );
+
+        // 2. Existing character-slot/visual/enhancement capability tokens remain unchanged
+        assert!(v403_r2_manifest.is_character_slot_compatible());
+        assert!(v403_r2_manifest.is_visual_qol_compatible());
+        assert!(v403_r2_manifest.is_enhancement_queue_compatible());
+        assert!(v403_r2_manifest.is_enhancement_multilevel_compatible());
+        assert!(v403_r2_manifest.is_enhancement_queue_v2_compatible());
+        assert!(v403_r2_manifest.is_enhancement_degrade_retry_compatible());
+
+        // 3. Avoid duplicate capability token emission when existing metadata already contains it
+        let mut already_advertised = v403_r2_manifest.clone();
+        already_advertised.agent_version = "0.1.0+managed-identity-restart-v1.other-v1".to_string();
+        let adv_dedup = already_advertised.advertised_agent_version();
+        assert_eq!(
+            adv_dedup.matches(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN).count(),
+            1
+        );
+
+        // 4. Do not add managed-identity-restart-v1 to KNOWN_RUNTIME_CONTRACTS capabilities (agent-only)
+        for contract in KNOWN_RUNTIME_CONTRACTS {
+            assert!(
+                !contract.capabilities.contains(&JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN),
+                "Contract {} must not contain agent-only token",
+                contract.name
+            );
+        }
+
+        // 5. JAR SHA and runtime contracts remain unchanged
+        assert_eq!(
+            JarManifest::V403_BACH_HO_R2_ZEUS_ONLY_COMPATIBLE_JAR_SHA256,
+            "4009f070808d72bde555b7763d9c9e2924e9385a62ac1a96494d71cc3c4b657d"
         );
     }
 }
