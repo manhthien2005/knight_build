@@ -905,6 +905,17 @@ pub const KNOWN_RUNTIME_CONTRACTS: &[RuntimeContract] = &[
             JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
         ],
     },
+    RuntimeContract {
+        name: "V403_FORGE_FIX_ZEUS_ONLY",
+        jar_sha256: JarManifest::V403_FORGE_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256,
+        ctl_version: 15,
+        capabilities: &[
+            JarManifest::CHARACTER_SLOT_CAPABILITY_TOKEN,
+            JarManifest::VISUAL_QOL_CAPABILITY_TOKEN,
+            JarManifest::ENHANCEMENT_QUEUE_CAPABILITY_TOKEN,
+            JarManifest::ENHANCEMENT_MULTILEVEL_CAPABILITY_TOKEN,
+        ],
+    },
 ];
 
 impl JarManifest {
@@ -959,6 +970,8 @@ impl JarManifest {
         "4009f070808d72bde555b7763d9c9e2924e9385a62ac1a96494d71cc3c4b657d";
     pub const V403_MOVEMENT_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256: &'static str =
         "51cb7d4eb8d8d3037a0aa7808563e06a55a3e1765adef58b62911074d81e6d9a";
+    pub const V403_FORGE_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256: &'static str =
+        "0bddaee4680f8521f4628f4d52399ceee161c4e5d0387eab3dbe48cf662e8216";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -3676,7 +3689,7 @@ mod tests {
 
         // 7. Test loading actual repository zeus-jar.json
         if let Some(loaded_manifest) = read_jar_manifest("../../../vendor/game/zeus-jar.json") {
-            assert_eq!(loaded_manifest.jar_sha256, JarManifest::V403_MOVEMENT_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256);
+            assert_eq!(loaded_manifest.jar_sha256, JarManifest::V403_FORGE_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256);
             assert_eq!(loaded_manifest.ctl_version, 15);
             assert_eq!(loaded_manifest.ctl_key_count, 38);
             assert!(loaded_manifest.is_character_slot_compatible());
@@ -4713,6 +4726,10 @@ mod tests {
             JarManifest::V403_MOVEMENT_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256,
             "51cb7d4eb8d8d3037a0aa7808563e06a55a3e1765adef58b62911074d81e6d9a"
         );
+        assert_eq!(
+            JarManifest::V403_FORGE_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256,
+            "0bddaee4680f8521f4628f4d52399ceee161c4e5d0387eab3dbe48cf662e8216"
+        );
 
         // 6. Verify movement fix manifest compatibility and capabilities
         let v403_mov_manifest = JarManifest {
@@ -4734,5 +4751,26 @@ mod tests {
         assert!(v403_mov_manifest.is_enhancement_multilevel_compatible());
         assert!(v403_mov_manifest.is_enhancement_queue_v2_compatible());
         assert!(v403_mov_manifest.is_enhancement_degrade_retry_compatible());
+
+        // 7. Verify forge fix manifest compatibility and capabilities
+        let v403_forge_manifest = JarManifest {
+            jar_sha256: JarManifest::V403_FORGE_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256.to_string(),
+            jar_size: 1545607,
+            ctl_version: 15,
+            snapshot_version: 6,
+            ctl_key_count: 38,
+            snapshot_key_count: 49,
+            built_at: "2026-10-06T00:00:00Z".to_string(),
+            patcher_sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            agent_version: "".to_string(),
+        };
+        let adv_forge = v403_forge_manifest.advertised_agent_version();
+        assert!(adv_forge.contains(JarManifest::MANAGED_IDENTITY_RESTART_CAPABILITY_TOKEN));
+        assert!(v403_forge_manifest.is_character_slot_compatible());
+        assert!(v403_forge_manifest.is_visual_qol_compatible());
+        assert!(v403_forge_manifest.is_enhancement_queue_compatible());
+        assert!(v403_forge_manifest.is_enhancement_multilevel_compatible());
+        assert!(v403_forge_manifest.is_enhancement_queue_v2_compatible());
+        assert!(v403_forge_manifest.is_enhancement_degrade_retry_compatible());
     }
 }

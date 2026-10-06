@@ -2985,7 +2985,7 @@ public final class Zeus {
         // ---- ENHANCE-04 -------------------------------------------------------
         if (enhState == 6 && items != null) {
             try {
-                int pickIndex = 0;
+                int pickIndex = -1;
                 for (int i = 0; i < items.size(); i++) {
                     Object entry = items.elementAt(i);
                     if (entry instanceof iCommand) {
@@ -2996,8 +2996,10 @@ public final class Zeus {
                         }
                     }
                 }
-                GlobalService.gI().Dynamic_Menu((short) idNPC, (byte) idMenu, (byte) pickIndex);
-                taken = true;
+                if (pickIndex >= 0) {
+                    GlobalService.gI().Dynamic_Menu((short) idNPC, (byte) idMenu, (byte) pickIndex);
+                    taken = true;
+                }
             } catch (Throwable t) {
             }
         }

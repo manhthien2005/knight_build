@@ -866,6 +866,54 @@ public class EnhancementEngineTest {
         check("payload field order preserves menu byte 0", wireMenu == (byte) 0);
         check("payload field order preserves option byte 0", wireOption == (byte) 0);
 
+        // 10.8: Fail-closed verification for serverMenu
+        // Case A: Unrelated menu without "cuong hoa" must NOT be taken, and must send 0 packets
+        clearQueue();
+        set("enhState", 6);
+        mVector unrelatedMenu = new mVector("menu");
+        unrelatedMenu.addElement(new iCommand("Nhiệm vụ", 0));
+        unrelatedMenu.addElement(new iCommand("Thoát", 1));
+        boolean unrelatedTaken = ((Boolean) serverMenuMethod.invoke(null, unrelatedMenu, 0, -36, "Pháp sư")).booleanValue();
+        check("unrelated menu is NOT taken (fail-closed)", !unrelatedTaken);
+        check("unrelated menu produces zero packets", queue().size() == 0);
+
+        // Case B: Full live-shape 18-item Pháp sư menu
+        clearQueue();
+        set("enhState", 6);
+        mVector fullPhapSuMenu = new mVector("menu");
+        fullPhapSuMenu.addElement(new iCommand("Cường hóa", 0));
+        fullPhapSuMenu.addElement(new iCommand("Chuyển hóa trang bị", 1));
+        fullPhapSuMenu.addElement(new iCommand("Shop nguyên liệu", 2));
+        fullPhapSuMenu.addElement(new iCommand("Hướng dẫn Cường hóa", 3));
+        fullPhapSuMenu.addElement(new iCommand("Hướng dẫn Chuyển hóa trang bị", 4));
+        fullPhapSuMenu.addElement(new iCommand("Hợp thành", 5));
+        fullPhapSuMenu.addElement(new iCommand("Hướng dẫn Hợp thành", 6));
+        fullPhapSuMenu.addElement(new iCommand("Khảm ngọc", 7));
+        fullPhapSuMenu.addElement(new iCommand("Hướng dẫn khảm ngọc", 8));
+        fullPhapSuMenu.addElement(new iCommand("Hợp ngọc", 9));
+        fullPhapSuMenu.addElement(new iCommand("Hướng dẫn hợp ngọc", 10));
+        fullPhapSuMenu.addElement(new iCommand("Đục lỗ", 11));
+        fullPhapSuMenu.addElement(new iCommand("Hợp nguyên liệu mề đay", 12));
+        fullPhapSuMenu.addElement(new iCommand("Mề đay chiến binh", 13));
+        fullPhapSuMenu.addElement(new iCommand("Mề đay pháp sư", 14));
+        fullPhapSuMenu.addElement(new iCommand("Mề đay sát thủ", 15));
+        fullPhapSuMenu.addElement(new iCommand("Mề đay xạ thủ", 16));
+        fullPhapSuMenu.addElement(new iCommand("Nâng cấp mề đay", 17));
+        boolean fullMenuTaken = ((Boolean) serverMenuMethod.invoke(null, fullPhapSuMenu, 0, -36, "Pháp sư")).booleanValue();
+        check("live-shape 18-item menu taken", fullMenuTaken);
+        check("live-shape 18-item menu sends exactly 1 packet", queue().size() == 1);
+        Message fullPkt = (Message) queue().elementAt(0);
+        check("live-shape menu wire opcode is -30", fullPkt.command == (byte) -30);
+        byte[] fullPayload = fullPkt.getData();
+        java.io.DataInputStream disFull = new java.io.DataInputStream(new java.io.ByteArrayInputStream(fullPayload));
+        short fullNpc = disFull.readShort();
+        byte fullMenuId = disFull.readByte();
+        byte fullOption = disFull.readByte();
+        check("live-shape menu packet NPC is -36", fullNpc == (short) -36);
+        check("live-shape menu packet menu is 0", fullMenuId == (byte) 0);
+        check("live-shape menu packet option is 0", fullOption == (byte) 0);
+
+
         // ---------------------------------------------------------------------
         // Test 11: Deterministic Pre-Opcode-67 Validation Interlock & Guard
         // ---------------------------------------------------------------------
