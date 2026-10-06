@@ -6755,13 +6755,15 @@ public final class Zeus {
                         enhArmedBlacksmithNpcId = blacksmith.ID;
                         enhArmedBlacksmithGeneration = ++enhBlacksmithInteractionGenerationSeq;
                         try {
-                            GlobalService.gI().chat_npc((byte) blacksmith.ID);
+                            if (!nativeNpcInteract(blacksmith)) {
+                                throw new RuntimeException("nativeNpcInteract returned false");
+                            }
                         } catch (Throwable t) {
                             enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
                             enhArmedBlacksmithGeneration = 0L;
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
-                            enhErrorMessage = "Failed sending interaction packet to blacksmith";
+                            enhErrorMessage = "Failed native interaction with blacksmith";
                             cleanEnhancementRouting();
                         }
                     }
@@ -6786,13 +6788,15 @@ public final class Zeus {
                         enhArmedBlacksmithNpcId = bs.ID;
                         enhArmedBlacksmithGeneration = ++enhBlacksmithInteractionGenerationSeq;
                         try {
-                            GlobalService.gI().chat_npc((byte) bs.ID);
+                            if (!nativeNpcInteract(bs)) {
+                                throw new RuntimeException("nativeNpcInteract returned false");
+                            }
                         } catch (Throwable t) {
                             enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
                             enhArmedBlacksmithGeneration = 0L;
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
-                            enhErrorMessage = "Failed sending interaction packet to blacksmith";
+                            enhErrorMessage = "Failed native interaction with blacksmith";
                             cleanEnhancementRouting();
                         }
                         publishEnhancementStatus();
@@ -6966,13 +6970,15 @@ public final class Zeus {
                         enhArmedBlacksmithNpcId = bsRetry.ID;
                         enhArmedBlacksmithGeneration = ++enhBlacksmithInteractionGenerationSeq;
                         try {
-                            GlobalService.gI().chat_npc((byte) bsRetry.ID);
+                            if (!nativeNpcInteract(bsRetry)) {
+                                throw new RuntimeException("nativeNpcInteract returned false");
+                            }
                         } catch (Throwable t) {
                             enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
                             enhArmedBlacksmithGeneration = 0L;
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
-                            enhErrorMessage = "Failed retry interaction packet to blacksmith";
+                            enhErrorMessage = "Failed retry native interaction with blacksmith";
                             cleanEnhancementRouting();
                             publishEnhancementStatus();
                             return;
@@ -7244,6 +7250,30 @@ public final class Zeus {
     }
 
     /**
+     * Generic native NPC interaction helper matching official v4.0.3 client interaction.
+     * Sets ObjFocus, resets direction and player action, and polymorphically invokes GiaoTiep().
+     *
+     * @param npc the NPC to interact with
+     * @return true if interaction succeeded, false if preconditions failed
+     */
+    public static boolean nativeNpcInteract(MainObject npc) {
+        if (npc == null || GameScreen.player == null) {
+            return false;
+        }
+        GameScreen.ObjFocus = npc;
+        try {
+            MainObject.resetDirection(GameScreen.player, npc);
+        } catch (Throwable ignored) {
+        }
+        try {
+            GameScreen.player.resetAction();
+        } catch (Throwable ignored) {
+        }
+        npc.GiaoTiep();
+        return true;
+    }
+
+    /**
      * Asks an NPC and arms the wait, exactly as {@link #travelStone} asks a teleport stone.
      *
      * Returns false only when the send itself failed. The reply is a packet and lands on a later
@@ -7257,17 +7287,11 @@ public final class Zeus {
         dungeonMenuId = Integer.MIN_VALUE;
         dungeonMenu = null;
         dungeonMenuNpc = Integer.MIN_VALUE;
-        GameScreen.ObjFocus = npc;
         try {
-            MainObject.resetDirection(GameScreen.player, npc);
-        } catch (Throwable t) {
-        }
-        try {
-            GameScreen.player.resetAction();
-        } catch (Throwable t) {
-        }
-        try {
-            npc.GiaoTiep();
+            if (!nativeNpcInteract(npc)) {
+                dungeonState = DN_ROUTING;
+                return false;
+            }
         } catch (Throwable t) {
             dungeonState = DN_ROUTING;
             return false;
@@ -7286,14 +7310,10 @@ public final class Zeus {
         }
         MainObject npc = dungeonNpc();
         if (npc != null && GameScreen.player != null) {
-            GameScreen.ObjFocus = npc;
             try {
-                MainObject.resetDirection(GameScreen.player, npc);
-                GameScreen.player.resetAction();
-            } catch (Throwable t) {
-            }
-            try {
-                npc.GiaoTiep();
+                if (!nativeNpcInteract(npc)) {
+                    return false;
+                }
                 dungeonMenu = null;
                 dungeonMenuNpc = Integer.MIN_VALUE;
                 dungeonWait = 40;

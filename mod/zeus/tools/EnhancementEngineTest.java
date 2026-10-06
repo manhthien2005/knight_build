@@ -808,9 +808,7 @@ public class EnhancementEngineTest {
         enhanceMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
         check("When near Pháp sư, transitions to OPENING_FORGE (6)", state == 6);
-        check("Emitted NPC interaction packet (not opcode 67)", queue().size() == 1);
-        Message talkPkt = (Message) queue().elementAt(0);
-        check("Interaction packet is not opcode 67", talkPkt.command != 67);
+        check("Native interaction emits zero raw chat_npc packets", queue().size() == 0);
 
         // Subtest 9.5: Current Map 1 near-anchor fast path
         clearQueue();
@@ -825,7 +823,7 @@ public class EnhancementEngineTest {
         enhanceMethod.invoke(null);
         state = ((Integer) get("enhState")).intValue();
         check("Near-anchor fast path transitions directly from 4 to OPENING_FORGE (6)", state == 6);
-        check("Fast path sends NPC interaction without cross-map routing", queue().size() == 1);
+        check("Fast path performs native NPC interaction without raw packets", queue().size() == 0);
 
         // Subtest 9.6: Missing live Pháp sư after bounded scans
         setupWorldState(1);
@@ -2140,6 +2138,206 @@ public class EnhancementEngineTest {
         check("15.3: Genuinely new UUID after restart accepted into VALIDATING_REQUEST (1)", ((Integer) get("enhState")).intValue() == 1);
         check("15.3: New UUID adopted", "uuid-test-15-brand-new".equals(get("enhRequestId")));
 
+        // ---------------------------------------------------------------------
+        // Test 16: Native Blacksmith NPC Interaction & Full Forge Validation-Only Lifecycle
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 16: Native Blacksmith NPC Interaction & Full Forge Lifecycle ---");
+        set("enhReqPath", null);
+        set("enhStatusPath", null);
+        set("enhCancelPath", null);
+        call("enhanceReset");
+        if (GameCanvas.menu2 != null) GameCanvas.menu2.isShowMenu = false;
+        GameCanvas.currentDialog = null;
+        GameCanvas.subDialog = null;
+
+        // 16.1: Initial interaction from state 4 (LOCATING_BLACKSMITH) polymorphically invokes GiaoTiep()
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        MockPolymorphicPhapSu polyBs = new MockPolymorphicPhapSu("Pháp sư", -36, 2, 324, 624);
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(polyBs);
+        GameScreen.player.x = 324;
+        GameScreen.player.y = 624;
+        GameScreen.player.Action = 1; // 1 is moving -> resetAction resets to 0
+        GameScreen.player.vx = 5;
+        GameScreen.ObjFocus = null;
+
+        set("enhState", 4); // LOCATING_BLACKSMITH
+        set("enhWait", 0);
+        set("enhValidationOnly", true);
+        enhanceMethod.invoke(null);
+
+        check("16.1: GameScreen.ObjFocus set to Pháp sư", GameScreen.ObjFocus == polyBs);
+        check("16.1: player.resetAction invoked (Action == 0)", GameScreen.player.Action == 0 && GameScreen.player.vx == 0);
+        check("16.1: polymorphic GiaoTiep() invoked exactly once", polyBs.giaoTiepCount == 1);
+        check("16.1: zero raw chat_npc packets sent on initial interaction", queue().size() == 0);
+        check("16.1: state transitioned to OPENING_FORGE (6)", ((Integer) get("enhState")).intValue() == 6);
+        check("16.1: enhArmedBlacksmithNpcId armed to -36", ((Integer) get("enhArmedBlacksmithNpcId")).intValue() == -36);
+        check("16.1: enhArmedBlacksmithGeneration armed > 0", ((Long) get("enhArmedBlacksmithGeneration")).longValue() > 0L);
+
+        // 16.2: Initial interaction from state 5 (APPROACHING_BLACKSMITH) when within range
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        polyBs = new MockPolymorphicPhapSu("Pháp sư", -36, 2, 324, 624);
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(polyBs);
+        GameScreen.player.x = 324;
+        GameScreen.player.y = 624;
+        GameScreen.player.Action = 2;
+        GameScreen.ObjFocus = null;
+
+        set("enhState", 5); // APPROACHING_BLACKSMITH
+        set("enhWait", 0);
+        set("enhValidationOnly", true);
+        enhanceMethod.invoke(null);
+
+        check("16.2: state 5 sets ObjFocus to Pháp sư", GameScreen.ObjFocus == polyBs);
+        check("16.2: state 5 invokes polymorphic GiaoTiep() exactly once", polyBs.giaoTiepCount == 1);
+        check("16.2: state 5 sends zero raw chat_npc packets", queue().size() == 0);
+        check("16.2: state 5 transitions to OPENING_FORGE (6)", ((Integer) get("enhState")).intValue() == 6);
+
+        // 16.3: GiaoTiep() throwing exception transitions to BLACKSMITH_INTERACTION_FAILED (37) and clears armed context
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        MockPolymorphicPhapSu faultyBs = new MockPolymorphicPhapSu("Pháp sư", -36, 2, 324, 624);
+        faultyBs.throwOnGiaoTiep = true;
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(faultyBs);
+        GameScreen.player.x = 324;
+        GameScreen.player.y = 624;
+
+        set("enhState", 4); // LOCATING_BLACKSMITH
+        set("enhWait", 0);
+        set("enhValidationOnly", true);
+        enhanceMethod.invoke(null);
+
+        check("16.3: GiaoTiep exception transitions to BLACKSMITH_INTERACTION_FAILED (37)", ((Integer) get("enhState")).intValue() == 37);
+        check("16.3: error code is BLACKSMITH_INTERACTION_FAILED", "BLACKSMITH_INTERACTION_FAILED".equals(get("enhErrorCode")));
+        check("16.3: armed NPC id cleared to Integer.MIN_VALUE", ((Integer) get("enhArmedBlacksmithNpcId")).intValue() == Integer.MIN_VALUE);
+        check("16.3: armed generation cleared to 0", ((Long) get("enhArmedBlacksmithGeneration")).longValue() == 0L);
+        check("16.3: zero packets emitted on failure", queue().size() == 0);
+
+        // 16.4: Retry in OPENING_FORGE uses native interaction again exactly once
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        polyBs = new MockPolymorphicPhapSu("Pháp sư", -36, 2, 324, 624);
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(polyBs);
+        GameScreen.player.x = 324;
+        GameScreen.player.y = 624;
+        GameScreen.ObjFocus = null;
+
+        set("enhState", 6); // OPENING_FORGE
+        set("enhWait", 0);
+        set("enhForgeOpenTries", 1);
+        armBlacksmithInteraction(-36);
+        long preRetryGen = ((Long) get("enhArmedBlacksmithGeneration")).longValue();
+
+        enhanceMethod.invoke(null); // triggers retry
+        check("16.4: retry invokes polymorphic GiaoTiep() exactly once", polyBs.giaoTiepCount == 1);
+        check("16.4: retry sets ObjFocus to Pháp sư", GameScreen.ObjFocus == polyBs);
+        check("16.4: retry sends zero raw chat_npc packets", queue().size() == 0);
+        check("16.4: retry increments enhForgeOpenTries to 2", ((Integer) get("enhForgeOpenTries")).intValue() == 2);
+        check("16.4: retry advances interaction generation", ((Long) get("enhArmedBlacksmithGeneration")).longValue() > preRetryGen);
+
+        // 16.5: No retry interaction while dialog or menu is visible
+        clearQueue();
+        int countBeforeDialogBlock = polyBs.giaoTiepCount;
+        set("enhWait", 0);
+        set("enhForgeOpenTries", 1);
+        GameCanvas.currentDialog = genericDlg;
+        enhanceMethod.invoke(null);
+        check("16.5: no retry while currentDialog is visible", polyBs.giaoTiepCount == countBeforeDialogBlock);
+        check("16.5: forgeOpenTries unchanged while dialog visible", ((Integer) get("enhForgeOpenTries")).intValue() == 1);
+        GameCanvas.currentDialog = null;
+
+        GameCanvas.menu2.isShowMenu = true;
+        enhanceMethod.invoke(null);
+        check("16.5: no retry while menu2 is visible", polyBs.giaoTiepCount == countBeforeDialogBlock);
+        GameCanvas.menu2.isShowMenu = false;
+
+        // 16.6: Full validation-only path A: Native interaction -> Intro MsgDialog -> Exact Cường hóa -> Server Menu2 -> DRY_RUN_COMPLETE
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        polyBs = new MockPolymorphicPhapSu("Pháp sư", -36, 2, 324, 624);
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(polyBs);
+        GameScreen.player.x = 324;
+        GameScreen.player.y = 624;
+        set("enhActualGoldSpent", 0L);
+        set("enhActualGemSpent", 0L);
+        set("enhValidationOnly", true);
+        set("enhState", 4); // Start at LOCATING_BLACKSMITH
+        set("enhWait", 0);
+
+        // Step 1: Initial native interaction tick
+        enhanceMethod.invoke(null);
+        check("16.6: initial native interaction invoked", polyBs.giaoTiepCount == 1);
+        check("16.6: state is OPENING_FORGE (6)", ((Integer) get("enhState")).intValue() == 6);
+
+        // Step 2: Native intro dialog arrives
+        TestDialogTarget pathAT1 = new TestDialogTarget();
+        TestDialogTarget pathAT2 = new TestDialogTarget();
+        pathAT1.dismissOnPress = true;
+        MsgDialog pathAIntro = makePhapSuIntroDialog(pathAT1, pathAT2);
+        GameCanvas.currentDialog = pathAIntro;
+        enhanceMethod.invoke(null);
+        check("16.6: native perform() invoked on intro dialog", pathAT1.pressCount == 1);
+        check("16.6: intro dialog dismissed", GameCanvas.currentDialog == null);
+
+        // Step 3: Server menu arrives and is deferred
+        serverMenuMethod.invoke(null, fullPhapSuMenu, 0, -36, "Pháp sư");
+        setupMockNativeMenu2(-36, 0, fullPhapSuMenu);
+        enhanceMethod.invoke(null); // dispatches menu selection
+        check("16.6: deferred menu selection dispatched", queue().size() == 1);
+
+        // Step 4: TabRebuildItem screen opens -> DRY_RUN_COMPLETE reached
+        GameCanvas.currentScreen = makeForgePopup();
+        enhanceMethod.invoke(null);
+        check("16.6: Path A reaches DRY_RUN_COMPLETE (39)", ((Integer) get("enhState")).intValue() == 39);
+        check("16.6: Path A sends zero Opcode 67 packets", queue().size() == 1 && ((Message) queue().elementAt(0)).command != 67);
+        check("16.6: Path A actual gold spent is 0", ((Long) get("enhActualGoldSpent")).longValue() == 0L);
+        check("16.6: Path A actual gems spent is 0", ((Long) get("enhActualGemSpent")).longValue() == 0L);
+
+        // 16.7: Full validation-only path B: Native interaction -> Direct server Menu2 (no intro dialog) -> DRY_RUN_COMPLETE
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        polyBs = new MockPolymorphicPhapSu("Pháp sư", -36, 2, 324, 624);
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(polyBs);
+        GameScreen.player.x = 324;
+        GameScreen.player.y = 624;
+        set("enhActualGoldSpent", 0L);
+        set("enhActualGemSpent", 0L);
+        set("enhValidationOnly", true);
+        set("enhState", 4); // Start at LOCATING_BLACKSMITH
+        set("enhWait", 0);
+
+        // Step 1: Initial native interaction tick
+        enhanceMethod.invoke(null);
+        check("16.7: Path B initial native interaction invoked", polyBs.giaoTiepCount == 1);
+        check("16.7: Path B state is OPENING_FORGE (6)", ((Integer) get("enhState")).intValue() == 6);
+
+        // Step 2: Direct server menu arrives (no currentDialog)
+        serverMenuMethod.invoke(null, fullPhapSuMenu, 0, -36, "Pháp sư");
+        setupMockNativeMenu2(-36, 0, fullPhapSuMenu);
+        enhanceMethod.invoke(null); // dispatches menu selection
+        check("16.7: Path B deferred menu selection dispatched", queue().size() == 1);
+
+        // Step 3: TabRebuildItem screen opens -> DRY_RUN_COMPLETE reached
+        GameCanvas.currentScreen = makeForgePopup();
+        enhanceMethod.invoke(null);
+        check("16.7: Path B reaches DRY_RUN_COMPLETE (39)", ((Integer) get("enhState")).intValue() == 39);
+        check("16.7: Path B sends zero Opcode 67 packets", queue().size() == 1 && ((Message) queue().elementAt(0)).command != 67);
+        check("16.7: Path B actual gold spent is 0", ((Long) get("enhActualGoldSpent")).longValue() == 0L);
+        check("16.7: Path B actual gems spent is 0", ((Long) get("enhActualGemSpent")).longValue() == 0L);
+
         System.out.println("=== EnhancementEngineTest Total Failures: " + failures + " ===");
         if (failures > 0) {
             System.exit(1);
@@ -2237,6 +2435,9 @@ public class EnhancementEngineTest {
             GameScreen.player.y = 100;
         }
         try {
+            Field lsi = Class.forName("Zeus").getDeclaredField("lastScreenId");
+            lsi.setAccessible(true);
+            lsi.set(null, 2);
             Field rst = Class.forName("Zeus").getDeclaredField("readySettleTicks");
             rst.setAccessible(true);
             rst.set(null, 15);
@@ -2270,4 +2471,21 @@ public class EnhancementEngineTest {
         npc.y = y;
         return npc;
     }
-}
+
+    static class MockPolymorphicPhapSu extends MainObject {
+        int giaoTiepCount = 0;
+        boolean throwOnGiaoTiep = false;
+        MockPolymorphicPhapSu(String name, int id, int type, int x, int y) {
+            this.name = name;
+            this.ID = id;
+            this.typeObject = (byte) type;
+            this.x = x;
+            this.y = y;
+        }
+        public void GiaoTiep() {
+            giaoTiepCount++;
+            if (throwOnGiaoTiep) {
+                throw new RuntimeException("GiaoTiep native simulated failure");
+            }
+        }
+    }
