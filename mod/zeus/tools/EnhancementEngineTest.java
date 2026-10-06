@@ -1135,6 +1135,8 @@ public class EnhancementEngineTest {
         MsgDialog liveIntroDlg = makePhapSuIntroDialog(targetCuongHoa, targetDong);
 
         set("enhState", 6); // OPENING_FORGE
+        armBlacksmithInteraction(-36);
+        GameCanvas.currentDialog = liveIntroDlg;
         boolean isIntro = ((Boolean) isIntroDlgMethod.invoke(null, liveIntroDlg)).booleanValue();
         check("10B.1: live Pháp sư intro dialog is positively recognized", isIntro);
 
@@ -1150,6 +1152,7 @@ public class EnhancementEngineTest {
         set("enhValidationOnly", false);
         set("enhState", 6);
         set("enhWait", 0);
+        armBlacksmithInteraction(-36);
         targetCuongHoa.pressCount = 0;
         targetCuongHoa.dismissOnPress = false; // keep dialog visible for duplicate tick test
         GameCanvas.currentDialog = liveIntroDlg;
@@ -1157,9 +1160,22 @@ public class EnhancementEngineTest {
         check("10B.2: native perform() invoked on Cường hóa button", targetCuongHoa.pressCount == 1);
         check("10B.2: intro dialog marked handled", ((Boolean) get("enhIntroDialogHandled")).booleanValue());
 
-        // 10B.3: Duplicate dialog tick immunity (no second click)
+        // 10B.3: Duplicate dialog tick immunity (no second click on same object)
         enhanceMethod.invoke(null);
         check("10B.3: same dialog on next tick is NOT clicked again", targetCuongHoa.pressCount == 1);
+
+        // 10B.3b: Same semantic dialog reconstructed as a new MsgDialog object => no second perform within same interaction generation
+        TestDialogTarget targetCuongHoaRecon = new TestDialogTarget();
+        TestDialogTarget targetDongRecon = new TestDialogTarget();
+        MsgDialog liveIntroDlgRecon = makePhapSuIntroDialog(targetCuongHoaRecon, targetDongRecon);
+        Method fpMethod = Class.forName("Zeus").getDeclaredMethod("computeDialogFingerprint", MainDialog.class);
+        fpMethod.setAccessible(true);
+        long origFp = ((Long) fpMethod.invoke(null, liveIntroDlg)).longValue();
+        long reconFp = ((Long) fpMethod.invoke(null, liveIntroDlgRecon)).longValue();
+        check("10B.3b: semantic fingerprints match across reconstructed MsgDialog objects", origFp == reconFp && origFp != 0L);
+        GameCanvas.currentDialog = liveIntroDlgRecon;
+        enhanceMethod.invoke(null);
+        check("10B.3b: reconstructed MsgDialog object with same semantics is NOT clicked again in same generation", targetCuongHoaRecon.pressCount == 0);
 
         // 10B.4: Unrelated generic MsgDialog remains untouched
         call("cleanEnhancementRouting");
@@ -1168,6 +1184,7 @@ public class EnhancementEngineTest {
         set("enhValidationOnly", false);
         set("enhState", 6);
         set("enhWait", 0);
+        armBlacksmithInteraction(-36);
         TestDialogTarget genericT1 = new TestDialogTarget();
         TestDialogTarget genericT2 = new TestDialogTarget();
         MsgDialog genericDlg = makeCustomDialog(null, "Bạn có muốn rời khỏi khu vực này?", "Đồng ý", genericT1, "Hủy", genericT2);
@@ -1209,13 +1226,14 @@ public class EnhancementEngineTest {
         enhanceMethod.invoke(null);
         check("10B.7: broadcast modal untouched", bcastT1.pressCount == 0);
 
-        // 10B.8: subDialog unrelated remains untouched
+        // 10B.8: subDialog remains untouched (only currentDialog handled)
         call("cleanEnhancementRouting");
         setupWorldState(1);
         GameCanvas.currentScreen = GameCanvas.game;
         set("enhValidationOnly", false);
         set("enhState", 6);
         set("enhWait", 0);
+        armBlacksmithInteraction(-36);
         TestDialogTarget subT1 = new TestDialogTarget();
         TestDialogTarget subT2 = new TestDialogTarget();
         MsgDialog subDlg = makePhapSuIntroDialog(subT1, subT2);
@@ -1233,6 +1251,7 @@ public class EnhancementEngineTest {
         set("enhValidationOnly", false);
         set("enhState", 6);
         set("enhWait", 0);
+        armBlacksmithInteraction(-36);
         TestDialogTarget badBtn1 = new TestDialogTarget();
         TestDialogTarget badBtn2 = new TestDialogTarget();
         MsgDialog badBtnDlg = makeCustomDialog("Pháp sư", "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", "Đóng", badBtn1, "Hủy", badBtn2);
@@ -1250,6 +1269,7 @@ public class EnhancementEngineTest {
         set("enhValidationOnly", false);
         set("enhState", 6);
         set("enhWait", 0);
+        armBlacksmithInteraction(-36);
         TestDialogTarget stubbornT1 = new TestDialogTarget();
         TestDialogTarget stubbornT2 = new TestDialogTarget();
         stubbornT1.dismissOnPress = false;
@@ -1278,6 +1298,94 @@ public class EnhancementEngineTest {
         check("10B.11: chat_npc is blocked while a dialog is active (0 packets queued)", queue().size() == 0);
         GameCanvas.currentDialog = null;
 
+        // 10B.13: Pháp sư title + only Giao tiếp/Đóng => generic giao tiep removed, fails closed when armed
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("enhState", 6);
+        set("enhWait", 0);
+        armBlacksmithInteraction(-36);
+        TestDialogTarget gtT1 = new TestDialogTarget();
+        TestDialogTarget gtT2 = new TestDialogTarget();
+        MsgDialog gtDlg = makeCustomDialog("Pháp sư", "Ta có thể gia tăng sức mạnh...", "Giao tiếp", gtT1, "Đóng", gtT2);
+        iCommand gtBtn = (iCommand) findIntroBtnMethod.invoke(null, gtDlg);
+        check("10B.13: generic Giao tiếp is NOT resolved as approved intro button", gtBtn == null);
+        GameCanvas.currentDialog = gtDlg;
+        enhanceMethod.invoke(null);
+        check("10B.13: Pháp sư dialog with only Giao tiếp/Đóng fails closed to state 38", ((Integer) get("enhState")).intValue() == 38);
+        check("10B.13: Giao tiếp button was NOT clicked", gtT1.pressCount == 0);
+
+        // 10B.14: Pháp sư title + unrelated action => fails closed when armed, button untouched
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("enhState", 6);
+        set("enhWait", 0);
+        armBlacksmithInteraction(-36);
+        TestDialogTarget unrelT1 = new TestDialogTarget();
+        TestDialogTarget unrelT2 = new TestDialogTarget();
+        MsgDialog unrelActDlg = makeCustomDialog("Pháp sư", "Học kĩ năng mới", "Học kĩ năng", unrelT1, "Đóng", unrelT2);
+        GameCanvas.currentDialog = unrelActDlg;
+        enhanceMethod.invoke(null);
+        check("10B.14: Pháp sư dialog with unrelated action fails closed to state 38", ((Integer) get("enhState")).intValue() == 38);
+        check("10B.14: unrelated action button was NOT clicked", unrelT1.pressCount == 0);
+
+        // 10B.15: Enhancement-themed dialog without current blacksmith interaction arming => untouched
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("enhState", 6);
+        set("enhWait", 0);
+        // Note: NO armBlacksmithInteraction call! enhArmedBlacksmithNpcId is Integer.MIN_VALUE
+        TestDialogTarget unarmedT1 = new TestDialogTarget();
+        TestDialogTarget unarmedT2 = new TestDialogTarget();
+        MsgDialog unarmedDlg = makePhapSuIntroDialog(unarmedT1, unarmedT2);
+        GameCanvas.currentDialog = unarmedDlg;
+        boolean unarmedRecognized = ((Boolean) isIntroDlgMethod.invoke(null, unarmedDlg)).booleanValue();
+        check("10B.15: enhancement dialog without blacksmith arming is NOT recognized", !unarmedRecognized);
+        enhanceMethod.invoke(null);
+        check("10B.15: unarmed dialog remains untouched", unarmedT1.pressCount == 0);
+        check("10B.15: state remains 6 (not failed closed)", ((Integer) get("enhState")).intValue() == 6);
+
+        // 10B.16: Generic dialog containing 'Cường hóa' in body text => untouched
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("enhState", 6);
+        set("enhWait", 0);
+        armBlacksmithInteraction(-36);
+        TestDialogTarget textT1 = new TestDialogTarget();
+        MsgDialog textMentionDlg = makeCustomDialog("Hướng dẫn", "Hãy đến gặp Pháp sư để dùng thuật cường hóa trang bị", "Đóng", textT1, null, null);
+        GameCanvas.currentDialog = textMentionDlg;
+        boolean textMentionRecognized = ((Boolean) isIntroDlgMethod.invoke(null, textMentionDlg)).booleanValue();
+        check("10B.16: dialog merely mentioning Cường hóa in text is NOT recognized", !textMentionRecognized);
+        enhanceMethod.invoke(null);
+        check("10B.16: generic dialog mentioning Cường hóa remains untouched", textT1.pressCount == 0);
+
+        // 10B.17: Current dialog replaced between recognition and dispatch => no perform
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("enhState", 6);
+        set("enhWait", 0);
+        armBlacksmithInteraction(-36);
+        TestDialogTarget replT1 = new TestDialogTarget();
+        TestDialogTarget replT2 = new TestDialogTarget();
+        MsgDialog replDlg = makePhapSuIntroDialog(replT1, replT2);
+        // Simulate dialog being dismissed or replaced right before dispatch
+        GameCanvas.currentDialog = null;
+        check("10B.17: currentDialog check guards against perform if dialog is replaced/dismissed", replT1.pressCount == 0);
+
         // 10B.12: Full native forge flow from intro dialog to DRY_RUN_COMPLETE
         call("cleanEnhancementRouting");
         clearQueue();
@@ -1288,7 +1396,8 @@ public class EnhancementEngineTest {
         set("enhState", 6);
         set("enhWait", 0);
         set("enhValidationOnly", true);
-        GameCanvas.menu2 = null;
+        armBlacksmithInteraction(-36);
+        Menu2 menu2BeforePerform = GameCanvas.menu2;
 
         // Step 1: Live intro MsgDialog appears
         TestDialogTarget fullFlowT1 = new TestDialogTarget();
@@ -1302,6 +1411,7 @@ public class EnhancementEngineTest {
         check("10B.12: step 2 - native perform() invoked on intro dialog", fullFlowT1.pressCount == 1);
         check("10B.12: step 2 - intro dialog dismissed natively", GameCanvas.currentDialog == null);
         check("10B.12: step 2 - zero network packets synthesized", queue().size() == 0);
+        check("10B.12: step 2 - no new Menu2 allocated as part of perform", GameCanvas.menu2 == menu2BeforePerform);
 
         // Step 3: Server responds with 18-item serverMenu (not swallowed)
         boolean fullMenuSwallowed = ((Boolean) serverMenuMethod.invoke(null, fullPhapSuMenu, 0, -36, "Pháp sư")).booleanValue();
@@ -2117,9 +2227,15 @@ public class EnhancementEngineTest {
         }
         GameScreen.player.Action = 0; // alive (4 is dead)
         GameScreen.player.typePk = -1; // realistic peaceful v4.0.3 player
-        GameScreen.player.typeBoss = 0;
-        GameScreen.player.x = 100;
-        GameScreen.player.y = 100;
+        if (mapId == 1) {
+            GameScreen.Vecplayers = new mVector("npcs");
+            GameScreen.Vecplayers.addElement(makeNpc("Pháp sư", -36, 2, 324, 624));
+            GameScreen.player.x = 324;
+            GameScreen.player.y = 624;
+        } else {
+            GameScreen.player.x = 100;
+            GameScreen.player.y = 100;
+        }
         try {
             Field rst = Class.forName("Zeus").getDeclaredField("readySettleTicks");
             rst.setAccessible(true);
@@ -2131,6 +2247,17 @@ public class EnhancementEngineTest {
             sm.setAccessible(true);
             sm.set(null, mapId);
         } catch (Throwable t) {
+        }
+    }
+
+    static void armBlacksmithInteraction(int npcId) {
+        try {
+            set("enhArmedBlacksmithNpcId", npcId);
+            long seq = ((Long) get("enhBlacksmithInteractionGenerationSeq")).longValue() + 1L;
+            set("enhBlacksmithInteractionGenerationSeq", seq);
+            set("enhArmedBlacksmithGeneration", seq);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
         }
     }
 

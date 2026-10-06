@@ -5361,26 +5361,108 @@ public final class Zeus {
     public static int enhPendingMenuWaitTicks = 0;
     public static final int MAX_PENDING_MENU_WAIT_TICKS = 20;
 
+    public static int enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
+    public static long enhArmedBlacksmithGeneration = 0L;
+    public static long enhBlacksmithInteractionGenerationSeq = 0L;
+    public static long enhLastDispatchedIntroDialogGen = 0L;
     public static boolean enhIntroDialogHandled = false;
     public static long enhLastDispatchedIntroDialogFingerprint = 0L;
     public static int enhIntroDialogWaitTicks = 0;
     public static final int MAX_INTRO_DIALOG_WAIT_TICKS = 40;
 
-    public static long computeDialogFingerprint(MainDialog dialog) {
-        if (dialog == null) return 0L;
-        long textHash = (long) dialogText(dialog).hashCode();
-        long idHash = (long) System.identityHashCode(dialog);
-        return (textHash << 32) ^ (idHash & 0xFFFFFFFFL);
+    public static String getDialogNameShow(MainDialog dialog) {
+        if (dialog instanceof MsgDialog) {
+            try {
+                java.lang.reflect.Field fr = MsgDialog.class.getDeclaredField("nameShow");
+                fr.setAccessible(true);
+                Object vr = fr.get(dialog);
+                if (vr instanceof String && ((String) vr).trim().length() > 0) {
+                    return (String) vr;
+                }
+            } catch (Throwable t) {
+            }
+        }
+        return "";
     }
 
-    private static boolean isApprovedIntroDialogButton(String s) {
-        if (s == null) return false;
-        if (s.indexOf("dong") >= 0 || s.indexOf("huy") >= 0 || s.indexOf("thoat") >= 0) return false;
-        if (s.indexOf("giao dich") >= 0 || s.indexOf("thong bao") >= 0 || s.indexOf("huong dan") >= 0) return false;
-        if (s.indexOf("cuong hoa") >= 0 || s.indexOf("giao tiep") >= 0) {
-            return true;
+    public static String getDialogBody(MainDialog dialog) {
+        if (dialog == null) return "";
+        StringBuffer sb = new StringBuffer(64);
+        if (dialog instanceof MsgDialog) {
+            try {
+                java.lang.reflect.Field fs = MsgDialog.class.getDeclaredField("status");
+                fs.setAccessible(true);
+                Object vs = fs.get(dialog);
+                if (vs instanceof String && ((String) vs).length() > 0) {
+                    sb.append((String) vs).append(' ');
+                }
+            } catch (Throwable t) {
+            }
         }
-        return false;
+        try {
+            java.lang.reflect.Field fStr = MainDialog.class.getDeclaredField("strinfo");
+            fStr.setAccessible(true);
+            String[] lines = (String[]) fStr.get(dialog);
+            if (lines != null) {
+                for (int i = 0; i < lines.length; i++) {
+                    if (lines[i] != null) {
+                        sb.append(lines[i]).append(' ');
+                    }
+                }
+            }
+        } catch (Throwable t) {
+        }
+        return sb.toString().trim();
+    }
+
+    public static mVector getDialogButtons(MainDialog dialog) {
+        if (dialog == null) return null;
+        mVector res = new mVector("dialogButtons");
+        try {
+            if (dialog instanceof MsgDialog) {
+                mVector cmdList = ((MsgDialog) dialog).cmdList;
+                if (cmdList != null && cmdList.size() > 0) {
+                    for (int i = 0; i < cmdList.size(); i++) {
+                        Object b = cmdList.elementAt(i);
+                        if (b != null) res.addElement(b);
+                    }
+                    return res;
+                }
+            }
+            if (dialog.left != null) res.addElement(dialog.left);
+            if (dialog.center != null) res.addElement(dialog.center);
+            if (dialog.right != null) res.addElement(dialog.right);
+        } catch (Throwable t) {
+        }
+        return res;
+    }
+
+    public static long computeDialogFingerprint(MainDialog dialog) {
+        if (dialog == null) return 0L;
+        StringBuffer sb = new StringBuffer(128);
+        sb.append(dialog.getClass().getName()).append(';');
+        String name = getDialogNameShow(dialog);
+        sb.append(normSemantic(name)).append(';');
+        String body = getDialogBody(dialog);
+        sb.append(normSemantic(body)).append(';');
+        mVector btns = getDialogButtons(dialog);
+        int count = btns != null ? btns.size() : 0;
+        sb.append(count).append(';');
+        if (btns != null) {
+            for (int i = 0; i < btns.size(); i++) {
+                Object b = btns.elementAt(i);
+                if (b instanceof iCommand && ((iCommand) b).caption != null) {
+                    sb.append(normSemantic(((iCommand) b).caption)).append(',');
+                }
+            }
+        }
+        String s = sb.toString();
+        long hash = 0xcbf29ce484222325L;
+        for (int i = 0; i < s.length(); i++) {
+            hash ^= (long) s.charAt(i);
+            hash *= 0x100000001b3L;
+        }
+        return hash;
     }
 
     public static iCommand findBlacksmithIntroDialogButton(MainDialog dialog) {
@@ -5388,30 +5470,16 @@ public final class Zeus {
             return null;
         }
         try {
-            if (dialog.left != null && dialog.left.caption != null) {
-                String s = norm(dialog.left.caption);
-                if (isApprovedIntroDialogButton(s)) {
-                    return dialog.left;
-                }
-            }
-            if (dialog.right != null && dialog.right.caption != null) {
-                String s = norm(dialog.right.caption);
-                if (isApprovedIntroDialogButton(s)) {
-                    return dialog.right;
-                }
-            }
-            if (dialog instanceof MsgDialog) {
-                mVector buttons = ((MsgDialog) dialog).cmdList;
-                if (buttons != null) {
-                    for (int i = 0; i < buttons.size(); i++) {
-                        Object entry = buttons.elementAt(i);
-                        if (entry instanceof iCommand) {
-                            iCommand btn = (iCommand) entry;
-                            if (btn.caption != null) {
-                                String s = norm(btn.caption);
-                                if (isApprovedIntroDialogButton(s)) {
-                                    return btn;
-                                }
+            mVector buttons = getDialogButtons(dialog);
+            if (buttons != null) {
+                for (int i = 0; i < buttons.size(); i++) {
+                    Object entry = buttons.elementAt(i);
+                    if (entry instanceof iCommand) {
+                        iCommand btn = (iCommand) entry;
+                        if (btn.caption != null) {
+                            String s = normSemantic(btn.caption);
+                            if ("cuong hoa".equals(s)) {
+                                return btn;
                             }
                         }
                     }
@@ -5422,11 +5490,27 @@ public final class Zeus {
         return null;
     }
 
-    public static boolean isEnhancementIntroDialog(MainDialog dialog) {
+    public static boolean isPhapSuDialogContext(MainDialog dialog) {
         if (dialog == null) {
             return false;
         }
         if (!(dialog instanceof MsgDialog)) {
+            return false;
+        }
+        if (enhState != 6) {
+            return false;
+        }
+        if (GameCanvas.currentDialog != dialog) {
+            return false;
+        }
+        if (GameCanvas.subDialog != null) {
+            return false;
+        }
+        if (enhArmedBlacksmithNpcId == Integer.MIN_VALUE || enhArmedBlacksmithGeneration <= 0L) {
+            return false;
+        }
+        MainObject bs = findBlacksmithNpc();
+        if (bs == null || bs.ID != enhArmedBlacksmithNpcId) {
             return false;
         }
         try {
@@ -5442,19 +5526,34 @@ public final class Zeus {
             if (n.indexOf("thong bao") >= 0 || n.indexOf("chuc mung") >= 0 || n.indexOf("bao tri") >= 0 || n.indexOf("he thong") >= 0) {
                 return false;
             }
-            if (n.indexOf("co muon") >= 0 || n.indexOf("ban co muon") >= 0 || n.indexOf("nga tu") >= 0) {
+            if (n.indexOf("xac nhan") >= 0 || n.indexOf("co muon") >= 0 || n.indexOf("ban co muon") >= 0 || n.indexOf("dong y") >= 0 || n.indexOf("nga tu") >= 0) {
                 return false;
             }
 
-            boolean mentionsPhapSu = n.indexOf("phap su") >= 0;
-            boolean mentionsCuongHoaContext = n.indexOf("cuong hoa") >= 0 && (n.indexOf("thuat cuong hoa") >= 0 || n.indexOf("suc manh") >= 0 || n.indexOf("mon do") >= 0);
-
-            if (mentionsPhapSu || mentionsCuongHoaContext) {
+            String nameShow = getDialogNameShow(dialog);
+            String normName = normSemantic(nameShow);
+            if ("phap su".equals(normName)) {
                 return true;
+            }
+            try {
+                java.lang.reflect.Field fStr = MainDialog.class.getDeclaredField("strinfo");
+                fStr.setAccessible(true);
+                String[] lines = (String[]) fStr.get(dialog);
+                if (lines != null && lines.length > 0 && lines[0] != null) {
+                    String firstLine = normSemantic(lines[0]);
+                    if (firstLine.startsWith("phap su:") || firstLine.startsWith("phap su :") || firstLine.equals("phap su")) {
+                        return true;
+                    }
+                }
+            } catch (Throwable ignored) {
             }
         } catch (Throwable t) {
         }
         return false;
+    }
+
+    public static boolean isEnhancementIntroDialog(MainDialog dialog) {
+        return isPhapSuDialogContext(dialog) && findBlacksmithIntroDialogButton(dialog) != null;
     }
 
     public static void clearPendingForgeMenu() {
@@ -5500,6 +5599,9 @@ public final class Zeus {
         clearPendingForgeMenu();
         enhIntroDialogHandled = false;
         enhLastDispatchedIntroDialogFingerprint = 0L;
+        enhLastDispatchedIntroDialogGen = 0L;
+        enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
+        enhArmedBlacksmithGeneration = 0L;
         enhIntroDialogWaitTicks = 0;
         try {
             if (enhOwnsResultDialog && enhOwnsForgeScreen && isForgeScreenOpen() && GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
@@ -5533,6 +5635,7 @@ public final class Zeus {
     public static void resetEnhancementDeduplication() {
         processedRequestIds.removeAllElements();
         lastEnhRequestId = null;
+        cleanEnhancementRouting();
     }
 
     public static int parseEnhancementState(String name) {
@@ -6238,6 +6341,7 @@ public final class Zeus {
                     } else {
                         enhState = 32; // CANCELLED
                         enhErrorMessage = "Enhancement cancelled via sidecar";
+                        cleanEnhancementRouting();
                         publishEnhancementStatus();
                         return;
                     }
@@ -6325,6 +6429,12 @@ public final class Zeus {
         enhErrorMessage = null;
         enhInFlightExecute = false;
         enhActiveTargetSlot = -1;
+        enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
+        enhArmedBlacksmithGeneration = 0L;
+        enhLastDispatchedIntroDialogGen = 0L;
+        enhLastDispatchedIntroDialogFingerprint = 0L;
+        enhIntroDialogWaitTicks = 0;
+        enhIntroDialogHandled = false;
 
         enhState = 1; // VALIDATING_REQUEST
         publishEnhancementStatus();
@@ -6642,9 +6752,13 @@ public final class Zeus {
                         enhState = 6; // OPENING_FORGE
                         enhWait = 20;
                         enhForgeOpenTries = 1;
+                        enhArmedBlacksmithNpcId = blacksmith.ID;
+                        enhArmedBlacksmithGeneration = ++enhBlacksmithInteractionGenerationSeq;
                         try {
                             GlobalService.gI().chat_npc((byte) blacksmith.ID);
                         } catch (Throwable t) {
+                            enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
+                            enhArmedBlacksmithGeneration = 0L;
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
                             enhErrorMessage = "Failed sending interaction packet to blacksmith";
@@ -6669,9 +6783,13 @@ public final class Zeus {
                         enhState = 6; // OPENING_FORGE
                         enhWait = 20;
                         enhForgeOpenTries = 1;
+                        enhArmedBlacksmithNpcId = bs.ID;
+                        enhArmedBlacksmithGeneration = ++enhBlacksmithInteractionGenerationSeq;
                         try {
                             GlobalService.gI().chat_npc((byte) bs.ID);
                         } catch (Throwable t) {
+                            enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
+                            enhArmedBlacksmithGeneration = 0L;
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
                             enhErrorMessage = "Failed sending interaction packet to blacksmith";
@@ -6690,6 +6808,9 @@ public final class Zeus {
                         clearPendingForgeMenu();
                         enhIntroDialogHandled = false;
                         enhLastDispatchedIntroDialogFingerprint = 0L;
+                        enhLastDispatchedIntroDialogGen = 0L;
+                        enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
+                        enhArmedBlacksmithGeneration = 0L;
                         enhIntroDialogWaitTicks = 0;
                         if (enhValidationOnly) {
                             enhState = 39; // DRY_RUN_COMPLETE
@@ -6707,9 +6828,18 @@ public final class Zeus {
                     }
                     if (GameCanvas.currentDialog != null) {
                         MainDialog curDlg = GameCanvas.currentDialog;
-                        if (isEnhancementIntroDialog(curDlg)) {
+                        if (isPhapSuDialogContext(curDlg)) {
+                            iCommand introBtn = findBlacksmithIntroDialogButton(curDlg);
+                            if (introBtn == null) {
+                                enhState = 38; // FORGE_OPEN_FAILED
+                                enhErrorCode = "FORGE_INTRO_DIALOG_NO_ACTION";
+                                enhErrorMessage = "Intro dialog has no approved action button";
+                                cleanEnhancementRouting();
+                                publishEnhancementStatus();
+                                return;
+                            }
                             long dlgFp = computeDialogFingerprint(curDlg);
-                            if (dlgFp == enhLastDispatchedIntroDialogFingerprint) {
+                            if (dlgFp == enhLastDispatchedIntroDialogFingerprint && enhLastDispatchedIntroDialogGen == enhArmedBlacksmithGeneration) {
                                 enhIntroDialogWaitTicks++;
                                 if (enhIntroDialogWaitTicks > MAX_INTRO_DIALOG_WAIT_TICKS) {
                                     trace("ENHANCE intro dialog timeout after " + enhIntroDialogWaitTicks + " ticks");
@@ -6722,36 +6852,27 @@ public final class Zeus {
                                 }
                                 return;
                             }
-                            iCommand introBtn = findBlacksmithIntroDialogButton(curDlg);
-                            if (introBtn != null) {
-                                enhLastDispatchedIntroDialogFingerprint = dlgFp;
-                                enhIntroDialogHandled = true;
-                                enhIntroDialogWaitTicks = 0;
-                                trace("ENHANCE advancing intro dialog via native perform() caption=" + introBtn.caption);
-                                try {
-                                    if (GameCanvas.menu2 == null) {
-                                        GameCanvas.menu2 = new Menu2();
-                                    }
-                                    introBtn.perform();
-                                } catch (Throwable t) {
-                                    trace("ENHANCE intro dialog perform threw exception: " + t);
-                                    enhState = 38;
-                                    enhErrorCode = "FORGE_INTRO_DIALOG_EXCEPTION";
-                                    enhErrorMessage = "Native intro dialog perform threw exception: " + t.getMessage();
-                                    cleanEnhancementRouting();
-                                    publishEnhancementStatus();
-                                    return;
-                                }
-                                enhWait = 20;
+                            if (GameCanvas.currentDialog != curDlg) {
                                 return;
-                            } else {
+                            }
+                            enhLastDispatchedIntroDialogFingerprint = dlgFp;
+                            enhLastDispatchedIntroDialogGen = enhArmedBlacksmithGeneration;
+                            enhIntroDialogHandled = true;
+                            enhIntroDialogWaitTicks = 0;
+                            trace("ENHANCE advancing intro dialog via native perform() caption=" + introBtn.caption);
+                            try {
+                                introBtn.perform();
+                            } catch (Throwable t) {
+                                trace("ENHANCE intro dialog perform threw exception: " + t);
                                 enhState = 38;
-                                enhErrorCode = "FORGE_INTRO_DIALOG_NO_ACTION";
-                                enhErrorMessage = "Intro dialog has no approved action button";
+                                enhErrorCode = "FORGE_INTRO_DIALOG_EXCEPTION";
+                                enhErrorMessage = "Native intro dialog perform threw exception: " + t.getMessage();
                                 cleanEnhancementRouting();
                                 publishEnhancementStatus();
                                 return;
                             }
+                            enhWait = 20;
+                            return;
                         } else {
                             return;
                         }
@@ -6826,7 +6947,7 @@ public final class Zeus {
                         enhWait--;
                         return;
                     }
-                    if (GameCanvas.currentDialog != null || (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu)) {
+                    if (GameCanvas.currentDialog != null || GameCanvas.subDialog != null || (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu)) {
                         return;
                     }
                     if (enhForgeOpenTries >= 3) {
@@ -6842,9 +6963,13 @@ public final class Zeus {
                         enhForgeOpenTries++;
                         enhWait = 20;
                         enhLastDispatchedMenuFingerprint = 0L;
+                        enhArmedBlacksmithNpcId = bsRetry.ID;
+                        enhArmedBlacksmithGeneration = ++enhBlacksmithInteractionGenerationSeq;
                         try {
                             GlobalService.gI().chat_npc((byte) bsRetry.ID);
                         } catch (Throwable t) {
+                            enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
+                            enhArmedBlacksmithGeneration = 0L;
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
                             enhErrorMessage = "Failed retry interaction packet to blacksmith";
