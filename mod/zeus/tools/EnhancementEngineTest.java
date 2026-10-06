@@ -828,7 +828,7 @@ public class EnhancementEngineTest {
         res = (MainObject) findBsMethod.invoke(null);
         check("cu=-36 provides distance priority between valid Pháp sư candidates", res != null && res.ID == -36);
 
-        // 10.6: Menu option 'Cường hóa' remains accepted in serverMenu
+        // 10.6: Menu option 'Cường hóa' is deferred: not taken synchronously, allows native builder to finish
         Method serverMenuMethod = Class.forName("Zeus").getDeclaredMethod("serverMenu", mVector.class, int.class, int.class, String.class);
         serverMenuMethod.setAccessible(true);
         set("enhState", 6); // OPENING_FORGE
@@ -841,19 +841,29 @@ public class EnhancementEngineTest {
         menuItems.addElement(opt2);
         menuItems.addElement(opt3);
         boolean menuTaken = ((Boolean) serverMenuMethod.invoke(null, menuItems, 10, -36, "Pháp sư")).booleanValue();
-        check("serverMenu takes 'Cường hoá' option in state 6", menuTaken);
-        check("serverMenu dispatches option pick packet", queue().size() == 1);
+        check("serverMenu does NOT swallow menu synchronously (allows native builder to finish)", !menuTaken);
+        check("serverMenu sends zero packets synchronously", queue().size() == 0);
+        check("serverMenu captures pending option 1", ((Integer) get("enhPendingMenuOption")).intValue() == 1);
+        check("serverMenu captures pending NPC -36", ((Integer) get("enhPendingMenuNpc")).intValue() == -36);
+        check("serverMenu captures pending menu 10", ((Integer) get("enhPendingMenuId")).intValue() == 10);
+        // Deferred dispatch occurs on subsequent game tick
+        enhanceMethod.invoke(null);
+        check("deferred selection dispatches exactly 1 packet on subsequent tick", queue().size() == 1);
         Message pkt10 = (Message) queue().elementAt(0);
-        check("serverMenu option pick opcode is -30 (not 67)", pkt10.command == (byte) -30);
+        check("deferred selection opcode is -30 (not 67)", pkt10.command == (byte) -30);
+        check("deferred selection clears pending menu NPC", ((Integer) get("enhPendingMenuNpc")).intValue() == Integer.MIN_VALUE);
 
-        // 10.7: Focused wire test proving NPC=-36, menu=0, option=0 selects short-byte-byte overload
+        // 10.7: Focused wire test proving NPC=-36, menu=0, option=0 selects short-byte-byte overload via deferred dispatch
         clearQueue();
         set("enhState", 6);
+        call("clearPendingForgeMenu");
         mVector liveMenuItems = new mVector("menu");
         liveMenuItems.addElement(new iCommand("Cường hóa", 0)); // option index 0
         boolean liveMenuTaken = ((Boolean) serverMenuMethod.invoke(null, liveMenuItems, 0, -36, "Pháp sư")).booleanValue();
-        check("live-shape menu selection taken", liveMenuTaken);
-        check("exactly 1 packet queued for menu selection", queue().size() == 1);
+        check("live-shape menu selection not swallowed synchronously", !liveMenuTaken);
+        check("zero packets queued synchronously inside serverMenu", queue().size() == 0);
+        enhanceMethod.invoke(null);
+        check("exactly 1 packet queued for deferred menu selection", queue().size() == 1);
         Message wirePkt = (Message) queue().elementAt(0);
         check("menu-selection wire opcode is -30", wirePkt.command == (byte) -30);
         check("menu-selection produces zero Opcode 67 packets", wirePkt.command != (byte) 67);
@@ -866,20 +876,25 @@ public class EnhancementEngineTest {
         check("payload field order preserves menu byte 0", wireMenu == (byte) 0);
         check("payload field order preserves option byte 0", wireOption == (byte) 0);
 
-        // 10.8: Fail-closed verification for serverMenu
-        // Case A: Unrelated menu without "cuong hoa" must NOT be taken, and must send 0 packets
+        // 10.8: Fail-closed & live shape verification for deferred serverMenu
+        // Case A: Unrelated menu without "cuong hoa" must NOT be captured, and must send 0 packets
         clearQueue();
         set("enhState", 6);
+        call("clearPendingForgeMenu");
         mVector unrelatedMenu = new mVector("menu");
         unrelatedMenu.addElement(new iCommand("Nhiệm vụ", 0));
         unrelatedMenu.addElement(new iCommand("Thoát", 1));
         boolean unrelatedTaken = ((Boolean) serverMenuMethod.invoke(null, unrelatedMenu, 0, -36, "Pháp sư")).booleanValue();
-        check("unrelated menu is NOT taken (fail-closed)", !unrelatedTaken);
-        check("unrelated menu produces zero packets", queue().size() == 0);
+        check("unrelated menu is NOT taken (fail-closed, native-visible)", !unrelatedTaken);
+        check("unrelated menu produces zero packets synchronously", queue().size() == 0);
+        check("unrelated menu does not capture pending selection", ((Integer) get("enhPendingMenuNpc")).intValue() == Integer.MIN_VALUE);
+        enhanceMethod.invoke(null);
+        check("unrelated menu produces zero packets on subsequent tick", queue().size() == 0);
 
         // Case B: Full live-shape 18-item Pháp sư menu
         clearQueue();
         set("enhState", 6);
+        call("clearPendingForgeMenu");
         mVector fullPhapSuMenu = new mVector("menu");
         fullPhapSuMenu.addElement(new iCommand("Cường hóa", 0));
         fullPhapSuMenu.addElement(new iCommand("Chuyển hóa trang bị", 1));
@@ -900,10 +915,21 @@ public class EnhancementEngineTest {
         fullPhapSuMenu.addElement(new iCommand("Mề đay xạ thủ", 16));
         fullPhapSuMenu.addElement(new iCommand("Nâng cấp mề đay", 17));
         boolean fullMenuTaken = ((Boolean) serverMenuMethod.invoke(null, fullPhapSuMenu, 0, -36, "Pháp sư")).booleanValue();
-        check("live-shape 18-item menu taken", fullMenuTaken);
-        check("live-shape 18-item menu sends exactly 1 packet", queue().size() == 1);
+        check("live-shape 18-item menu not swallowed synchronously (native builder preserved)", !fullMenuTaken);
+        check("live-shape 18-item menu sends 0 packets synchronously", queue().size() == 0);
+        check("live-shape resolves Cường hóa index 0 from label, not fallback", ((Integer) get("enhPendingMenuOption")).intValue() == 0);
+
+        // Duplicate delivery guard: second delivery of identical menu produces no duplicate selection
+        boolean duplicateTaken = ((Boolean) serverMenuMethod.invoke(null, fullPhapSuMenu, 0, -36, "Pháp sư")).booleanValue();
+        check("duplicate menu delivery not swallowed", !duplicateTaken);
+        check("duplicate menu delivery sends zero packets", queue().size() == 0);
+
+        // Later game tick dispatches verified selection exactly once
+        enhanceMethod.invoke(null);
+        check("live-shape 18-item menu sends exactly 1 packet on subsequent tick", queue().size() == 1);
         Message fullPkt = (Message) queue().elementAt(0);
         check("live-shape menu wire opcode is -30", fullPkt.command == (byte) -30);
+        check("live-shape menu produces zero Opcode 67 packets", fullPkt.command != (byte) 67);
         byte[] fullPayload = fullPkt.getData();
         java.io.DataInputStream disFull = new java.io.DataInputStream(new java.io.ByteArrayInputStream(fullPayload));
         short fullNpc = disFull.readShort();
@@ -912,6 +938,24 @@ public class EnhancementEngineTest {
         check("live-shape menu packet NPC is -36", fullNpc == (short) -36);
         check("live-shape menu packet menu is 0", fullMenuId == (byte) 0);
         check("live-shape menu packet option is 0", fullOption == (byte) 0);
+
+        // Subsequent game tick produces NO duplicate dispatch
+        enhanceMethod.invoke(null);
+        check("subsequent tick produces no duplicate packets", queue().size() == 1);
+
+        // Simulated forge open progresses to DRY_RUN_COMPLETE under validation_only
+        set("enhValidationOnly", true);
+        GameCanvas.currentScreen = makeForgePopup();
+        enhanceMethod.invoke(null);
+        check("after simulated forge open, state progresses to DRY_RUN_COMPLETE (39)", ((Integer) get("enhState")).intValue() == 39);
+        check("zero Opcode 67 packets emitted on forge open", queue().size() == 1); // still only the single -30 packet
+
+        // Cancellation / reset clears pending menu state
+        set("enhPendingMenuNpc", -36);
+        set("enhPendingMenuId", 0);
+        set("enhPendingMenuOption", 0);
+        call("clearPendingForgeMenu");
+        check("clearPendingForgeMenu clears pending NPC", ((Integer) get("enhPendingMenuNpc")).intValue() == Integer.MIN_VALUE);
 
 
         // ---------------------------------------------------------------------

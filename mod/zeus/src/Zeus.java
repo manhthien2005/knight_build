@@ -2997,8 +2997,16 @@ public final class Zeus {
                     }
                 }
                 if (pickIndex >= 0) {
-                    GlobalService.gI().Dynamic_Menu((short) idNPC, (byte) idMenu, (byte) pickIndex);
-                    taken = true;
+                    long fingerprint = (((long) idNPC) << 32) ^ (((long) idMenu) << 16) ^ (long) items.size() ^ (((long) pickIndex) << 8);
+                    if (fingerprint != enhLastDispatchedMenuFingerprint && enhPendingMenuNpc == Integer.MIN_VALUE) {
+                        enhPendingMenuNpc = idNPC;
+                        enhPendingMenuId = idMenu;
+                        enhPendingMenuOption = pickIndex;
+                        enhPendingMenuFingerprint = fingerprint;
+                        trace("ENHANCE captured forge menu npc=" + idNPC + " menu=" + idMenu + " option=" + pickIndex + " fingerprint=" + fingerprint);
+                    }
+                    // NEVER swallow the menu synchronously. Return false to allow native Menu2.setinfoDynamic to complete normally.
+                    taken = false;
                 }
             } catch (Throwable t) {
             }
@@ -5323,11 +5331,25 @@ public final class Zeus {
     public static int enhForgeOpenTries = 0;
     public static boolean enhOwnsForgeScreen = false;
     public static boolean enhOwnsResultDialog = false;
+    public static int enhPendingMenuNpc = Integer.MIN_VALUE;
+    public static int enhPendingMenuId = -1;
+    public static int enhPendingMenuOption = -1;
+    public static long enhPendingMenuFingerprint = 0L;
+    public static long enhLastDispatchedMenuFingerprint = 0L;
+
+    public static void clearPendingForgeMenu() {
+        enhPendingMenuNpc = Integer.MIN_VALUE;
+        enhPendingMenuId = -1;
+        enhPendingMenuOption = -1;
+        enhPendingMenuFingerprint = 0L;
+        enhLastDispatchedMenuFingerprint = 0L;
+    }
 
     public static void cleanEnhancementRouting() {
         enhNavigating = false;
         enhBlacksmithScanTicks = 0;
         enhForgeOpenTries = 0;
+        clearPendingForgeMenu();
         try {
             if (enhOwnsResultDialog && enhOwnsForgeScreen && isForgeScreenOpen() && GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
                 GameCanvas.menu2.doCloseMenu();
@@ -6514,6 +6536,7 @@ public final class Zeus {
                 case 6: // OPENING_FORGE
                     if (isForgeScreenOpen()) {
                         enhOwnsForgeScreen = true;
+                        clearPendingForgeMenu();
                         if (enhValidationOnly) {
                             enhState = 39; // DRY_RUN_COMPLETE
                             enhForgeOpenTries = 0;
@@ -6526,6 +6549,35 @@ public final class Zeus {
                         enhState = 7; // INSERTING_TARGET
                         enhForgeOpenTries = 0;
                         publishEnhancementStatus();
+                        return;
+                    }
+                    if (enhPendingMenuNpc != Integer.MIN_VALUE) {
+                        int npc = enhPendingMenuNpc;
+                        int menuId = enhPendingMenuId;
+                        int opt = enhPendingMenuOption;
+                        enhLastDispatchedMenuFingerprint = enhPendingMenuFingerprint;
+                        enhPendingMenuNpc = Integer.MIN_VALUE;
+                        enhPendingMenuId = -1;
+                        enhPendingMenuOption = -1;
+                        enhPendingMenuFingerprint = 0L;
+                        try {
+                            if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
+                                setFrIndex(GameCanvas.menu2, opt);
+                                GameCanvas.menu2.commandPointer(2, 0);
+                            } else {
+                                GlobalService.gI().Dynamic_Menu((short) npc, (byte) menuId, (byte) opt);
+                                if (GameCanvas.menu2 != null) {
+                                    GameCanvas.menu2.isShowMenu = false;
+                                }
+                                GameCanvas.isPointerSelect = false;
+                            }
+                        } catch (Throwable t) {
+                            try {
+                                GlobalService.gI().Dynamic_Menu((short) npc, (byte) menuId, (byte) opt);
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                        enhWait = 20;
                         return;
                     }
                     if (enhWait > 0) {
@@ -6544,6 +6596,7 @@ public final class Zeus {
                     if (bsRetry != null) {
                         enhForgeOpenTries++;
                         enhWait = 20;
+                        enhLastDispatchedMenuFingerprint = 0L;
                         try {
                             GlobalService.gI().chat_npc((byte) bsRetry.ID);
                         } catch (Throwable t) {
