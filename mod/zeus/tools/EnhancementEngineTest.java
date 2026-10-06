@@ -178,6 +178,23 @@ public class EnhancementEngineTest {
         }
         return v;
     }
+    static void setupMockNativeMenu2(int idNpc, int idMenu, mVector items) {
+        if (GameCanvas.menu2 == null) {
+            GameCanvas.menu2 = new Menu2();
+        }
+        GameCanvas.menu2.isShowMenu = true;
+        GameCanvas.menu2.menuItems = items;
+        try {
+            Field fn = Menu2.class.getDeclaredField("IdNpc");
+            fn.setAccessible(true);
+            fn.setInt(GameCanvas.menu2, idNpc);
+            Field fm = Menu2.class.getDeclaredField("IdMenu");
+            fm.setAccessible(true);
+            fm.setInt(GameCanvas.menu2, idMenu);
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
 
     public static void main(String[] args) throws Exception {
         System.out.println("=== EnhancementEngineTest ===");
@@ -833,9 +850,10 @@ public class EnhancementEngineTest {
         serverMenuMethod.setAccessible(true);
         set("enhState", 6); // OPENING_FORGE
         clearQueue();
+        GameCanvas.menu2 = null; // simulate native Menu2 not yet constructed
         mVector menuItems = new mVector("menu");
         iCommand opt1 = new iCommand("Nhiệm vụ", 0);
-        iCommand opt2 = new iCommand("Cường hoá", 1);
+        iCommand opt2 = new iCommand("Cường hóa", 1);
         iCommand opt3 = new iCommand("Thoát", 2);
         menuItems.addElement(opt1);
         menuItems.addElement(opt2);
@@ -846,22 +864,32 @@ public class EnhancementEngineTest {
         check("serverMenu captures pending option 1", ((Integer) get("enhPendingMenuOption")).intValue() == 1);
         check("serverMenu captures pending NPC -36", ((Integer) get("enhPendingMenuNpc")).intValue() == -36);
         check("serverMenu captures pending menu 10", ((Integer) get("enhPendingMenuId")).intValue() == 10);
-        // Deferred dispatch occurs on subsequent game tick
+
+        // Tick BEFORE native builder readiness: must emit ZERO packets and retain pending state
         enhanceMethod.invoke(null);
-        check("deferred selection dispatches exactly 1 packet on subsequent tick", queue().size() == 1);
+        check("tick before native builder readiness emits zero packets", queue().size() == 0);
+        check("pending state retained before native readiness", ((Integer) get("enhPendingMenuNpc")).intValue() == -36);
+
+        // Native Menu2 becomes ready on UI thread: subsequent tick dispatches strictly via native commandPointer
+        setupMockNativeMenu2(-36, 10, menuItems);
+        enhanceMethod.invoke(null);
+        check("tick after native Menu2 readiness dispatches exactly 1 packet", queue().size() == 1);
         Message pkt10 = (Message) queue().elementAt(0);
         check("deferred selection opcode is -30 (not 67)", pkt10.command == (byte) -30);
+        check("native commandPointer closed menu", !GameCanvas.menu2.isShowMenu);
         check("deferred selection clears pending menu NPC", ((Integer) get("enhPendingMenuNpc")).intValue() == Integer.MIN_VALUE);
 
         // 10.7: Focused wire test proving NPC=-36, menu=0, option=0 selects short-byte-byte overload via deferred dispatch
         clearQueue();
         set("enhState", 6);
         call("clearPendingForgeMenu");
+        GameCanvas.menu2 = null;
         mVector liveMenuItems = new mVector("menu");
         liveMenuItems.addElement(new iCommand("Cường hóa", 0)); // option index 0
         boolean liveMenuTaken = ((Boolean) serverMenuMethod.invoke(null, liveMenuItems, 0, -36, "Pháp sư")).booleanValue();
         check("live-shape menu selection not swallowed synchronously", !liveMenuTaken);
         check("zero packets queued synchronously inside serverMenu", queue().size() == 0);
+        setupMockNativeMenu2(-36, 0, liveMenuItems);
         enhanceMethod.invoke(null);
         check("exactly 1 packet queued for deferred menu selection", queue().size() == 1);
         Message wirePkt = (Message) queue().elementAt(0);
@@ -881,6 +909,7 @@ public class EnhancementEngineTest {
         clearQueue();
         set("enhState", 6);
         call("clearPendingForgeMenu");
+        GameCanvas.menu2 = null;
         mVector unrelatedMenu = new mVector("menu");
         unrelatedMenu.addElement(new iCommand("Nhiệm vụ", 0));
         unrelatedMenu.addElement(new iCommand("Thoát", 1));
@@ -895,6 +924,7 @@ public class EnhancementEngineTest {
         clearQueue();
         set("enhState", 6);
         call("clearPendingForgeMenu");
+        GameCanvas.menu2 = null;
         mVector fullPhapSuMenu = new mVector("menu");
         fullPhapSuMenu.addElement(new iCommand("Cường hóa", 0));
         fullPhapSuMenu.addElement(new iCommand("Chuyển hóa trang bị", 1));
@@ -924,7 +954,8 @@ public class EnhancementEngineTest {
         check("duplicate menu delivery not swallowed", !duplicateTaken);
         check("duplicate menu delivery sends zero packets", queue().size() == 0);
 
-        // Later game tick dispatches verified selection exactly once
+        // Later game tick dispatches verified selection exactly once via native Menu2
+        setupMockNativeMenu2(-36, 0, fullPhapSuMenu);
         enhanceMethod.invoke(null);
         check("live-shape 18-item menu sends exactly 1 packet on subsequent tick", queue().size() == 1);
         Message fullPkt = (Message) queue().elementAt(0);
@@ -943,12 +974,67 @@ public class EnhancementEngineTest {
         enhanceMethod.invoke(null);
         check("subsequent tick produces no duplicate packets", queue().size() == 1);
 
+        // 10.9: Exact 'Cuong hoa' match vs 'Huong dan Cuong hoa'
+        clearQueue();
+        set("enhState", 6);
+        call("clearPendingForgeMenu");
+        mVector guideOnlyMenu = new mVector("menu");
+        guideOnlyMenu.addElement(new iCommand("Hướng dẫn Cường hóa", 0));
+        guideOnlyMenu.addElement(new iCommand("Thoát", 1));
+        boolean guideTaken = ((Boolean) serverMenuMethod.invoke(null, guideOnlyMenu, 0, -36, "Pháp sư")).booleanValue();
+        check("'Huong dan Cuong hoa' alone does NOT match (not taken)", !guideTaken);
+        check("zero packets queued for guide menu", queue().size() == 0);
+        check("pending menu not captured for guide menu", ((Integer) get("enhPendingMenuNpc")).intValue() == Integer.MIN_VALUE);
+
+        // 10.10: Active menu identity guard: unrelated visible menu cannot consume captured forge selection
+        clearQueue();
+        set("enhState", 6);
+        call("clearPendingForgeMenu");
+        serverMenuMethod.invoke(null, fullPhapSuMenu, 0, -36, "Pháp sư");
+        check("pending forge selection captured for identity guard test", ((Integer) get("enhPendingMenuNpc")).intValue() == -36);
+        // Active visible menu in GameCanvas.menu2 is unrelated (e.g. 2 items, label 'Nhiệm vụ')
+        setupMockNativeMenu2(-36, 0, unrelatedMenu);
+        enhanceMethod.invoke(null);
+        check("unrelated visible menu cannot consume a captured forge selection", queue().size() == 0);
+        check("pending selection retained when unrelated menu is visible", ((Integer) get("enhPendingMenuNpc")).intValue() == -36);
+
+        // 10.11: CommandPointer exception emits zero raw fallback packets
+        clearQueue();
+        set("enhState", 6);
+        call("clearPendingForgeMenu");
+        serverMenuMethod.invoke(null, liveMenuItems, 0, -36, "Pháp sư");
+        Menu2 faultMenu = new Menu2() {
+            public void commandPointer(int e, int f) {
+                throw new RuntimeException("simulated native fault");
+            }
+        };
+        faultMenu.isShowMenu = true;
+        faultMenu.menuItems = liveMenuItems;
+        GameCanvas.menu2 = faultMenu;
+        enhanceMethod.invoke(null);
+        check("commandPointer exception emits zero raw fallback packets", queue().size() == 0);
+        check("commandPointer exception enters FORGE_OPEN_FAILED (38)", ((Integer) get("enhState")).intValue() == 38);
+
+        // 10.12: Pending timeout fails closed with zero packets
+        clearQueue();
+        set("enhState", 6);
+        call("clearPendingForgeMenu");
+        serverMenuMethod.invoke(null, liveMenuItems, 0, -36, "Pháp sư");
+        GameCanvas.menu2 = null; // stays unready
+        for (int t = 0; t < 25; t++) {
+            enhanceMethod.invoke(null);
+        }
+        check("pending timeout fails closed with zero packets", queue().size() == 0);
+        check("pending timeout enters state 38", ((Integer) get("enhState")).intValue() == 38);
+        check("pending timeout error code is FORGE_MENU_READY_TIMEOUT", "FORGE_MENU_READY_TIMEOUT".equals(get("enhErrorCode")));
+
         // Simulated forge open progresses to DRY_RUN_COMPLETE under validation_only
+        set("enhState", 6);
         set("enhValidationOnly", true);
         GameCanvas.currentScreen = makeForgePopup();
         enhanceMethod.invoke(null);
         check("after simulated forge open, state progresses to DRY_RUN_COMPLETE (39)", ((Integer) get("enhState")).intValue() == 39);
-        check("zero Opcode 67 packets emitted on forge open", queue().size() == 1); // still only the single -30 packet
+        check("zero Opcode 67 packets emitted on forge open", queue().size() == 0);
 
         // Cancellation / reset clears pending menu state
         set("enhPendingMenuNpc", -36);
@@ -956,6 +1042,7 @@ public class EnhancementEngineTest {
         set("enhPendingMenuOption", 0);
         call("clearPendingForgeMenu");
         check("clearPendingForgeMenu clears pending NPC", ((Integer) get("enhPendingMenuNpc")).intValue() == Integer.MIN_VALUE);
+        check("enhanceReset clears pending state", ((Integer) get("enhPendingMenuOption")).intValue() == -1);
 
 
         // ---------------------------------------------------------------------

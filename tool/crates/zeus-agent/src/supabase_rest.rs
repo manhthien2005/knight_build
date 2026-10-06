@@ -971,7 +971,7 @@ impl JarManifest {
     pub const V403_MOVEMENT_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256: &'static str =
         "51cb7d4eb8d8d3037a0aa7808563e06a55a3e1765adef58b62911074d81e6d9a";
     pub const V403_FORGE_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256: &'static str =
-        "d369b2edb2682f900e26893e2a378e796e2fcc3644416245e5f8e5bc3893e47a";
+        "278f3754c405f7ecdd49b8a83b6773dc621583b80d635ea283824558501cfb0d";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -4728,7 +4728,7 @@ mod tests {
         );
         assert_eq!(
             JarManifest::V403_FORGE_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256,
-            "d369b2edb2682f900e26893e2a378e796e2fcc3644416245e5f8e5bc3893e47a"
+            "278f3754c405f7ecdd49b8a83b6773dc621583b80d635ea283824558501cfb0d"
         );
 
         // 6. Verify movement fix manifest compatibility and capabilities

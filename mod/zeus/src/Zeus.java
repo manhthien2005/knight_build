@@ -2986,24 +2986,26 @@ public final class Zeus {
         if (enhState == 6 && items != null) {
             try {
                 int pickIndex = -1;
+                String matchedLabel = null;
                 for (int i = 0; i < items.size(); i++) {
                     Object entry = items.elementAt(i);
                     if (entry instanceof iCommand) {
                         String label = norm(((iCommand) entry).caption);
-                        if (label.indexOf("cuong hoa") >= 0) {
+                        if ("cuong hoa".equals(label)) {
                             pickIndex = i;
+                            matchedLabel = label;
                             break;
                         }
                     }
                 }
                 if (pickIndex >= 0) {
                     long fingerprint = (((long) idNPC) << 32) ^ (((long) idMenu) << 16) ^ (long) items.size() ^ (((long) pickIndex) << 8);
-                    if (fingerprint != enhLastDispatchedMenuFingerprint && enhPendingMenuNpc == Integer.MIN_VALUE) {
-                        enhPendingMenuNpc = idNPC;
-                        enhPendingMenuId = idMenu;
-                        enhPendingMenuOption = pickIndex;
-                        enhPendingMenuFingerprint = fingerprint;
-                        trace("ENHANCE captured forge menu npc=" + idNPC + " menu=" + idMenu + " option=" + pickIndex + " fingerprint=" + fingerprint);
+                    synchronized (ENH_MENU_LOCK) {
+                        if (fingerprint != enhLastDispatchedMenuFingerprint && enhPendingMenuRecord == null) {
+                            PendingForgeMenu rec = new PendingForgeMenu(idNPC, idMenu, pickIndex, items.size(), matchedLabel, fingerprint);
+                            setPendingForgeMenu(rec);
+                            trace("ENHANCE captured forge menu npc=" + idNPC + " menu=" + idMenu + " option=" + pickIndex + " fingerprint=" + fingerprint);
+                        }
                     }
                     // NEVER swallow the menu synchronously. Return false to allow native Menu2.setinfoDynamic to complete normally.
                     taken = false;
@@ -5331,18 +5333,68 @@ public final class Zeus {
     public static int enhForgeOpenTries = 0;
     public static boolean enhOwnsForgeScreen = false;
     public static boolean enhOwnsResultDialog = false;
+    public static final class PendingForgeMenu {
+        public final int npc;
+        public final int menuId;
+        public final int option;
+        public final int itemCount;
+        public final String optionLabel;
+        public final long fingerprint;
+
+        public PendingForgeMenu(int npc, int menuId, int option, int itemCount, String optionLabel, long fingerprint) {
+            this.npc = npc;
+            this.menuId = menuId;
+            this.option = option;
+            this.itemCount = itemCount;
+            this.optionLabel = optionLabel;
+            this.fingerprint = fingerprint;
+        }
+    }
+
+    private static final Object ENH_MENU_LOCK = new Object();
+    public static volatile PendingForgeMenu enhPendingMenuRecord = null;
     public static int enhPendingMenuNpc = Integer.MIN_VALUE;
     public static int enhPendingMenuId = -1;
     public static int enhPendingMenuOption = -1;
     public static long enhPendingMenuFingerprint = 0L;
-    public static long enhLastDispatchedMenuFingerprint = 0L;
+    public static volatile long enhLastDispatchedMenuFingerprint = 0L;
+    public static int enhPendingMenuWaitTicks = 0;
+    public static final int MAX_PENDING_MENU_WAIT_TICKS = 20;
 
     public static void clearPendingForgeMenu() {
-        enhPendingMenuNpc = Integer.MIN_VALUE;
-        enhPendingMenuId = -1;
-        enhPendingMenuOption = -1;
-        enhPendingMenuFingerprint = 0L;
-        enhLastDispatchedMenuFingerprint = 0L;
+        synchronized (ENH_MENU_LOCK) {
+            enhPendingMenuRecord = null;
+            enhPendingMenuNpc = Integer.MIN_VALUE;
+            enhPendingMenuId = -1;
+            enhPendingMenuOption = -1;
+            enhPendingMenuFingerprint = 0L;
+            enhLastDispatchedMenuFingerprint = 0L;
+            enhPendingMenuWaitTicks = 0;
+        }
+    }
+
+    public static void setPendingForgeMenu(PendingForgeMenu rec) {
+        synchronized (ENH_MENU_LOCK) {
+            enhPendingMenuRecord = rec;
+            if (rec != null) {
+                enhPendingMenuNpc = rec.npc;
+                enhPendingMenuId = rec.menuId;
+                enhPendingMenuOption = rec.option;
+                enhPendingMenuFingerprint = rec.fingerprint;
+            } else {
+                enhPendingMenuNpc = Integer.MIN_VALUE;
+                enhPendingMenuId = -1;
+                enhPendingMenuOption = -1;
+                enhPendingMenuFingerprint = 0L;
+            }
+            enhPendingMenuWaitTicks = 0;
+        }
+    }
+
+    public static PendingForgeMenu getPendingForgeMenu() {
+        synchronized (ENH_MENU_LOCK) {
+            return enhPendingMenuRecord;
+        }
     }
 
     public static void cleanEnhancementRouting() {
@@ -6551,34 +6603,71 @@ public final class Zeus {
                         publishEnhancementStatus();
                         return;
                     }
-                    if (enhPendingMenuNpc != Integer.MIN_VALUE) {
-                        int npc = enhPendingMenuNpc;
-                        int menuId = enhPendingMenuId;
-                        int opt = enhPendingMenuOption;
-                        enhLastDispatchedMenuFingerprint = enhPendingMenuFingerprint;
-                        enhPendingMenuNpc = Integer.MIN_VALUE;
-                        enhPendingMenuId = -1;
-                        enhPendingMenuOption = -1;
-                        enhPendingMenuFingerprint = 0L;
-                        try {
-                            if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
-                                setFrIndex(GameCanvas.menu2, opt);
-                                GameCanvas.menu2.commandPointer(2, 0);
-                            } else {
-                                GlobalService.gI().Dynamic_Menu((short) npc, (byte) menuId, (byte) opt);
-                                if (GameCanvas.menu2 != null) {
-                                    GameCanvas.menu2.isShowMenu = false;
+                    PendingForgeMenu pending = getPendingForgeMenu();
+                    if (pending != null) {
+                        // Phase 1 & Phase 6: Active menu identity guard & strictly native dispatch
+                        boolean nativeReady = false;
+                        if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
+                            mVector nativeItems = GameCanvas.menu2.menuItems;
+                            if (nativeItems != null && nativeItems.size() == pending.itemCount) {
+                                int opt = pending.option;
+                                if (opt >= 0 && opt < nativeItems.size()) {
+                                    Object itemAtOpt = nativeItems.elementAt(opt);
+                                    if (itemAtOpt instanceof iCommand) {
+                                        String normCaption = norm(((iCommand) itemAtOpt).caption);
+                                        if ("cuong hoa".equals(normCaption)) {
+                                            nativeReady = true;
+                                        }
+                                    }
                                 }
-                                GameCanvas.isPointerSelect = false;
-                            }
-                        } catch (Throwable t) {
-                            try {
-                                GlobalService.gI().Dynamic_Menu((short) npc, (byte) menuId, (byte) opt);
-                            } catch (Throwable ignored) {
                             }
                         }
-                        enhWait = 20;
-                        return;
+
+                        if (!nativeReady) {
+                            // Phase 3: Bounded native ready wait
+                            enhPendingMenuWaitTicks++;
+                            if (enhPendingMenuWaitTicks > MAX_PENDING_MENU_WAIT_TICKS) {
+                                trace("ENHANCE native menu readiness timed out after " + enhPendingMenuWaitTicks + " ticks");
+                                enhState = 38; // FORGE_OPEN_FAILED
+                                enhErrorCode = "FORGE_MENU_READY_TIMEOUT";
+                                enhErrorMessage = "Native Menu2 failed to become ready within budget";
+                                cleanEnhancementRouting();
+                                publishEnhancementStatus();
+                                return;
+                            }
+                            // While native Menu2 has not completed construction, keep pending state and wait
+                            return;
+                        }
+
+                        // Native Menu2 is fully ready and positively verified: invoke native selection
+                        boolean dispatchSuccess = false;
+                        try {
+                            setFrIndex(GameCanvas.menu2, pending.option);
+                            GameCanvas.menu2.commandPointer(2, 0);
+                            dispatchSuccess = true;
+                        } catch (Throwable t) {
+                            trace("ENHANCE native commandPointer threw exception: " + t);
+                            enhState = 38; // FORGE_OPEN_FAILED
+                            enhErrorCode = "FORGE_DISPATCH_EXCEPTION";
+                            enhErrorMessage = "Native commandPointer threw exception: " + t.getMessage();
+                            cleanEnhancementRouting();
+                            publishEnhancementStatus();
+                            return;
+                        }
+
+                        if (dispatchSuccess) {
+                            synchronized (ENH_MENU_LOCK) {
+                                enhLastDispatchedMenuFingerprint = pending.fingerprint;
+                                enhPendingMenuRecord = null;
+                                enhPendingMenuNpc = Integer.MIN_VALUE;
+                                enhPendingMenuId = -1;
+                                enhPendingMenuOption = -1;
+                                enhPendingMenuFingerprint = 0L;
+                                enhPendingMenuWaitTicks = 0;
+                            }
+                            enhWait = 20;
+                            return;
+                        }
                     }
                     if (enhWait > 0) {
                         enhWait--;
