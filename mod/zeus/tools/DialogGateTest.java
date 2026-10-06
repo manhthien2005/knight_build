@@ -232,6 +232,23 @@ public class DialogGateTest {
         check("single-button Dong Y dialog remains open", GameCanvas.currentDialog == confirmSingle);
         GameCanvas.currentDialog = null;
 
+        // Pháp sư blacksmith intro dialog must NOT be dismissed by generic dialog dismisser when enhancement is idle
+        TestTarget targetCuongHoa = new TestTarget();
+        TestTarget targetDong = new TestTarget();
+        MsgDialog phapSuDlg = makeTwoButtonDialog("Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", targetCuongHoa, "Cường hóa", targetDong, "Đóng");
+        try {
+            Field fn = MsgDialog.class.getDeclaredField("nameShow");
+            fn.setAccessible(true);
+            fn.set(phapSuDlg, "Pháp sư");
+        } catch (Throwable t) {}
+        GameCanvas.currentDialog = phapSuDlg;
+        for (int i = 0; i < 10; i++) {
+            call("tick");
+        }
+        check("Pháp sư blacksmith intro dialog NOT dismissed by generic tick", !targetCuongHoa.pressed && !targetDong.pressed);
+        check("Pháp sư dialog remains open when enhancement idle", GameCanvas.currentDialog == phapSuDlg);
+        GameCanvas.currentDialog = null;
+
         // =====================================================================
         // Test 4: Bounded retries on stubborn dialog
         // =====================================================================

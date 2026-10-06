@@ -196,6 +196,75 @@ public class EnhancementEngineTest {
         }
     }
 
+    static class TestDialogTarget extends AvMain {
+        boolean pressed = false;
+        int pressCount = 0;
+        boolean dismissOnPress = true;
+
+        public void commandPointer(int index, int subIndex) {
+            pressed = true;
+            pressCount++;
+            if (dismissOnPress) {
+                GameCanvas.currentDialog = null;
+            }
+        }
+        public void a(int id, int h) {
+            commandPointer(id, h);
+        }
+    }
+
+    static MsgDialog makePhapSuIntroDialog(TestDialogTarget cuongHoaTarget, TestDialogTarget dongTarget) {
+        MsgDialog d = new MsgDialog();
+        try {
+            Field fn = MsgDialog.class.getDeclaredField("nameShow");
+            fn.setAccessible(true);
+            fn.set(d, "Pháp sư");
+            Field fs = MainDialog.class.getDeclaredField("strinfo");
+            fs.setAccessible(true);
+            fs.set(d, new String[] { "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng" });
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+        d.cmdList = new mVector("buttons");
+        iCommand b1 = new iCommand("Cường hóa", 1, cuongHoaTarget);
+        iCommand b2 = new iCommand("Đóng", 2, dongTarget);
+        d.cmdList.addElement(b1);
+        d.cmdList.addElement(b2);
+        d.left = b1;
+        d.right = b2;
+        return d;
+    }
+
+    static MsgDialog makeCustomDialog(String title, String body, String cap1, TestDialogTarget t1, String cap2, TestDialogTarget t2) {
+        MsgDialog d = new MsgDialog();
+        try {
+            if (title != null) {
+                Field fn = MsgDialog.class.getDeclaredField("nameShow");
+                fn.setAccessible(true);
+                fn.set(d, title);
+            }
+            if (body != null) {
+                Field fs = MainDialog.class.getDeclaredField("strinfo");
+                fs.setAccessible(true);
+                fs.set(d, new String[] { body });
+            }
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+        d.cmdList = new mVector("buttons");
+        if (cap1 != null) {
+            iCommand b1 = new iCommand(cap1, 1, t1);
+            d.cmdList.addElement(b1);
+            d.left = b1;
+        }
+        if (cap2 != null) {
+            iCommand b2 = new iCommand(cap2, 2, t2);
+            d.cmdList.addElement(b2);
+            d.right = b2;
+        }
+        return d;
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println("=== EnhancementEngineTest ===");
 
@@ -1044,6 +1113,222 @@ public class EnhancementEngineTest {
         check("clearPendingForgeMenu clears pending NPC", ((Integer) get("enhPendingMenuNpc")).intValue() == Integer.MIN_VALUE);
         check("enhanceReset clears pending state", ((Integer) get("enhPendingMenuOption")).intValue() == -1);
 
+        // ---------------------------------------------------------------------
+        // Test 10B: Blacksmith Intro Dialog Live Contract & Safety (ENHANCE-04 / R4-9)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 10B: Blacksmith Intro Dialog Live Contract & Safety ---");
+        Method isIntroDlgMethod = Class.forName("Zeus").getDeclaredMethod("isEnhancementIntroDialog", MainDialog.class);
+        isIntroDlgMethod.setAccessible(true);
+        Method findIntroBtnMethod = Class.forName("Zeus").getDeclaredMethod("findBlacksmithIntroDialogButton", MainDialog.class);
+        findIntroBtnMethod.setAccessible(true);
+
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("atkMode", 0);
+        set("navTarget", -1);
+        set("navDone", true);
+
+        // 10B.1: Exact Live Pháp sư Intro Dialog positively recognized
+        TestDialogTarget targetCuongHoa = new TestDialogTarget();
+        TestDialogTarget targetDong = new TestDialogTarget();
+        MsgDialog liveIntroDlg = makePhapSuIntroDialog(targetCuongHoa, targetDong);
+
+        set("enhState", 6); // OPENING_FORGE
+        boolean isIntro = ((Boolean) isIntroDlgMethod.invoke(null, liveIntroDlg)).booleanValue();
+        check("10B.1: live Pháp sư intro dialog is positively recognized", isIntro);
+
+        iCommand introBtn = (iCommand) findIntroBtnMethod.invoke(null, liveIntroDlg);
+        check("10B.1: intro button resolved is not null", introBtn != null);
+        check("10B.1: intro button caption matches 'Cường hóa'", introBtn != null && "Cường hóa".equals(introBtn.caption));
+
+        // 10B.2: Native perform() invoked exactly once inside OPENING_FORGE (state 6)
+        clearQueue();
+        call("cleanEnhancementRouting");
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("enhState", 6);
+        set("enhWait", 0);
+        targetCuongHoa.pressCount = 0;
+        targetCuongHoa.dismissOnPress = false; // keep dialog visible for duplicate tick test
+        GameCanvas.currentDialog = liveIntroDlg;
+        enhanceMethod.invoke(null);
+        check("10B.2: native perform() invoked on Cường hóa button", targetCuongHoa.pressCount == 1);
+        check("10B.2: intro dialog marked handled", ((Boolean) get("enhIntroDialogHandled")).booleanValue());
+
+        // 10B.3: Duplicate dialog tick immunity (no second click)
+        enhanceMethod.invoke(null);
+        check("10B.3: same dialog on next tick is NOT clicked again", targetCuongHoa.pressCount == 1);
+
+        // 10B.4: Unrelated generic MsgDialog remains untouched
+        call("cleanEnhancementRouting");
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("enhState", 6);
+        set("enhWait", 0);
+        TestDialogTarget genericT1 = new TestDialogTarget();
+        TestDialogTarget genericT2 = new TestDialogTarget();
+        MsgDialog genericDlg = makeCustomDialog(null, "Bạn có muốn rời khỏi khu vực này?", "Đồng ý", genericT1, "Hủy", genericT2);
+        boolean isGenericIntro = ((Boolean) isIntroDlgMethod.invoke(null, genericDlg)).booleanValue();
+        check("10B.4: generic dialog is NOT recognized as intro dialog", !isGenericIntro);
+        GameCanvas.currentDialog = genericDlg;
+        enhanceMethod.invoke(null);
+        check("10B.4: generic dialog left button untouched", genericT1.pressCount == 0);
+        check("10B.4: generic dialog right button untouched", genericT2.pressCount == 0);
+        check("10B.4: generic dialog remains open", GameCanvas.currentDialog == genericDlg);
+        check("10B.4: zero packets queued for generic dialog", queue().size() == 0);
+
+        // 10B.5: Unrelated trade dialog remains untouched
+        TestDialogTarget tradeT1 = new TestDialogTarget();
+        TestDialogTarget tradeT2 = new TestDialogTarget();
+        MsgDialog tradeDlg = makeCustomDialog("Giao dịch", "Giao dịch với người chơi X", "Giao dịch", tradeT1, "Hủy", tradeT2);
+        boolean isTradeIntro = ((Boolean) isIntroDlgMethod.invoke(null, tradeDlg)).booleanValue();
+        check("10B.5: trade dialog is NOT recognized as intro dialog", !isTradeIntro);
+        GameCanvas.currentDialog = tradeDlg;
+        enhanceMethod.invoke(null);
+        check("10B.5: trade dialog untouched", tradeT1.pressCount == 0 && tradeT2.pressCount == 0);
+
+        // 10B.6: Unrelated confirmation modal remains untouched
+        TestDialogTarget confT1 = new TestDialogTarget();
+        TestDialogTarget confT2 = new TestDialogTarget();
+        MsgDialog confDlg = makeCustomDialog("Xác nhận", "Bạn có chắc muốn nâng cấp kĩ năng?", "Có", confT1, "Không", confT2);
+        boolean isConfIntro = ((Boolean) isIntroDlgMethod.invoke(null, confDlg)).booleanValue();
+        check("10B.6: confirmation modal is NOT recognized as intro dialog", !isConfIntro);
+        GameCanvas.currentDialog = confDlg;
+        enhanceMethod.invoke(null);
+        check("10B.6: confirmation modal untouched", confT1.pressCount == 0 && confT2.pressCount == 0);
+
+        // 10B.7: Unrelated broadcast / system modal remains untouched
+        TestDialogTarget bcastT1 = new TestDialogTarget();
+        MsgDialog bcastDlg = makeCustomDialog("Thông báo", "Hệ thống sẽ bảo trì sau 5 phút", "Đóng", bcastT1, null, null);
+        boolean isBcastIntro = ((Boolean) isIntroDlgMethod.invoke(null, bcastDlg)).booleanValue();
+        check("10B.7: broadcast modal is NOT recognized as intro dialog", !isBcastIntro);
+        GameCanvas.currentDialog = bcastDlg;
+        enhanceMethod.invoke(null);
+        check("10B.7: broadcast modal untouched", bcastT1.pressCount == 0);
+
+        // 10B.8: subDialog unrelated remains untouched
+        call("cleanEnhancementRouting");
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("enhState", 6);
+        set("enhWait", 0);
+        TestDialogTarget subT1 = new TestDialogTarget();
+        TestDialogTarget subT2 = new TestDialogTarget();
+        MsgDialog subDlg = makePhapSuIntroDialog(subT1, subT2);
+        GameCanvas.currentDialog = null;
+        GameCanvas.subDialog = subDlg;
+        enhanceMethod.invoke(null);
+        check("10B.8: subDialog is untouched (only currentDialog handled)", subT1.pressCount == 0);
+        GameCanvas.subDialog = null;
+
+        // 10B.9: Intro dialog with no approved button fails closed
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("enhState", 6);
+        set("enhWait", 0);
+        TestDialogTarget badBtn1 = new TestDialogTarget();
+        TestDialogTarget badBtn2 = new TestDialogTarget();
+        MsgDialog badBtnDlg = makeCustomDialog("Pháp sư", "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", "Đóng", badBtn1, "Hủy", badBtn2);
+        GameCanvas.currentDialog = badBtnDlg;
+        enhanceMethod.invoke(null);
+        check("10B.9: intro dialog with no approved action fails closed to state 38", ((Integer) get("enhState")).intValue() == 38);
+        check("10B.9: error code is FORGE_INTRO_DIALOG_NO_ACTION", "FORGE_INTRO_DIALOG_NO_ACTION".equals(get("enhErrorCode")));
+        check("10B.9: zero packets emitted", queue().size() == 0);
+
+        // 10B.10: Stubborn intro dialog timeout fails closed
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("enhState", 6);
+        set("enhWait", 0);
+        TestDialogTarget stubbornT1 = new TestDialogTarget();
+        TestDialogTarget stubbornT2 = new TestDialogTarget();
+        stubbornT1.dismissOnPress = false;
+        MsgDialog stubbornDlg = makePhapSuIntroDialog(stubbornT1, stubbornT2);
+        GameCanvas.currentDialog = stubbornDlg;
+        enhanceMethod.invoke(null); // tick 1: clicks
+        check("10B.10: initial click performed", stubbornT1.pressCount == 1);
+        clearQueue();
+        for (int t = 0; t < 45; t++) {
+            enhanceMethod.invoke(null);
+        }
+        check("10B.10: stubborn intro dialog times out to state 38", ((Integer) get("enhState")).intValue() == 38);
+        check("10B.10: error code is FORGE_INTRO_DIALOG_TIMEOUT", "FORGE_INTRO_DIALOG_TIMEOUT".equals(get("enhErrorCode")));
+        check("10B.10: zero packets emitted during stubborn wait", queue().size() == 0);
+
+        // 10B.11: chat_npc is BLOCKED while any dialog is open
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhValidationOnly", false);
+        set("enhState", 6);
+        set("enhWait", 0);
+        GameCanvas.currentDialog = genericDlg;
+        enhanceMethod.invoke(null);
+        check("10B.11: chat_npc is blocked while a dialog is active (0 packets queued)", queue().size() == 0);
+        GameCanvas.currentDialog = null;
+
+        // 10B.12: Full native forge flow from intro dialog to DRY_RUN_COMPLETE
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        GameCanvas.currentScreen = GameCanvas.game;
+        set("enhActualGoldSpent", 0L);
+        set("enhActualGemSpent", 0L);
+        set("enhState", 6);
+        set("enhWait", 0);
+        set("enhValidationOnly", true);
+        GameCanvas.menu2 = null;
+
+        // Step 1: Live intro MsgDialog appears
+        TestDialogTarget fullFlowT1 = new TestDialogTarget();
+        TestDialogTarget fullFlowT2 = new TestDialogTarget();
+        fullFlowT1.dismissOnPress = true; // native action closes dialog
+        MsgDialog fullFlowIntro = makePhapSuIntroDialog(fullFlowT1, fullFlowT2);
+        GameCanvas.currentDialog = fullFlowIntro;
+
+        // Step 2: Tick advances dialog via native perform()
+        enhanceMethod.invoke(null);
+        check("10B.12: step 2 - native perform() invoked on intro dialog", fullFlowT1.pressCount == 1);
+        check("10B.12: step 2 - intro dialog dismissed natively", GameCanvas.currentDialog == null);
+        check("10B.12: step 2 - zero network packets synthesized", queue().size() == 0);
+
+        // Step 3: Server responds with 18-item serverMenu (not swallowed)
+        boolean fullMenuSwallowed = ((Boolean) serverMenuMethod.invoke(null, fullPhapSuMenu, 0, -36, "Pháp sư")).booleanValue();
+        check("10B.12: step 3 - serverMenu not swallowed synchronously", !fullMenuSwallowed);
+        check("10B.12: step 3 - Cường hóa option 0 captured pending", ((Integer) get("enhPendingMenuOption")).intValue() == 0);
+
+        // Step 4: Native Menu2 constructed on UI thread
+        setupMockNativeMenu2(-36, 0, fullPhapSuMenu);
+
+        // Step 5: Subsequent tick dispatches native commandPointer(2,0)
+        enhanceMethod.invoke(null);
+        check("10B.12: step 5 - exactly 1 menu selection packet queued", queue().size() == 1);
+        Message menuPkt = (Message) queue().elementAt(0);
+        check("10B.12: step 5 - menu opcode is -30 (NOT 67)", menuPkt.command == (byte) -30);
+        check("10B.12: step 5 - zero Opcode 67 packets emitted", menuPkt.command != (byte) 67);
+
+        // Step 6: Native TabRebuildItem forge screen opens
+        GameCanvas.currentScreen = makeForgePopup();
+        enhanceMethod.invoke(null);
+        check("10B.12: step 6 - validation_only reaches DRY_RUN_COMPLETE (39)", ((Integer) get("enhState")).intValue() == 39);
+        check("10B.12: step 6 - total Opcode 67 emitted is ZERO", queue().size() == 1 && ((Message) queue().elementAt(0)).command != 67);
+        check("10B.12: step 6 - actual gold spent is 0", ((Long) get("enhActualGoldSpent")).longValue() == 0L);
+        check("10B.12: step 6 - actual gems spent is 0", ((Long) get("enhActualGemSpent")).longValue() == 0L);
+        call("cleanEnhancementRouting");
+        GameCanvas.currentScreen = GameCanvas.game;
+
+
 
         // ---------------------------------------------------------------------
         // Test 11: Deterministic Pre-Opcode-67 Validation Interlock & Guard
@@ -1812,6 +2097,9 @@ public class EnhancementEngineTest {
         GameCanvas.currentScreen = GameCanvas.game;
         LoadMapScreen.isNextMap = true;
         GameCanvas.currentDialog = null;
+        if (GameCanvas.menu2 == null) {
+            GameCanvas.menu2 = new Menu2();
+        }
         if (GameCanvas.loadmap == null) {
             try {
                 Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");

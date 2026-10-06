@@ -5361,6 +5361,102 @@ public final class Zeus {
     public static int enhPendingMenuWaitTicks = 0;
     public static final int MAX_PENDING_MENU_WAIT_TICKS = 20;
 
+    public static boolean enhIntroDialogHandled = false;
+    public static long enhLastDispatchedIntroDialogFingerprint = 0L;
+    public static int enhIntroDialogWaitTicks = 0;
+    public static final int MAX_INTRO_DIALOG_WAIT_TICKS = 40;
+
+    public static long computeDialogFingerprint(MainDialog dialog) {
+        if (dialog == null) return 0L;
+        long textHash = (long) dialogText(dialog).hashCode();
+        long idHash = (long) System.identityHashCode(dialog);
+        return (textHash << 32) ^ (idHash & 0xFFFFFFFFL);
+    }
+
+    private static boolean isApprovedIntroDialogButton(String s) {
+        if (s == null) return false;
+        if (s.indexOf("dong") >= 0 || s.indexOf("huy") >= 0 || s.indexOf("thoat") >= 0) return false;
+        if (s.indexOf("giao dich") >= 0 || s.indexOf("thong bao") >= 0 || s.indexOf("huong dan") >= 0) return false;
+        if (s.indexOf("cuong hoa") >= 0 || s.indexOf("giao tiep") >= 0) {
+            return true;
+        }
+        return false;
+    }
+
+    public static iCommand findBlacksmithIntroDialogButton(MainDialog dialog) {
+        if (dialog == null) {
+            return null;
+        }
+        try {
+            if (dialog.left != null && dialog.left.caption != null) {
+                String s = norm(dialog.left.caption);
+                if (isApprovedIntroDialogButton(s)) {
+                    return dialog.left;
+                }
+            }
+            if (dialog.right != null && dialog.right.caption != null) {
+                String s = norm(dialog.right.caption);
+                if (isApprovedIntroDialogButton(s)) {
+                    return dialog.right;
+                }
+            }
+            if (dialog instanceof MsgDialog) {
+                mVector buttons = ((MsgDialog) dialog).cmdList;
+                if (buttons != null) {
+                    for (int i = 0; i < buttons.size(); i++) {
+                        Object entry = buttons.elementAt(i);
+                        if (entry instanceof iCommand) {
+                            iCommand btn = (iCommand) entry;
+                            if (btn.caption != null) {
+                                String s = norm(btn.caption);
+                                if (isApprovedIntroDialogButton(s)) {
+                                    return btn;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+        }
+        return null;
+    }
+
+    public static boolean isEnhancementIntroDialog(MainDialog dialog) {
+        if (dialog == null) {
+            return false;
+        }
+        if (!(dialog instanceof MsgDialog)) {
+            return false;
+        }
+        try {
+            String fullText = dialogText(dialog);
+            if (fullText == null || fullText.length() == 0) {
+                return false;
+            }
+            String n = norm(fullText);
+
+            if (n.indexOf("giao dich") >= 0) {
+                return false;
+            }
+            if (n.indexOf("thong bao") >= 0 || n.indexOf("chuc mung") >= 0 || n.indexOf("bao tri") >= 0 || n.indexOf("he thong") >= 0) {
+                return false;
+            }
+            if (n.indexOf("co muon") >= 0 || n.indexOf("ban co muon") >= 0 || n.indexOf("nga tu") >= 0) {
+                return false;
+            }
+
+            boolean mentionsPhapSu = n.indexOf("phap su") >= 0;
+            boolean mentionsCuongHoaContext = n.indexOf("cuong hoa") >= 0 && (n.indexOf("thuat cuong hoa") >= 0 || n.indexOf("suc manh") >= 0 || n.indexOf("mon do") >= 0);
+
+            if (mentionsPhapSu || mentionsCuongHoaContext) {
+                return true;
+            }
+        } catch (Throwable t) {
+        }
+        return false;
+    }
+
     public static void clearPendingForgeMenu() {
         synchronized (ENH_MENU_LOCK) {
             enhPendingMenuRecord = null;
@@ -5402,6 +5498,9 @@ public final class Zeus {
         enhBlacksmithScanTicks = 0;
         enhForgeOpenTries = 0;
         clearPendingForgeMenu();
+        enhIntroDialogHandled = false;
+        enhLastDispatchedIntroDialogFingerprint = 0L;
+        enhIntroDialogWaitTicks = 0;
         try {
             if (enhOwnsResultDialog && enhOwnsForgeScreen && isForgeScreenOpen() && GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
                 GameCanvas.menu2.doCloseMenu();
@@ -6589,6 +6688,9 @@ public final class Zeus {
                     if (isForgeScreenOpen()) {
                         enhOwnsForgeScreen = true;
                         clearPendingForgeMenu();
+                        enhIntroDialogHandled = false;
+                        enhLastDispatchedIntroDialogFingerprint = 0L;
+                        enhIntroDialogWaitTicks = 0;
                         if (enhValidationOnly) {
                             enhState = 39; // DRY_RUN_COMPLETE
                             enhForgeOpenTries = 0;
@@ -6602,6 +6704,57 @@ public final class Zeus {
                         enhForgeOpenTries = 0;
                         publishEnhancementStatus();
                         return;
+                    }
+                    if (GameCanvas.currentDialog != null) {
+                        MainDialog curDlg = GameCanvas.currentDialog;
+                        if (isEnhancementIntroDialog(curDlg)) {
+                            long dlgFp = computeDialogFingerprint(curDlg);
+                            if (dlgFp == enhLastDispatchedIntroDialogFingerprint) {
+                                enhIntroDialogWaitTicks++;
+                                if (enhIntroDialogWaitTicks > MAX_INTRO_DIALOG_WAIT_TICKS) {
+                                    trace("ENHANCE intro dialog timeout after " + enhIntroDialogWaitTicks + " ticks");
+                                    enhState = 38; // FORGE_OPEN_FAILED
+                                    enhErrorCode = "FORGE_INTRO_DIALOG_TIMEOUT";
+                                    enhErrorMessage = "Intro dialog failed to advance within budget";
+                                    cleanEnhancementRouting();
+                                    publishEnhancementStatus();
+                                    return;
+                                }
+                                return;
+                            }
+                            iCommand introBtn = findBlacksmithIntroDialogButton(curDlg);
+                            if (introBtn != null) {
+                                enhLastDispatchedIntroDialogFingerprint = dlgFp;
+                                enhIntroDialogHandled = true;
+                                enhIntroDialogWaitTicks = 0;
+                                trace("ENHANCE advancing intro dialog via native perform() caption=" + introBtn.caption);
+                                try {
+                                    if (GameCanvas.menu2 == null) {
+                                        GameCanvas.menu2 = new Menu2();
+                                    }
+                                    introBtn.perform();
+                                } catch (Throwable t) {
+                                    trace("ENHANCE intro dialog perform threw exception: " + t);
+                                    enhState = 38;
+                                    enhErrorCode = "FORGE_INTRO_DIALOG_EXCEPTION";
+                                    enhErrorMessage = "Native intro dialog perform threw exception: " + t.getMessage();
+                                    cleanEnhancementRouting();
+                                    publishEnhancementStatus();
+                                    return;
+                                }
+                                enhWait = 20;
+                                return;
+                            } else {
+                                enhState = 38;
+                                enhErrorCode = "FORGE_INTRO_DIALOG_NO_ACTION";
+                                enhErrorMessage = "Intro dialog has no approved action button";
+                                cleanEnhancementRouting();
+                                publishEnhancementStatus();
+                                return;
+                            }
+                        } else {
+                            return;
+                        }
                     }
                     PendingForgeMenu pending = getPendingForgeMenu();
                     if (pending != null) {
@@ -6671,6 +6824,9 @@ public final class Zeus {
                     }
                     if (enhWait > 0) {
                         enhWait--;
+                        return;
+                    }
+                    if (GameCanvas.currentDialog != null || (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu)) {
                         return;
                     }
                     if (enhForgeOpenTries >= 3) {
