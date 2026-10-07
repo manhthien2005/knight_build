@@ -5361,6 +5361,35 @@ public final class Zeus {
     public static int enhPendingMenuWaitTicks = 0;
     public static final int MAX_PENDING_MENU_WAIT_TICKS = 20;
 
+    public static final class PendingLocalForgeMenu {
+        public final int npcId;
+        public final int option;
+        public final int itemCount;
+        public final int cmdIndex;
+        public final String optionLabel;
+        public final long fingerprint;
+        public final long generation;
+        public final iCommand command;
+
+        public PendingLocalForgeMenu(int npcId, int option, int itemCount, int cmdIndex, String optionLabel, long fingerprint, long generation, iCommand command) {
+            this.npcId = npcId;
+            this.option = option;
+            this.itemCount = itemCount;
+            this.cmdIndex = cmdIndex;
+            this.optionLabel = optionLabel;
+            this.fingerprint = fingerprint;
+            this.generation = generation;
+            this.command = command;
+        }
+    }
+
+    public static volatile PendingLocalForgeMenu enhPendingLocalMenuRecord = null;
+    public static volatile long enhLastDispatchedLocalMenuFingerprint = 0L;
+    public static volatile long enhLastDispatchedLocalMenuGen = 0L;
+    public static boolean enhLocalMenuHandled = false;
+    public static int enhLocalMenuWaitTicks = 0;
+    public static final int MAX_LOCAL_MENU_WAIT_TICKS = 20;
+
     public static int enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
     public static long enhArmedBlacksmithGeneration = 0L;
     public static long enhBlacksmithInteractionGenerationSeq = 0L;
@@ -5592,14 +5621,114 @@ public final class Zeus {
         }
     }
 
+    public static void clearPendingLocalForgeMenu() {
+        synchronized (ENH_MENU_LOCK) {
+            enhPendingLocalMenuRecord = null;
+            enhLastDispatchedLocalMenuFingerprint = 0L;
+            enhLastDispatchedLocalMenuGen = 0L;
+            enhLocalMenuHandled = false;
+            enhLocalMenuWaitTicks = 0;
+        }
+    }
+
+    public static PendingLocalForgeMenu getPendingLocalForgeMenu() {
+        synchronized (ENH_MENU_LOCK) {
+            return enhPendingLocalMenuRecord;
+        }
+    }
+
+    public static void setPendingLocalForgeMenu(PendingLocalForgeMenu rec) {
+        synchronized (ENH_MENU_LOCK) {
+            enhPendingLocalMenuRecord = rec;
+            enhLocalMenuWaitTicks = 0;
+        }
+    }
+
+    static int getMenu2NpcId(Menu2 menu) {
+        if (menu == null) {
+            return Integer.MIN_VALUE;
+        }
+        try {
+            java.lang.reflect.Field fn = Menu2.class.getDeclaredField("IdNpc");
+            fn.setAccessible(true);
+            return fn.getInt(menu);
+        } catch (Throwable t) {
+            return Integer.MIN_VALUE;
+        }
+    }
+
+    public static PendingLocalForgeMenu inspectPhapSuLocalMenu() {
+        if (enhState != 6 || enhArmedBlacksmithNpcId == Integer.MIN_VALUE || enhArmedBlacksmithGeneration == 0L) {
+            return null;
+        }
+        if (GameCanvas.currentDialog != null || GameCanvas.subDialog != null) {
+            return null;
+        }
+        if (GameCanvas.menu2 == null || !GameCanvas.menu2.isShowMenu) {
+            return null;
+        }
+        if (GameCanvas.menu2.isSv) {
+            return null;
+        }
+        int menuNpcId = getMenu2NpcId(GameCanvas.menu2);
+        if (menuNpcId != enhArmedBlacksmithNpcId) {
+            return null;
+        }
+        if (GameScreen.ObjFocus == null || GameScreen.ObjFocus.ID != enhArmedBlacksmithNpcId) {
+            return null;
+        }
+        mVector items = GameCanvas.menu2.menuItems;
+        if (items == null || items.size() < 2) {
+            return null;
+        }
+
+        int cuongHoaIndex = -1;
+        iCommand cuongHoaCmd = null;
+        String matchedLabel = null;
+        boolean hasCloseButton = false;
+
+        for (int i = 0; i < items.size(); i++) {
+            Object entry = items.elementAt(i);
+            if (entry instanceof iCommand) {
+                iCommand cmd = (iCommand) entry;
+                String normCap = norm(cmd.caption);
+                if ("cuong hoa".equals(normCap)) {
+                    if (cmd.indexMenu == 4) {
+                        cuongHoaIndex = i;
+                        cuongHoaCmd = cmd;
+                        matchedLabel = normCap;
+                    }
+                } else if ("dong".equals(normCap) || cmd.indexMenu == 1) {
+                    hasCloseButton = true;
+                }
+            }
+        }
+
+        if (cuongHoaIndex < 0 || cuongHoaCmd == null || !hasCloseButton) {
+            return null;
+        }
+
+        long fingerprint = (((long) menuNpcId) << 32)
+                ^ (((long) items.size()) << 24)
+                ^ (((long) cuongHoaCmd.indexMenu) << 16)
+                ^ (((long) cuongHoaIndex) << 8)
+                ^ (long) enhArmedBlacksmithGeneration;
+
+        return new PendingLocalForgeMenu(menuNpcId, cuongHoaIndex, items.size(), cuongHoaCmd.indexMenu, matchedLabel, fingerprint, enhArmedBlacksmithGeneration, cuongHoaCmd);
+    }
+
     public static void cleanEnhancementRouting() {
         enhNavigating = false;
         enhBlacksmithScanTicks = 0;
         enhForgeOpenTries = 0;
         clearPendingForgeMenu();
+        clearPendingLocalForgeMenu();
         enhIntroDialogHandled = false;
         enhLastDispatchedIntroDialogFingerprint = 0L;
         enhLastDispatchedIntroDialogGen = 0L;
+        enhLastDispatchedLocalMenuFingerprint = 0L;
+        enhLastDispatchedLocalMenuGen = 0L;
+        enhLocalMenuHandled = false;
         enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
         enhArmedBlacksmithGeneration = 0L;
         enhIntroDialogWaitTicks = 0;
@@ -6433,6 +6562,9 @@ public final class Zeus {
         enhArmedBlacksmithGeneration = 0L;
         enhLastDispatchedIntroDialogGen = 0L;
         enhLastDispatchedIntroDialogFingerprint = 0L;
+        enhLastDispatchedLocalMenuFingerprint = 0L;
+        enhLastDispatchedLocalMenuGen = 0L;
+        enhLocalMenuHandled = false;
         enhIntroDialogWaitTicks = 0;
         enhIntroDialogHandled = false;
 
@@ -6810,9 +6942,13 @@ public final class Zeus {
                     if (isForgeScreenOpen()) {
                         enhOwnsForgeScreen = true;
                         clearPendingForgeMenu();
+                        clearPendingLocalForgeMenu();
                         enhIntroDialogHandled = false;
                         enhLastDispatchedIntroDialogFingerprint = 0L;
                         enhLastDispatchedIntroDialogGen = 0L;
+                        enhLastDispatchedLocalMenuFingerprint = 0L;
+                        enhLastDispatchedLocalMenuGen = 0L;
+                        enhLocalMenuHandled = false;
                         enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
                         enhArmedBlacksmithGeneration = 0L;
                         enhIntroDialogWaitTicks = 0;
@@ -6947,6 +7083,37 @@ public final class Zeus {
                             return;
                         }
                     }
+                    PendingLocalForgeMenu localPending = inspectPhapSuLocalMenu();
+                    if (localPending != null) {
+                        if (localPending.fingerprint != enhLastDispatchedLocalMenuFingerprint
+                                || localPending.generation != enhLastDispatchedLocalMenuGen) {
+                            trace("ENHANCE local Menu2 detected for Pháp sư: opt=" + localPending.option + " caption=" + localPending.optionLabel);
+                            enhLastDispatchedLocalMenuFingerprint = localPending.fingerprint;
+                            enhLastDispatchedLocalMenuGen = localPending.generation;
+                            enhLocalMenuHandled = true;
+
+                            try {
+                                setFrIndex(GameCanvas.menu2, localPending.option);
+                                localPending.command.perform();
+                                if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
+                                    GameCanvas.menu2.doCloseMenu();
+                                }
+                            } catch (Throwable t) {
+                                trace("ENHANCE local Menu2 perform threw exception: " + t);
+                                enhState = 38; // FORGE_OPEN_FAILED
+                                enhErrorCode = "FORGE_LOCAL_MENU_EXCEPTION";
+                                enhErrorMessage = "Native local Menu2 perform threw exception: " + t.getMessage();
+                                cleanEnhancementRouting();
+                                publishEnhancementStatus();
+                                return;
+                            }
+
+                            enhWait = 20;
+                            return;
+                        } else {
+                            return;
+                        }
+                    }
                     if (enhWait > 0) {
                         enhWait--;
                         return;
@@ -6967,6 +7134,9 @@ public final class Zeus {
                         enhForgeOpenTries++;
                         enhWait = 20;
                         enhLastDispatchedMenuFingerprint = 0L;
+                        enhLastDispatchedLocalMenuFingerprint = 0L;
+                        enhLastDispatchedLocalMenuGen = 0L;
+                        enhLocalMenuHandled = false;
                         enhArmedBlacksmithNpcId = bsRetry.ID;
                         enhArmedBlacksmithGeneration = ++enhBlacksmithInteractionGenerationSeq;
                         try {
