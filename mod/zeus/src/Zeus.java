@@ -5689,10 +5689,10 @@ public final class Zeus {
         }
         iCommand cmd0 = (iCommand) e0;
         iCommand cmd1 = (iCommand) e1;
-        if (!"cuong hoa".equals(normSemantic(cmd0.caption)) || cmd0.indexMenu != 4 || cmd0.subIndex != 0) {
+        if (!"cuong hoa".equals(normSemantic(cmd0.caption)) || cmd0.indexMenu != 4 || cmd0.subIndex != -1) {
             return false;
         }
-        if (!"dong".equals(normSemantic(cmd1.caption)) || cmd1.indexMenu != 1 || cmd1.subIndex != 0) {
+        if (!"dong".equals(normSemantic(cmd1.caption)) || cmd1.indexMenu != 1 || cmd1.subIndex != -1) {
             return false;
         }
         return true;
@@ -5905,8 +5905,8 @@ public final class Zeus {
             if ((e0 instanceof iCommand) && (e1 instanceof iCommand)) {
                 iCommand c0 = (iCommand) e0;
                 iCommand c1 = (iCommand) e1;
-                if ("cuong hoa".equals(normSemantic(c0.caption)) && c0.indexMenu == 4 && c0.subIndex == 0
-                        && "dong".equals(normSemantic(c1.caption)) && c1.indexMenu == 1 && c1.subIndex == 0) {
+                if ("cuong hoa".equals(normSemantic(c0.caption)) && c0.indexMenu == 4 && c0.subIndex == -1
+                        && "dong".equals(normSemantic(c1.caption)) && c1.indexMenu == 1 && c1.subIndex == -1) {
                     tupleMatch = true;
                 }
             }
