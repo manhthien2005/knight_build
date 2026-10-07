@@ -2354,9 +2354,22 @@ public class EnhancementEngineTest {
         set("enhWait", 0);
         armBlacksmithInteraction(-36);
 
+        // 17.0: Direct tests for isPhapSuForgeTitle contract
+        String liveForgeTitle = "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng";
+        check("17.0a: Exact live title returns true", Zeus.isPhapSuForgeTitle(liveForgeTitle));
+        check("17.0b: Exact normalized equivalent spacing/case returns true",
+            Zeus.isPhapSuForgeTitle("   TA CÓ THỂ GIA TĂNG SỨC MẠNH CỦA MỘT MÓN ĐỒ BẰNG THUẬT CƯỜNG HÓA CHÚNG   "));
+        check("17.0c: 'Pháp sư' only returns false", !Zeus.isPhapSuForgeTitle("Pháp sư"));
+        check("17.0d: Generic text containing 'cường hóa' returns false", !Zeus.isPhapSuForgeTitle("Cường hóa"));
+        check("17.0e: Generic text containing 'cuong hoa' returns false", !Zeus.isPhapSuForgeTitle("Thuật cường hóa trang bị"));
+        check("17.0f: Similar but materially different enhancement sentence returns false",
+            !Zeus.isPhapSuForgeTitle("Ta có thể nâng cấp sức mạnh của một món đồ bằng thuật cường hóa chúng"));
+        check("17.0g: Old artificial title with prefix 'Pháp sư: ' returns false (regression proof)",
+            !Zeus.isPhapSuForgeTitle("Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng"));
+
         // 17.1: Exact 2-item live menu is accepted (without artificial Menu2.IdNpc)
         mVector validLocalItems = makePhapSuLocalMenuItems(localPhapSu);
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
         enhanceMethod.invoke(null);
         check("17.1: Exact 2-item live menu is accepted", localPhapSu.pressCount == 1);
         check("17.1: Dispatched command index is 4", localPhapSu.lastIndex == 4);
@@ -2370,7 +2383,7 @@ public class EnhancementEngineTest {
         localPhapSu.pressCount = 0;
         mVector threeItems = makePhapSuLocalMenuItems(localPhapSu);
         threeItems.addElement(new iCommand("Huong dan", 3, 0, localPhapSu));
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", threeItems);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", threeItems);
         enhanceMethod.invoke(null);
         check("17.2: 3-item menu containing same first two actions is rejected", localPhapSu.pressCount == 0);
         check("17.2: 3-item menu remains untouched", GameCanvas.menu2.isShowMenu);
@@ -2382,7 +2395,7 @@ public class EnhancementEngineTest {
         armBlacksmithInteraction(-36);
         mVector oneItem = new mVector("oneItem");
         oneItem.addElement(new iCommand("Cường hóa", 4, 0, localPhapSu));
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", oneItem);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", oneItem);
         enhanceMethod.invoke(null);
         check("17.3: 1-item menu rejected", localPhapSu.pressCount == 0);
 
@@ -2394,7 +2407,7 @@ public class EnhancementEngineTest {
         mVector badIndex0 = new mVector("badIndex0");
         badIndex0.addElement(new iCommand("Cường hóa", 2, 0, localPhapSu));
         badIndex0.addElement(new iCommand("Đóng", 1, 0, GameCanvas.menu2));
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badIndex0);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badIndex0);
         enhanceMethod.invoke(null);
         check("17.4: Cường hóa caption with indexMenu != 4 rejected", localPhapSu.pressCount == 0);
 
@@ -2406,7 +2419,7 @@ public class EnhancementEngineTest {
         mVector badSub0 = new mVector("badSub0");
         badSub0.addElement(new iCommand("Cường hóa", 4, 1, localPhapSu));
         badSub0.addElement(new iCommand("Đóng", 1, 0, GameCanvas.menu2));
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badSub0);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badSub0);
         enhanceMethod.invoke(null);
         check("17.5: Cường hóa indexMenu=4 with subIndex != 0 rejected", localPhapSu.pressCount == 0);
 
@@ -2418,7 +2431,7 @@ public class EnhancementEngineTest {
         mVector badCap0 = new mVector("badCap0");
         badCap0.addElement(new iCommand("Chế tạo", 4, 0, localPhapSu));
         badCap0.addElement(new iCommand("Đóng", 1, 0, GameCanvas.menu2));
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badCap0);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badCap0);
         enhanceMethod.invoke(null);
         check("17.6: Different caption with indexMenu=4 rejected", localPhapSu.pressCount == 0);
 
@@ -2430,7 +2443,7 @@ public class EnhancementEngineTest {
         mVector badIndex1 = new mVector("badIndex1");
         badIndex1.addElement(new iCommand("Cường hóa", 4, 0, localPhapSu));
         badIndex1.addElement(new iCommand("Đóng", 2, 0, GameCanvas.menu2));
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badIndex1);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badIndex1);
         enhanceMethod.invoke(null);
         check("17.7: Đóng caption with indexMenu != 1 rejected", localPhapSu.pressCount == 0);
 
@@ -2442,7 +2455,7 @@ public class EnhancementEngineTest {
         mVector badCap1 = new mVector("badCap1");
         badCap1.addElement(new iCommand("Cường hóa", 4, 0, localPhapSu));
         badCap1.addElement(new iCommand("Hủy", 1, 0, GameCanvas.menu2));
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badCap1);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badCap1);
         enhanceMethod.invoke(null);
         check("17.8: indexMenu=1 with caption != Đóng rejected", localPhapSu.pressCount == 0);
 
@@ -2454,7 +2467,7 @@ public class EnhancementEngineTest {
         mVector badSub1 = new mVector("badSub1");
         badSub1.addElement(new iCommand("Cường hóa", 4, 0, localPhapSu));
         badSub1.addElement(new iCommand("Đóng", 1, 1, GameCanvas.menu2));
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badSub1);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badSub1);
         enhanceMethod.invoke(null);
         check("17.9: Đóng with subIndex != 0 rejected", localPhapSu.pressCount == 0);
 
@@ -2466,7 +2479,7 @@ public class EnhancementEngineTest {
         mVector reversed = new mVector("reversed");
         reversed.addElement(new iCommand("Đóng", 1, 0, GameCanvas.menu2));
         reversed.addElement(new iCommand("Cường hóa", 4, 0, localPhapSu));
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", reversed);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", reversed);
         enhanceMethod.invoke(null);
         check("17.10: Reversed Cường hóa/Đóng order rejected", localPhapSu.pressCount == 0);
 
@@ -2479,12 +2492,21 @@ public class EnhancementEngineTest {
         enhanceMethod.invoke(null);
         check("17.11: Wrong title/context rejected", localPhapSu.pressCount == 0);
 
+        // 17.11b: Old artificial title with prefix 'Pháp sư: ' rejected by local menu selection (regression proof)
+        call("cleanEnhancementRouting");
+        set("enhState", 6);
+        set("enhWait", 0);
+        armBlacksmithInteraction(-36);
+        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        enhanceMethod.invoke(null);
+        check("17.11b: Old artificial title with prefix 'Pháp sư: ' rejected by local menu selection", localPhapSu.pressCount == 0);
+
         // 17.12: Unarmed identical-looking menu rejected
         call("cleanEnhancementRouting");
         set("enhState", 6);
         set("enhWait", 0);
         // Note: do NOT arm interaction (generation remains 0, npcId remains MIN_VALUE)
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
         enhanceMethod.invoke(null);
         check("17.12: Unarmed identical-looking menu rejected", localPhapSu.pressCount == 0);
 
@@ -2495,7 +2517,7 @@ public class EnhancementEngineTest {
         armBlacksmithInteraction(-36);
         TestMenuTargetNpc otherNpc = new TestMenuTargetNpc("NPC Khác", -5, 2, 100, 100);
         GameScreen.ObjFocus = otherNpc;
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
         enhanceMethod.invoke(null);
         check("17.13: Focused NPC not equal to armed Pháp sư rejected", localPhapSu.pressCount == 0);
         GameScreen.ObjFocus = localPhapSu;
@@ -2506,7 +2528,7 @@ public class EnhancementEngineTest {
         set("enhWait", 0);
         armBlacksmithInteraction(-36);
         GameCanvas.currentDialog = genericDlg;
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
         enhanceMethod.invoke(null);
         check("17.14: Active currentDialog blocks local menu selection", localPhapSu.pressCount == 0);
         GameCanvas.currentDialog = null;
@@ -2516,12 +2538,12 @@ public class EnhancementEngineTest {
         set("enhState", 6);
         set("enhWait", 0);
         armBlacksmithInteraction(-36);
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
         enhanceMethod.invoke(null);
         check("17.15: First dispatch of local menu succeeds", localPhapSu.pressCount == 1);
         // Reconstruct with new mVector and new iCommand objects
         mVector reconstructed = makePhapSuLocalMenuItems(localPhapSu);
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", reconstructed);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", reconstructed);
         enhanceMethod.invoke(null);
         check("17.15: Reconstructed semantic menu dispatches at most once per generation", localPhapSu.pressCount == 1);
 
@@ -2540,7 +2562,7 @@ public class EnhancementEngineTest {
 
         // Step 1: Local menu appears & is selected natively
         validLocalItems = makePhapSuLocalMenuItems(localPhapSu);
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
         enhanceMethod.invoke(null);
         check("17.16: Step 1 local menu selected", localPhapSu.pressCount == 1);
 
@@ -2572,7 +2594,7 @@ public class EnhancementEngineTest {
 
         // Step 1: Local menu selected
         validLocalItems = makePhapSuLocalMenuItems(localPhapSu);
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
         enhanceMethod.invoke(null);
         check("17.17: Step 1 local menu selected", localPhapSu.pressCount == 1);
 
@@ -2598,7 +2620,7 @@ public class EnhancementEngineTest {
         armBlacksmithInteraction(-36);
 
         validLocalItems = makePhapSuLocalMenuItems(failingNpc);
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
         enhanceMethod.invoke(null);
         check("17.18: Native exception transitions to FORGE_OPEN_FAILED (38)", ((Integer) get("enhState")).intValue() == 38);
         check("17.18: Error code is FORGE_LOCAL_MENU_EXCEPTION", "FORGE_LOCAL_MENU_EXCEPTION".equals(get("enhErrorCode")));
@@ -2619,14 +2641,14 @@ public class EnhancementEngineTest {
 
         validLocalItems = makePhapSuLocalMenuItems(localPhapSu);
         Method menuMethod = Zeus.class.getDeclaredMethod("menu", mVector.class, String.class);
-        boolean localMenuTaken = ((Boolean) menuMethod.invoke(null, validLocalItems, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng")).booleanValue();
+        boolean localMenuTaken = ((Boolean) menuMethod.invoke(null, validLocalItems, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng")).booleanValue();
         check("17.19: Zeus.menu hook ALWAYS returns false to let native Menu2 complete", !localMenuTaken);
         check("17.19: Zeus.menu does not synchronously invoke perform()", localPhapSu.pressCount == 0);
         Object capturedPending = Zeus.getPendingLocalForgeMenu();
         check("17.19: Zeus.menu captures pending local forge menu", capturedPending != null);
 
         // Native Menu2 finishes construction and becomes visible
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
         enhanceMethod.invoke(null);
         check("17.19: Tick dispatches native perform on visible menu", localPhapSu.pressCount == 1);
         check("17.19: Pending record is cleared after dispatch", Zeus.getPendingLocalForgeMenu() == null);
@@ -2653,7 +2675,7 @@ public class EnhancementEngineTest {
         armBlacksmithInteraction(-36);
 
         validLocalItems = makePhapSuLocalMenuItems(successorOpenerNpc);
-        setupMockLocalMenu2(-36, "Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
         enhanceMethod.invoke(null);
         check("17.20: Native perform was invoked", successorOpenerNpc.pressCount == 1);
         check("17.20: Successor menu remains open without being manually closed by candidate", GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu);

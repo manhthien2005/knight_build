@@ -5657,12 +5657,14 @@ public final class Zeus {
         }
     }
 
+    public static final String PHAP_SU_FORGE_LOCAL_TITLE_NORM = "ta co the gia tang suc manh cua mot mon do bang thuat cuong hoa chung";
+
     public static boolean isPhapSuForgeTitle(String title) {
         if (title == null) {
             return false;
         }
         String norm = normSemantic(title);
-        return norm.indexOf("phap su") >= 0 && norm.indexOf("cuong hoa") >= 0;
+        return PHAP_SU_FORGE_LOCAL_TITLE_NORM.equals(norm);
     }
 
     public static boolean validatePhapSuLocalMenuShape(mVector items, String title) {
