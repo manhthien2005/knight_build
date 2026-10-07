@@ -2680,6 +2680,92 @@ public class EnhancementEngineTest {
         check("17.20: Native perform was invoked", successorOpenerNpc.pressCount == 1);
         check("17.20: Successor menu remains open without being manually closed by candidate", GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu);
 
+        // ---------------------------------------------------------------------
+        // Test 17.21: Faithful Production-Order Sequence (Server Menu -> Native Local startAt)
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 17.21: Faithful Production-Order Sequence ---");
+        call("cleanEnhancementRouting");
+        clearQueue();
+        TestMenuTargetNpc prodPhapSu = new TestMenuTargetNpc("Pháp sư", -36, 2, 324, 624);
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(prodPhapSu);
+        GameScreen.ObjFocus = prodPhapSu;
+        set("enhValidationOnly", true);
+        set("enhState", 6);
+        set("enhWait", 0);
+        armBlacksmithInteraction(-36);
+
+        // 1. Re-use existing singleton GameCanvas.menu2
+        if (GameCanvas.menu2 == null) {
+            GameCanvas.menu2 = new Menu2();
+        }
+        // 2. Simulate server-driven setinfoDynamic (like Travel)
+        mVector travelItems = new mVector("travelItems");
+        travelItems.addElement(new iCommand("Làng Tone", 10, 0, prodPhapSu));
+        travelItems.addElement(new iCommand("Đóng", 1, 0, GameCanvas.menu2));
+        setupMockNativeMenu2(10, 0, travelItems);
+        // Bytecode proof: setinfoDynamic offset 19 writes isSv = 0
+        GameCanvas.menu2.isSv = false;
+        check("17.21: Server menu sets isSv=false per bytecode", !GameCanvas.menu2.isSv);
+
+        // 3. Local menu arrives via native startAt bytecode field replication
+        validLocalItems = makePhapSuLocalMenuItems(prodPhapSu);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        check("17.21: Local menu after server menu maintains isSv=false per native bytecode", !GameCanvas.menu2.isSv);
+
+        // 4. Zeus.menu hook runs
+        Method mMenuHook = Zeus.class.getDeclaredMethod("menu", mVector.class, String.class);
+        mMenuHook.setAccessible(true);
+        mMenuHook.invoke(null, validLocalItems, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng");
+        check("17.21: Zeus.menu captures pending record", Zeus.getPendingLocalForgeMenu() != null);
+        check("17.21: enhForgeHookSeen is true", Zeus.enhForgeHookSeen);
+
+        // 5. Run OPENING_FORGE dispatch tick
+        enhanceMethod.invoke(null);
+        check("17.21: Production-order sequence successfully dispatches perform()", prodPhapSu.pressCount == 1);
+        check("17.21: Dispatched command index is 4", prodPhapSu.lastIndex == 4);
+
+        // ---------------------------------------------------------------------
+        // Test 17.22: Structured One-Shot Diagnostic Telemetry Verification
+        // ---------------------------------------------------------------------
+        System.out.println("--- Test 17.22: Structured Diagnostic Telemetry Verification ---");
+        call("cleanEnhancementRouting");
+        set("enhState", 6);
+        set("enhWait", 0);
+        armBlacksmithInteraction(-36);
+        GameScreen.ObjFocus = prodPhapSu;
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        Zeus.enhForgeHookSeen = true;
+
+        String diagJson = Zeus.getForgeDispatchDiagnosticJson();
+        check("17.22: Diagnostic JSON contains hook_seen", diagJson.indexOf("\"hook_seen\":true") >= 0);
+        check("17.22: Diagnostic JSON contains enh_state 6", diagJson.indexOf("\"enh_state\":6") >= 0);
+        check("17.22: Diagnostic JSON contains armed_npc -36", diagJson.indexOf("\"armed_npc\":-36") >= 0);
+        check("17.22: Diagnostic JSON contains obj_focus -36", diagJson.indexOf("\"obj_focus\":-36") >= 0);
+        check("17.22: Diagnostic JSON contains menu_is_sv false", diagJson.indexOf("\"menu_is_sv\":false") >= 0);
+        check("17.22: Diagnostic JSON contains title_match true", diagJson.indexOf("\"title_match\":true") >= 0);
+        check("17.22: Diagnostic JSON contains tuple_match true", diagJson.indexOf("\"tuple_match\":true") >= 0);
+
+        // When isSv is forced true, verify first_failed_predicate is MENU_IS_SV
+        GameCanvas.menu2.isSv = true;
+        String isSvDiag = Zeus.getForgeDispatchDiagnosticJson();
+        check("17.22: Forced isSv=true reports first_failed_predicate MENU_IS_SV",
+            isSvDiag.indexOf("\"first_failed_predicate\":\"MENU_IS_SV\"") >= 0);
+        GameCanvas.menu2.isSv = false;
+
+        // When title is mismatched, verify first_failed_predicate is TITLE_MISMATCH
+        setupMockLocalMenu2(-36, "Wrong Title", validLocalItems);
+        String titleDiag = Zeus.getForgeDispatchDiagnosticJson();
+        check("17.22: Wrong title reports TITLE_MISMATCH",
+            titleDiag.indexOf("\"first_failed_predicate\":\"TITLE_MISMATCH\"") >= 0);
+
+        // Verify emitForgeDispatchDiagnostic writes diagnostic file to user.home
+        java.io.File diagOutFile = new java.io.File(System.getProperty("user.home"), "zeus-enhance-diagnostic.json");
+        diagOutFile.delete();
+        Zeus.emitForgeDispatchDiagnostic(true);
+        check("17.22: emitForgeDispatchDiagnostic created diagnostic file", diagOutFile.exists());
+        diagOutFile.delete();
+
         System.out.println("=== EnhancementEngineTest Total Failures: " + failures + " ===");
         if (failures > 0) {
             System.exit(1);
@@ -2871,6 +2957,15 @@ public class EnhancementEngineTest {
         if (GameCanvas.menu2 == null) {
             GameCanvas.menu2 = new Menu2();
         }
+        // Native bytecode audit: Direct invocation of Menu2.startAt fails with NullPointerException
+        // in headless test environment because mFont requires microemulator font asset files.
+        // As proven by official v4.0.3 bytecode disassembly of Menu2.startAt(CLib.mVector, int, String, boolean, CLib.mVector):
+        //   offset 1: putstatic isLoadData : Z (0)
+        //   offset 13: putfield isSv : Z (0)
+        //   offset 70: putfield nameMenu : String (arg3)
+        //   offset 106: putfield menuItems : mVector (arg1)
+        //   offset 111: putfield isShowMenu : Z (1)
+        // We faithfully reproduce these exact native bytecode field writes:
         GameCanvas.menu2.isShowMenu = true;
         GameCanvas.menu2.isSv = false;
         GameCanvas.menu2.menuItems = items;

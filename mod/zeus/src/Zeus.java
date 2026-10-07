@@ -2880,6 +2880,7 @@ public final class Zeus {
                 capturePhapSuLocalMenuHook(items, title);
             } catch (Throwable t) {
             }
+            emitForgeDispatchDiagnostic(false);
             // Phase 2: ALWAYS return false so native Menu2.startAt completes
             taken = false;
         }
@@ -5398,6 +5399,10 @@ public final class Zeus {
     }
 
     public static volatile PendingLocalForgeMenu enhPendingLocalMenuRecord = null;
+    public static volatile boolean enhForgeHookSeen = false;
+    private static long enhLastLoggedDiagnosticGen = 0L;
+    private static String enhLastLoggedDiagnosticPredicate = null;
+    private static long enhLastLoggedDiagnosticTime = 0L;
     public static volatile long enhLastDispatchedLocalMenuFingerprint = 0L;
     public static volatile long enhLastDispatchedLocalMenuGen = 0L;
     public static boolean enhLocalMenuHandled = false;
@@ -5716,6 +5721,9 @@ public final class Zeus {
     }
 
     public static PendingLocalForgeMenu capturePhapSuLocalMenuHook(mVector items, String title) {
+        if (enhState == 6) {
+            enhForgeHookSeen = true;
+        }
         if (enhState != 6 || enhArmedBlacksmithNpcId != -36 || enhArmedBlacksmithGeneration == 0L) {
             return null;
         }
@@ -5799,12 +5807,209 @@ public final class Zeus {
         return rec;
     }
 
+    public static String escapeJson(String s) {
+        if (s == null) return "";
+        StringBuffer sb = new StringBuffer(s.length() + 16);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '"') {
+                sb.append("\\\"");
+            } else if (c == '\\') {
+                sb.append("\\\\");
+            } else if (c == '\n') {
+                sb.append("\\n");
+            } else if (c == '\r') {
+                sb.append("\\r");
+            } else if (c == '\t') {
+                sb.append("\\t");
+            } else if (c < 32) {
+                // strip control char
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    public static String buildForgeDispatchDiagnosticJson(
+            boolean hookSeen, boolean pendingCreated, int enhState, int armedNpc, long armedGen,
+            Integer objFocusId, boolean curDlgPresent, boolean subDlgPresent, boolean menuPresent,
+            boolean menuShow, Boolean menuIsSv, String rawNameMenu, boolean titleMatch,
+            boolean tupleMatch, Long pendingFp, Long visibleFp, long lastDispatchedFp,
+            long lastDispatchedGen, String firstFailedPredicate) {
+        StringBuffer sb = new StringBuffer(512);
+        sb.append('{');
+        sb.append("\"hook_seen\":").append(hookSeen).append(',');
+        sb.append("\"pending_record_created\":").append(pendingCreated).append(',');
+        sb.append("\"enh_state\":").append(enhState).append(',');
+        sb.append("\"armed_npc\":").append(armedNpc).append(',');
+        sb.append("\"armed_generation\":").append(armedGen).append(',');
+        sb.append("\"obj_focus\":").append(objFocusId == null ? "null" : objFocusId.toString()).append(',');
+        sb.append("\"current_dialog_present\":").append(curDlgPresent).append(',');
+        sb.append("\"sub_dialog_present\":").append(subDlgPresent).append(',');
+        sb.append("\"menu_present\":").append(menuPresent).append(',');
+        sb.append("\"menu_show\":").append(menuShow).append(',');
+        sb.append("\"menu_is_sv\":").append(menuIsSv == null ? "null" : menuIsSv.toString()).append(',');
+        sb.append("\"raw_name_menu\":").append(rawNameMenu == null ? "null" : ("\"" + escapeJson(rawNameMenu) + "\"")).append(',');
+        sb.append("\"title_match\":").append(titleMatch).append(',');
+        sb.append("\"tuple_match\":").append(tupleMatch).append(',');
+        sb.append("\"pending_fingerprint\":").append(pendingFp == null ? "null" : pendingFp.toString()).append(',');
+        sb.append("\"visible_fingerprint\":").append(visibleFp == null ? "null" : visibleFp.toString()).append(',');
+        sb.append("\"last_dispatched_fingerprint\":").append(lastDispatchedFp).append(',');
+        sb.append("\"last_dispatched_generation\":").append(lastDispatchedGen).append(',');
+        sb.append("\"first_failed_predicate\":\"").append(escapeJson(firstFailedPredicate)).append('\"');
+        sb.append('}');
+        return sb.toString();
+    }
+
+    public static String getForgeDispatchDiagnosticJson() {
+        boolean hookSeen = enhForgeHookSeen;
+        boolean pendingCreated = (enhPendingLocalMenuRecord != null);
+        int state = enhState;
+        int armedNpc = enhArmedBlacksmithNpcId;
+        long armedGen = enhArmedBlacksmithGeneration;
+        Integer objFocusId = (GameScreen.ObjFocus != null ? Integer.valueOf(GameScreen.ObjFocus.ID) : null);
+        boolean curDlgPresent = (GameCanvas.currentDialog != null);
+        boolean subDlgPresent = (GameCanvas.subDialog != null);
+        boolean menuPresent = (GameCanvas.menu2 != null);
+        boolean menuShow = (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu);
+        Boolean menuIsSv = (GameCanvas.menu2 != null ? Boolean.valueOf(GameCanvas.menu2.isSv) : null);
+        String rawNameMenu = (GameCanvas.menu2 != null ? getMenu2Title(GameCanvas.menu2) : null);
+        boolean titleMatch = (rawNameMenu != null && isPhapSuForgeTitle(rawNameMenu));
+
+        mVector items = (GameCanvas.menu2 != null ? GameCanvas.menu2.menuItems : null);
+        boolean tupleMatch = false;
+        if (items != null && items.size() == 2) {
+            Object e0 = items.elementAt(0);
+            Object e1 = items.elementAt(1);
+            if ((e0 instanceof iCommand) && (e1 instanceof iCommand)) {
+                iCommand c0 = (iCommand) e0;
+                iCommand c1 = (iCommand) e1;
+                if ("cuong hoa".equals(normSemantic(c0.caption)) && c0.indexMenu == 4 && c0.subIndex == 0
+                        && "dong".equals(normSemantic(c1.caption)) && c1.indexMenu == 1 && c1.subIndex == 0) {
+                    tupleMatch = true;
+                }
+            }
+        }
+
+        Long pendingFp = (enhPendingLocalMenuRecord != null ? Long.valueOf(enhPendingLocalMenuRecord.fingerprint) : null);
+        Long visibleFp = null;
+        if (items != null && rawNameMenu != null) {
+            visibleFp = Long.valueOf(computeLocalMenuFingerprint(armedGen, normSemantic(rawNameMenu), items));
+        }
+        long lastDispatchedFp = enhLastDispatchedLocalMenuFingerprint;
+        long lastDispatchedGen = enhLastDispatchedLocalMenuGen;
+
+        String firstFailed = "NONE";
+        if (curDlgPresent) {
+            firstFailed = "CURRENT_DIALOG_PRESENT";
+        } else if (subDlgPresent) {
+            firstFailed = "SUB_DIALOG_PRESENT";
+        } else if (objFocusId == null) {
+            firstFailed = "OBJ_FOCUS_NULL";
+        } else if (objFocusId.intValue() != -36) {
+            firstFailed = "OBJ_FOCUS_NOT_BLACKSMITH";
+        } else if (!menuPresent) {
+            firstFailed = "MENU_NOT_PRESENT";
+        } else if (!menuShow) {
+            firstFailed = "MENU_NOT_SHOWN";
+        } else if (menuIsSv != null && menuIsSv.booleanValue()) {
+            firstFailed = "MENU_IS_SV";
+        } else if (rawNameMenu == null) {
+            firstFailed = "RAW_NAME_MENU_NULL";
+        } else if (!titleMatch) {
+            firstFailed = "TITLE_MISMATCH";
+        } else if (items == null) {
+            firstFailed = "MENU_ITEMS_NULL";
+        } else if (items.size() != 2) {
+            firstFailed = "ITEM_COUNT_MISMATCH";
+        } else if (!tupleMatch) {
+            firstFailed = "TUPLE_MISMATCH";
+        } else if (!pendingCreated) {
+            firstFailed = "PENDING_RECORD_NULL";
+        } else if (visibleFp != null && pendingFp != null && visibleFp.longValue() != pendingFp.longValue()) {
+            firstFailed = "FINGERPRINT_MISMATCH";
+        } else if (pendingFp != null && pendingFp.longValue() == lastDispatchedFp && armedGen == lastDispatchedGen) {
+            firstFailed = "ALREADY_DISPATCHED";
+        }
+
+        return buildForgeDispatchDiagnosticJson(
+                hookSeen, pendingCreated, state, armedNpc, armedGen,
+                objFocusId, curDlgPresent, subDlgPresent, menuPresent,
+                menuShow, menuIsSv, rawNameMenu, titleMatch,
+                tupleMatch, pendingFp, visibleFp, lastDispatchedFp,
+                lastDispatchedGen, firstFailed
+        );
+    }
+
+    public static void emitForgeDispatchDiagnostic(boolean force) {
+        if (enhState != 6 || enhArmedBlacksmithGeneration == 0L) {
+            return;
+        }
+        try {
+            String json = getForgeDispatchDiagnosticJson();
+            String predicate = "";
+            int predIdx = json.indexOf("\"first_failed_predicate\":\"");
+            if (predIdx >= 0) {
+                int endIdx = json.indexOf('"', predIdx + 26);
+                if (endIdx > predIdx) {
+                    predicate = json.substring(predIdx + 26, endIdx);
+                }
+            }
+
+            long now = System.currentTimeMillis();
+            boolean shouldLog = force
+                    || enhArmedBlacksmithGeneration != enhLastLoggedDiagnosticGen
+                    || !predicate.equals(enhLastLoggedDiagnosticPredicate)
+                    || (now - enhLastLoggedDiagnosticTime >= 5000L);
+
+            if (shouldLog) {
+                enhLastLoggedDiagnosticGen = enhArmedBlacksmithGeneration;
+                enhLastLoggedDiagnosticPredicate = predicate;
+                enhLastLoggedDiagnosticTime = now;
+
+                try {
+                    System.err.println("[ZEUS_FORGE_DIAGNOSTIC] " + json);
+                } catch (Throwable ignored) {
+                }
+
+                String home = System.getProperty("user.home");
+                if (home != null) {
+                    java.io.File file = new java.io.File(home, "zeus-enhance-diagnostic.json");
+                    java.io.File tmp = new java.io.File(home, "zeus-enhance-diagnostic.json.tmp");
+                    java.io.FileOutputStream fos = null;
+                    try {
+                        fos = new java.io.FileOutputStream(tmp);
+                        fos.write(json.getBytes("UTF-8"));
+                        fos.flush();
+                        fos.close();
+                        fos = null;
+                        if (!tmp.renameTo(file)) {
+                            file.delete();
+                            tmp.renameTo(file);
+                        }
+                    } catch (Throwable ignored) {
+                    } finally {
+                        if (fos != null) {
+                            try { fos.close(); } catch (Throwable ignored) {}
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     public static void cleanEnhancementRouting() {
         enhNavigating = false;
         enhBlacksmithScanTicks = 0;
         enhForgeOpenTries = 0;
         clearPendingForgeMenu();
         clearPendingLocalForgeMenu();
+        enhForgeHookSeen = false;
+        enhLastLoggedDiagnosticGen = 0L;
+        enhLastLoggedDiagnosticPredicate = null;
+        enhLastLoggedDiagnosticTime = 0L;
         enhIntroDialogHandled = false;
         enhLastDispatchedIntroDialogFingerprint = 0L;
         enhLastDispatchedIntroDialogGen = 0L;
@@ -7002,6 +7207,7 @@ public final class Zeus {
                         enhForgeOpenTries = 1;
                         enhArmedBlacksmithNpcId = bs.ID;
                         enhArmedBlacksmithGeneration = ++enhBlacksmithInteractionGenerationSeq;
+                        enhForgeHookSeen = false;
                         try {
                             if (!nativeNpcInteract(bs)) {
                                 throw new RuntimeException("nativeNpcInteract returned false");
@@ -7170,6 +7376,7 @@ public final class Zeus {
                     if (localPending == null) {
                         localPending = inspectPhapSuLocalMenu();
                     }
+                    emitForgeDispatchDiagnostic(false);
                     if (localPending != null) {
                         if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu && !GameCanvas.menu2.isSv
                                 && GameCanvas.currentDialog == null && GameCanvas.subDialog == null
@@ -7184,6 +7391,7 @@ public final class Zeus {
                                         enhDispatchedLocalMenuWaitTicks++;
                                         if (enhDispatchedLocalMenuWaitTicks > MAX_LOCAL_MENU_PROGRESSION_WAIT_TICKS) {
                                             trace("ENHANCE local Menu2 progression timeout after " + enhDispatchedLocalMenuWaitTicks + " ticks");
+                                            emitForgeDispatchDiagnostic(true);
                                             enhState = 38; // FORGE_OPEN_FAILED
                                             enhErrorCode = "FORGE_LOCAL_MENU_TIMEOUT";
                                             enhErrorMessage = "Local menu failed to progress within budget";
@@ -7205,8 +7413,10 @@ public final class Zeus {
                                         setFrIndex(GameCanvas.menu2, 0);
                                         liveCmd0.perform();
                                         clearPendingLocalForgeMenu();
+                                        emitForgeDispatchDiagnostic(true);
                                     } catch (Throwable t) {
                                         trace("ENHANCE local Menu2 perform threw exception: " + t);
+                                        emitForgeDispatchDiagnostic(true);
                                         enhState = 38; // FORGE_OPEN_FAILED
                                         enhErrorCode = "FORGE_LOCAL_MENU_EXCEPTION";
                                         enhErrorMessage = "Native local Menu2 perform threw exception: " + t.getMessage();
@@ -7226,6 +7436,7 @@ public final class Zeus {
                         return;
                     }
                     if (GameCanvas.currentDialog != null || GameCanvas.subDialog != null || (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu)) {
+                        emitForgeDispatchDiagnostic(false);
                         return;
                     }
                     if (enhForgeOpenTries >= 3) {
@@ -7246,6 +7457,7 @@ public final class Zeus {
                         enhLocalMenuHandled = false;
                         enhArmedBlacksmithNpcId = bsRetry.ID;
                         enhArmedBlacksmithGeneration = ++enhBlacksmithInteractionGenerationSeq;
+                        enhForgeHookSeen = false;
                         try {
                             if (!nativeNpcInteract(bsRetry)) {
                                 throw new RuntimeException("nativeNpcInteract returned false");

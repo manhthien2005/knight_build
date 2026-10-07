@@ -199,6 +199,7 @@ pub struct PendingEnhancement {
     pub category: i32,
     pub target_level: i32,
     pub validation_only: bool,
+    pub last_logged_diagnostic: Option<String>,
 }
 
 /// Validation error for single item enhancement payloads.
@@ -293,6 +294,8 @@ pub fn clean_enhancement_files(home: &Path) {
     let _ = fs::remove_file(home.join(format!("{}.tmp", ENHANCE_REQUEST_FILE_NAME)));
     let _ = fs::remove_file(home.join(ENHANCE_STATUS_FILE_NAME));
     let _ = fs::remove_file(home.join(ENHANCE_CANCEL_FILE_NAME));
+    let _ = fs::remove_file(home.join("zeus-enhance-diagnostic.json"));
+    let _ = fs::remove_file(home.join("zeus-enhance-diagnostic.json.tmp"));
 }
 
 /// Legacy timeout constant retained for backwards-compatibility checks (seconds).
@@ -989,6 +992,7 @@ mod tests {
             category: 3,
             target_level: 7,
             validation_only: false,
+            last_logged_diagnostic: None,
         };
 
         // Long route (> 120s elapsed) does NOT time out because last progress is fresh (10s ago)

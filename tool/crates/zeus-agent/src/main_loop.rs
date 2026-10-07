@@ -2074,6 +2074,7 @@ fn dispatch_command(
                 category: payload.category,
                 target_level: payload.target_level,
                 validation_only: payload.validation_only,
+                last_logged_diagnostic: None,
             });
 
             // 8. Publish telemetry snapshot ngay lập tức
@@ -2286,6 +2287,18 @@ fn poll_pending_enhancements(
             &pending.request_id,
             pending.last_progress_signature.as_ref(),
         );
+
+        let diag_file = paths.home.join("zeus-enhance-diagnostic.json");
+        if let Ok(diag_content) = std::fs::read_to_string(&diag_file) {
+            let trimmed = diag_content.trim();
+            if !trimmed.is_empty() && pending.last_logged_diagnostic.as_deref() != Some(trimmed) {
+                eprintln!(
+                    "[zeus-agent][forge-diagnostic] account {} (cmd {}): {}",
+                    acc.id, pending.command_id, trimmed
+                );
+                pending.last_logged_diagnostic = Some(trimmed.to_string());
+            }
+        }
 
         match poll_outcome {
             crate::enhancement::EnhancementPollOutcome::NoStatusYet
