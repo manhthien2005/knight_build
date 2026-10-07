@@ -2874,6 +2874,15 @@ public final class Zeus {
             // let the builder finish and clear `a` afterwards instead; until then it stays visible.
             taken = false;
         }
+        // Local Forge Menu observation point:
+        if (enhState == 6 && enhArmedBlacksmithNpcId == -36 && enhArmedBlacksmithGeneration > 0L) {
+            try {
+                capturePhapSuLocalMenuHook(items, title);
+            } catch (Throwable t) {
+            }
+            // Phase 2: ALWAYS return false so native Menu2.startAt completes
+            taken = false;
+        }
         if (!traceOn) {
             return taken;
         }
@@ -5362,24 +5371,29 @@ public final class Zeus {
     public static final int MAX_PENDING_MENU_WAIT_TICKS = 20;
 
     public static final class PendingLocalForgeMenu {
-        public final int npcId;
-        public final int option;
-        public final int itemCount;
-        public final int cmdIndex;
-        public final String optionLabel;
-        public final long fingerprint;
         public final long generation;
-        public final iCommand command;
+        public final String normTitle;
+        public final String caption0;
+        public final int indexMenu0;
+        public final int subIndex0;
+        public final String caption1;
+        public final int indexMenu1;
+        public final int subIndex1;
+        public final int itemCount;
+        public final long fingerprint;
 
-        public PendingLocalForgeMenu(int npcId, int option, int itemCount, int cmdIndex, String optionLabel, long fingerprint, long generation, iCommand command) {
-            this.npcId = npcId;
-            this.option = option;
-            this.itemCount = itemCount;
-            this.cmdIndex = cmdIndex;
-            this.optionLabel = optionLabel;
-            this.fingerprint = fingerprint;
+        public PendingLocalForgeMenu(long generation, String normTitle, String caption0, int indexMenu0, int subIndex0,
+                                     String caption1, int indexMenu1, int subIndex1, int itemCount, long fingerprint) {
             this.generation = generation;
-            this.command = command;
+            this.normTitle = normTitle;
+            this.caption0 = caption0;
+            this.indexMenu0 = indexMenu0;
+            this.subIndex0 = subIndex0;
+            this.caption1 = caption1;
+            this.indexMenu1 = indexMenu1;
+            this.subIndex1 = subIndex1;
+            this.itemCount = itemCount;
+            this.fingerprint = fingerprint;
         }
     }
 
@@ -5388,7 +5402,9 @@ public final class Zeus {
     public static volatile long enhLastDispatchedLocalMenuGen = 0L;
     public static boolean enhLocalMenuHandled = false;
     public static int enhLocalMenuWaitTicks = 0;
+    public static int enhDispatchedLocalMenuWaitTicks = 0;
     public static final int MAX_LOCAL_MENU_WAIT_TICKS = 20;
+    public static final int MAX_LOCAL_MENU_PROGRESSION_WAIT_TICKS = 40;
 
     public static int enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
     public static long enhArmedBlacksmithGeneration = 0L;
@@ -5624,9 +5640,6 @@ public final class Zeus {
     public static void clearPendingLocalForgeMenu() {
         synchronized (ENH_MENU_LOCK) {
             enhPendingLocalMenuRecord = null;
-            enhLastDispatchedLocalMenuFingerprint = 0L;
-            enhLastDispatchedLocalMenuGen = 0L;
-            enhLocalMenuHandled = false;
             enhLocalMenuWaitTicks = 0;
         }
     }
@@ -5644,77 +5657,144 @@ public final class Zeus {
         }
     }
 
-    static int getMenu2NpcId(Menu2 menu) {
-        if (menu == null) {
-            return Integer.MIN_VALUE;
+    public static boolean isPhapSuForgeTitle(String title) {
+        if (title == null) {
+            return false;
         }
-        try {
-            java.lang.reflect.Field fn = Menu2.class.getDeclaredField("IdNpc");
-            fn.setAccessible(true);
-            return fn.getInt(menu);
-        } catch (Throwable t) {
-            return Integer.MIN_VALUE;
-        }
+        String norm = normSemantic(title);
+        return norm.indexOf("phap su") >= 0 && norm.indexOf("cuong hoa") >= 0;
     }
 
-    public static PendingLocalForgeMenu inspectPhapSuLocalMenu() {
-        if (enhState != 6 || enhArmedBlacksmithNpcId == Integer.MIN_VALUE || enhArmedBlacksmithGeneration == 0L) {
+    public static boolean validatePhapSuLocalMenuShape(mVector items, String title) {
+        if (items == null || items.size() != 2) {
+            return false;
+        }
+        if (!isPhapSuForgeTitle(title)) {
+            return false;
+        }
+        Object e0 = items.elementAt(0);
+        Object e1 = items.elementAt(1);
+        if (!(e0 instanceof iCommand) || !(e1 instanceof iCommand)) {
+            return false;
+        }
+        iCommand cmd0 = (iCommand) e0;
+        iCommand cmd1 = (iCommand) e1;
+        if (!"cuong hoa".equals(normSemantic(cmd0.caption)) || cmd0.indexMenu != 4 || cmd0.subIndex != 0) {
+            return false;
+        }
+        if (!"dong".equals(normSemantic(cmd1.caption)) || cmd1.indexMenu != 1 || cmd1.subIndex != 0) {
+            return false;
+        }
+        return true;
+    }
+
+    public static long computeLocalMenuFingerprint(long generation, String normTitle, mVector items) {
+        long h = 1125899906842597L;
+        h = h * 31 + generation;
+        if (normTitle != null) {
+            for (int i = 0; i < normTitle.length(); i++) {
+                h = h * 31 + normTitle.charAt(i);
+            }
+        }
+        int count = items == null ? 0 : items.size();
+        h = h * 31 + count;
+        for (int i = 0; i < count; i++) {
+            Object obj = items.elementAt(i);
+            if (obj instanceof iCommand) {
+                iCommand cmd = (iCommand) obj;
+                String cap = normSemantic(cmd.caption);
+                for (int j = 0; j < cap.length(); j++) {
+                    h = h * 31 + cap.charAt(j);
+                }
+                h = h * 31 + cmd.indexMenu;
+                h = h * 31 + cmd.subIndex;
+            }
+        }
+        return h;
+    }
+
+    public static PendingLocalForgeMenu capturePhapSuLocalMenuHook(mVector items, String title) {
+        if (enhState != 6 || enhArmedBlacksmithNpcId != -36 || enhArmedBlacksmithGeneration == 0L) {
             return null;
         }
         if (GameCanvas.currentDialog != null || GameCanvas.subDialog != null) {
             return null;
         }
-        if (GameCanvas.menu2 == null || !GameCanvas.menu2.isShowMenu) {
+        if (GameScreen.ObjFocus == null || GameScreen.ObjFocus.ID != -36) {
             return null;
         }
-        if (GameCanvas.menu2.isSv) {
+        if (!validatePhapSuLocalMenuShape(items, title)) {
             return null;
         }
-        int menuNpcId = getMenu2NpcId(GameCanvas.menu2);
-        if (menuNpcId != enhArmedBlacksmithNpcId) {
+        iCommand cmd0 = (iCommand) items.elementAt(0);
+        iCommand cmd1 = (iCommand) items.elementAt(1);
+        String nTitle = normSemantic(title);
+        long fp = computeLocalMenuFingerprint(enhArmedBlacksmithGeneration, nTitle, items);
+        PendingLocalForgeMenu rec = new PendingLocalForgeMenu(
+            enhArmedBlacksmithGeneration,
+            nTitle,
+            normSemantic(cmd0.caption),
+            cmd0.indexMenu,
+            cmd0.subIndex,
+            normSemantic(cmd1.caption),
+            cmd1.indexMenu,
+            cmd1.subIndex,
+            2,
+            fp
+        );
+        setPendingLocalForgeMenu(rec);
+        return rec;
+    }
+
+    static String getMenu2Title(Menu2 menu) {
+        if (menu == null) {
             return null;
         }
-        if (GameScreen.ObjFocus == null || GameScreen.ObjFocus.ID != enhArmedBlacksmithNpcId) {
+        try {
+            java.lang.reflect.Field fn = Menu2.class.getDeclaredField("nameMenu");
+            fn.setAccessible(true);
+            return (String) fn.get(menu);
+        } catch (Throwable t) {
             return null;
         }
+    }
+
+    public static PendingLocalForgeMenu inspectPhapSuLocalMenu() {
+        if (enhState != 6 || enhArmedBlacksmithNpcId != -36 || enhArmedBlacksmithGeneration == 0L) {
+            return null;
+        }
+        if (GameCanvas.currentDialog != null || GameCanvas.subDialog != null) {
+            return null;
+        }
+        if (GameCanvas.menu2 == null || !GameCanvas.menu2.isShowMenu || GameCanvas.menu2.isSv) {
+            return null;
+        }
+        if (GameScreen.ObjFocus == null || GameScreen.ObjFocus.ID != -36) {
+            return null;
+        }
+        String title = getMenu2Title(GameCanvas.menu2);
         mVector items = GameCanvas.menu2.menuItems;
-        if (items == null || items.size() < 2) {
+        if (!validatePhapSuLocalMenuShape(items, title)) {
             return null;
         }
-
-        int cuongHoaIndex = -1;
-        iCommand cuongHoaCmd = null;
-        String matchedLabel = null;
-        boolean hasCloseButton = false;
-
-        for (int i = 0; i < items.size(); i++) {
-            Object entry = items.elementAt(i);
-            if (entry instanceof iCommand) {
-                iCommand cmd = (iCommand) entry;
-                String normCap = norm(cmd.caption);
-                if ("cuong hoa".equals(normCap)) {
-                    if (cmd.indexMenu == 4) {
-                        cuongHoaIndex = i;
-                        cuongHoaCmd = cmd;
-                        matchedLabel = normCap;
-                    }
-                } else if ("dong".equals(normCap) || cmd.indexMenu == 1) {
-                    hasCloseButton = true;
-                }
-            }
-        }
-
-        if (cuongHoaIndex < 0 || cuongHoaCmd == null || !hasCloseButton) {
-            return null;
-        }
-
-        long fingerprint = (((long) menuNpcId) << 32)
-                ^ (((long) items.size()) << 24)
-                ^ (((long) cuongHoaCmd.indexMenu) << 16)
-                ^ (((long) cuongHoaIndex) << 8)
-                ^ (long) enhArmedBlacksmithGeneration;
-
-        return new PendingLocalForgeMenu(menuNpcId, cuongHoaIndex, items.size(), cuongHoaCmd.indexMenu, matchedLabel, fingerprint, enhArmedBlacksmithGeneration, cuongHoaCmd);
+        iCommand cmd0 = (iCommand) items.elementAt(0);
+        iCommand cmd1 = (iCommand) items.elementAt(1);
+        String nTitle = normSemantic(title);
+        long fp = computeLocalMenuFingerprint(enhArmedBlacksmithGeneration, nTitle, items);
+        PendingLocalForgeMenu rec = new PendingLocalForgeMenu(
+            enhArmedBlacksmithGeneration,
+            nTitle,
+            normSemantic(cmd0.caption),
+            cmd0.indexMenu,
+            cmd0.subIndex,
+            normSemantic(cmd1.caption),
+            cmd1.indexMenu,
+            cmd1.subIndex,
+            2,
+            fp
+        );
+        setPendingLocalForgeMenu(rec);
+        return rec;
     }
 
     public static void cleanEnhancementRouting() {
@@ -5729,6 +5809,7 @@ public final class Zeus {
         enhLastDispatchedLocalMenuFingerprint = 0L;
         enhLastDispatchedLocalMenuGen = 0L;
         enhLocalMenuHandled = false;
+        enhDispatchedLocalMenuWaitTicks = 0;
         enhArmedBlacksmithNpcId = Integer.MIN_VALUE;
         enhArmedBlacksmithGeneration = 0L;
         enhIntroDialogWaitTicks = 0;
@@ -7083,35 +7164,59 @@ public final class Zeus {
                             return;
                         }
                     }
-                    PendingLocalForgeMenu localPending = inspectPhapSuLocalMenu();
+                    PendingLocalForgeMenu localPending = getPendingLocalForgeMenu();
+                    if (localPending == null) {
+                        localPending = inspectPhapSuLocalMenu();
+                    }
                     if (localPending != null) {
-                        if (localPending.fingerprint != enhLastDispatchedLocalMenuFingerprint
-                                || localPending.generation != enhLastDispatchedLocalMenuGen) {
-                            trace("ENHANCE local Menu2 detected for Pháp sư: opt=" + localPending.option + " caption=" + localPending.optionLabel);
-                            enhLastDispatchedLocalMenuFingerprint = localPending.fingerprint;
-                            enhLastDispatchedLocalMenuGen = localPending.generation;
-                            enhLocalMenuHandled = true;
+                        if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu && !GameCanvas.menu2.isSv
+                                && GameCanvas.currentDialog == null && GameCanvas.subDialog == null
+                                && GameScreen.ObjFocus != null && GameScreen.ObjFocus.ID == -36) {
+                            mVector visibleItems = GameCanvas.menu2.menuItems;
+                            String visibleTitle = getMenu2Title(GameCanvas.menu2);
+                            if (validatePhapSuLocalMenuShape(visibleItems, visibleTitle)) {
+                                long visibleFp = computeLocalMenuFingerprint(localPending.generation, normSemantic(visibleTitle), visibleItems);
+                                if (visibleFp == localPending.fingerprint) {
+                                    if (localPending.fingerprint == enhLastDispatchedLocalMenuFingerprint
+                                            && localPending.generation == enhLastDispatchedLocalMenuGen) {
+                                        enhDispatchedLocalMenuWaitTicks++;
+                                        if (enhDispatchedLocalMenuWaitTicks > MAX_LOCAL_MENU_PROGRESSION_WAIT_TICKS) {
+                                            trace("ENHANCE local Menu2 progression timeout after " + enhDispatchedLocalMenuWaitTicks + " ticks");
+                                            enhState = 38; // FORGE_OPEN_FAILED
+                                            enhErrorCode = "FORGE_LOCAL_MENU_TIMEOUT";
+                                            enhErrorMessage = "Local menu failed to progress within budget";
+                                            cleanEnhancementRouting();
+                                            publishEnhancementStatus();
+                                            return;
+                                        }
+                                        return;
+                                    }
 
-                            try {
-                                setFrIndex(GameCanvas.menu2, localPending.option);
-                                localPending.command.perform();
-                                if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
-                                    GameCanvas.menu2.doCloseMenu();
+                                    trace("ENHANCE local Menu2 detected for Pháp sư: caption=" + localPending.caption0 + " fp=" + localPending.fingerprint);
+                                    enhLastDispatchedLocalMenuFingerprint = localPending.fingerprint;
+                                    enhLastDispatchedLocalMenuGen = localPending.generation;
+                                    enhLocalMenuHandled = true;
+                                    enhDispatchedLocalMenuWaitTicks = 0;
+
+                                    try {
+                                        iCommand liveCmd0 = (iCommand) visibleItems.elementAt(0);
+                                        setFrIndex(GameCanvas.menu2, 0);
+                                        liveCmd0.perform();
+                                        clearPendingLocalForgeMenu();
+                                    } catch (Throwable t) {
+                                        trace("ENHANCE local Menu2 perform threw exception: " + t);
+                                        enhState = 38; // FORGE_OPEN_FAILED
+                                        enhErrorCode = "FORGE_LOCAL_MENU_EXCEPTION";
+                                        enhErrorMessage = "Native local Menu2 perform threw exception: " + t.getMessage();
+                                        cleanEnhancementRouting();
+                                        publishEnhancementStatus();
+                                        return;
+                                    }
+
+                                    enhWait = 20;
+                                    return;
                                 }
-                            } catch (Throwable t) {
-                                trace("ENHANCE local Menu2 perform threw exception: " + t);
-                                enhState = 38; // FORGE_OPEN_FAILED
-                                enhErrorCode = "FORGE_LOCAL_MENU_EXCEPTION";
-                                enhErrorMessage = "Native local Menu2 perform threw exception: " + t.getMessage();
-                                cleanEnhancementRouting();
-                                publishEnhancementStatus();
-                                return;
                             }
-
-                            enhWait = 20;
-                            return;
-                        } else {
-                            return;
                         }
                     }
                     if (enhWait > 0) {
