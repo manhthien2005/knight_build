@@ -971,7 +971,7 @@ impl JarManifest {
     pub const V403_MOVEMENT_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256: &'static str =
         "51cb7d4eb8d8d3037a0aa7808563e06a55a3e1765adef58b62911074d81e6d9a";
     pub const V403_FORGE_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256: &'static str =
-        "610ebaacc3d132871d731dd7dd7f2414b097430dcc28acbac1e10bb84d8d71b8";
+        "dcfef80e5af0029335d861d76e02961b0dfc2ef55ee53d0f4b2662dfbe5e3776";
 
     pub fn read_from_file(path: &str) -> Option<Self> {
         let data = std::fs::read_to_string(path).ok()?;
@@ -4728,7 +4728,7 @@ mod tests {
         );
         assert_eq!(
             JarManifest::V403_FORGE_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256,
-            "610ebaacc3d132871d731dd7dd7f2414b097430dcc28acbac1e10bb84d8d71b8"
+            "dcfef80e5af0029335d861d76e02961b0dfc2ef55ee53d0f4b2662dfbe5e3776"
         );
 
         // 6. Verify movement fix manifest compatibility and capabilities
@@ -4755,7 +4755,7 @@ mod tests {
         // 7. Verify forge fix manifest compatibility and capabilities
         let v403_forge_manifest = JarManifest {
             jar_sha256: JarManifest::V403_FORGE_FIX_ZEUS_ONLY_COMPATIBLE_JAR_SHA256.to_string(),
-            jar_size: 1559116,
+            jar_size: 1559484,
             ctl_version: 15,
             snapshot_version: 6,
             ctl_key_count: 38,

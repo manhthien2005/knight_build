@@ -2875,7 +2875,10 @@ public final class Zeus {
             taken = false;
         }
         // Local Forge Menu observation point:
-        if (enhState == 6 && enhArmedBlacksmithNpcId == -36 && enhArmedBlacksmithGeneration > 0L) {
+        if (isPhapSuForgeTitle(title) || isForgeFlowDiagnosticallyRelevant()) {
+            if (isPhapSuForgeTitle(title)) {
+                enhForgeHookSeen = true;
+            }
             try {
                 capturePhapSuLocalMenuHook(items, title);
             } catch (Throwable t) {
@@ -5721,7 +5724,7 @@ public final class Zeus {
     }
 
     public static PendingLocalForgeMenu capturePhapSuLocalMenuHook(mVector items, String title) {
-        if (enhState == 6) {
+        if (isPhapSuForgeTitle(title) || enhState == 6) {
             enhForgeHookSeen = true;
         }
         if (enhState != 6 || enhArmedBlacksmithNpcId != -36 || enhArmedBlacksmithGeneration == 0L) {
@@ -5831,6 +5834,24 @@ public final class Zeus {
         return sb.toString();
     }
 
+    private static int enhLastLoggedDiagnosticState = -1;
+
+    public static boolean isForgeFlowDiagnosticallyRelevant() {
+        if (enhArmedBlacksmithGeneration > 0L || enhForgeHookSeen) {
+            return true;
+        }
+        if (enhState >= 4 && enhState <= 7) {
+            return true;
+        }
+        if (enhState >= 35 && enhState <= 39) {
+            return true;
+        }
+        if (GameCanvas.menu2 != null && isPhapSuForgeTitle(getMenu2Title(GameCanvas.menu2))) {
+            return true;
+        }
+        return false;
+    }
+
     public static String buildForgeDispatchDiagnosticJson(
             boolean hookSeen, boolean pendingCreated, int enhState, int armedNpc, long armedGen,
             Integer objFocusId, boolean curDlgPresent, boolean subDlgPresent, boolean menuPresent,
@@ -5864,7 +5885,6 @@ public final class Zeus {
 
     public static String getForgeDispatchDiagnosticJson() {
         boolean hookSeen = enhForgeHookSeen;
-        boolean pendingCreated = (enhPendingLocalMenuRecord != null);
         int state = enhState;
         int armedNpc = enhArmedBlacksmithNpcId;
         long armedGen = enhArmedBlacksmithGeneration;
@@ -5892,7 +5912,13 @@ public final class Zeus {
             }
         }
 
-        Long pendingFp = (enhPendingLocalMenuRecord != null ? Long.valueOf(enhPendingLocalMenuRecord.fingerprint) : null);
+        PendingLocalForgeMenu curPending = enhPendingLocalMenuRecord;
+        if (curPending == null && state == 6 && armedGen > 0L && armedNpc == -36) {
+            curPending = inspectPhapSuLocalMenu();
+        }
+        boolean pendingCreated = (curPending != null);
+        Long pendingFp = (curPending != null ? Long.valueOf(curPending.fingerprint) : null);
+
         Long visibleFp = null;
         if (items != null && rawNameMenu != null) {
             visibleFp = Long.valueOf(computeLocalMenuFingerprint(armedGen, normSemantic(rawNameMenu), items));
@@ -5901,7 +5927,13 @@ public final class Zeus {
         long lastDispatchedGen = enhLastDispatchedLocalMenuGen;
 
         String firstFailed = "NONE";
-        if (curDlgPresent) {
+        if (state != 6) {
+            firstFailed = "ENH_STATE_NOT_OPENING_FORGE";
+        } else if (armedGen == 0L) {
+            firstFailed = "ARMED_GENERATION_ZERO";
+        } else if (armedNpc != -36) {
+            firstFailed = "ARMED_NPC_NOT_BLACKSMITH";
+        } else if (curDlgPresent) {
             firstFailed = "CURRENT_DIALOG_PRESENT";
         } else if (subDlgPresent) {
             firstFailed = "SUB_DIALOG_PRESENT";
@@ -5943,7 +5975,7 @@ public final class Zeus {
     }
 
     public static void emitForgeDispatchDiagnostic(boolean force) {
-        if (enhState != 6 || enhArmedBlacksmithGeneration == 0L) {
+        if (!force && !isForgeFlowDiagnosticallyRelevant()) {
             return;
         }
         try {
@@ -5960,11 +5992,13 @@ public final class Zeus {
             long now = System.currentTimeMillis();
             boolean shouldLog = force
                     || enhArmedBlacksmithGeneration != enhLastLoggedDiagnosticGen
-                    || !predicate.equals(enhLastLoggedDiagnosticPredicate)
+                    || enhState != enhLastLoggedDiagnosticState
+                    || (enhLastLoggedDiagnosticPredicate == null || !enhLastLoggedDiagnosticPredicate.equals(predicate))
                     || (now - enhLastLoggedDiagnosticTime >= 5000L);
 
             if (shouldLog) {
                 enhLastLoggedDiagnosticGen = enhArmedBlacksmithGeneration;
+                enhLastLoggedDiagnosticState = enhState;
                 enhLastLoggedDiagnosticPredicate = predicate;
                 enhLastLoggedDiagnosticTime = now;
 
@@ -6008,6 +6042,7 @@ public final class Zeus {
         clearPendingLocalForgeMenu();
         enhForgeHookSeen = false;
         enhLastLoggedDiagnosticGen = 0L;
+        enhLastLoggedDiagnosticState = -1;
         enhLastLoggedDiagnosticPredicate = null;
         enhLastLoggedDiagnosticTime = 0L;
         enhIntroDialogHandled = false;
@@ -7156,6 +7191,7 @@ public final class Zeus {
                             enhState = 36; // BLACKSMITH_NOT_FOUND
                             enhErrorCode = "BLACKSMITH_NOT_FOUND";
                             enhErrorMessage = "Blacksmith NPC not found on Map 1";
+                            emitForgeDispatchDiagnostic(true);
                             cleanEnhancementRouting();
                             publishEnhancementStatus();
                             return;
@@ -7184,6 +7220,7 @@ public final class Zeus {
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
                             enhErrorMessage = "Failed native interaction with blacksmith";
+                            emitForgeDispatchDiagnostic(true);
                             cleanEnhancementRouting();
                         }
                     }
@@ -7196,6 +7233,7 @@ public final class Zeus {
                         enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                         enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
                         enhErrorMessage = "Blacksmith NPC lost during approach";
+                        emitForgeDispatchDiagnostic(true);
                         cleanEnhancementRouting();
                         publishEnhancementStatus();
                         return;
@@ -7218,6 +7256,7 @@ public final class Zeus {
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
                             enhErrorMessage = "Failed native interaction with blacksmith";
+                            emitForgeDispatchDiagnostic(true);
                             cleanEnhancementRouting();
                         }
                         publishEnhancementStatus();
@@ -7443,6 +7482,7 @@ public final class Zeus {
                         enhState = 38; // FORGE_OPEN_FAILED
                         enhErrorCode = "FORGE_OPEN_FAILED";
                         enhErrorMessage = "Forge dialog failed to open";
+                        emitForgeDispatchDiagnostic(true);
                         cleanEnhancementRouting();
                         publishEnhancementStatus();
                         return;
@@ -7468,6 +7508,7 @@ public final class Zeus {
                             enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                             enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
                             enhErrorMessage = "Failed retry native interaction with blacksmith";
+                            emitForgeDispatchDiagnostic(true);
                             cleanEnhancementRouting();
                             publishEnhancementStatus();
                             return;
@@ -7476,6 +7517,7 @@ public final class Zeus {
                         enhState = 37; // BLACKSMITH_INTERACTION_FAILED
                         enhErrorCode = "BLACKSMITH_INTERACTION_FAILED";
                         enhErrorMessage = "Blacksmith NPC lost during retry";
+                        emitForgeDispatchDiagnostic(true);
                         cleanEnhancementRouting();
                         publishEnhancementStatus();
                         return;

@@ -2745,6 +2745,63 @@ public class EnhancementEngineTest {
         check("17.22: Diagnostic JSON contains menu_is_sv false", diagJson.indexOf("\"menu_is_sv\":false") >= 0);
         check("17.22: Diagnostic JSON contains title_match true", diagJson.indexOf("\"title_match\":true") >= 0);
         check("17.22: Diagnostic JSON contains tuple_match true", diagJson.indexOf("\"tuple_match\":true") >= 0);
+        check("17.22: Correct local menu reports first_failed_predicate NONE",
+            diagJson.indexOf("\"first_failed_predicate\":\"NONE\"") >= 0);
+
+        // When enhState != 6 during in-flight flow, verify predicate and unforced emission
+        java.io.File diagOutFile = new java.io.File(System.getProperty("user.home"), "zeus-enhance-diagnostic.json");
+        diagOutFile.delete();
+        Zeus.enhState = 5; // APPROACHING_BLACKSMITH
+        String enhStateDiag = Zeus.getForgeDispatchDiagnosticJson();
+        check("17.22: enhState != 6 reports ENH_STATE_NOT_OPENING_FORGE",
+            enhStateDiag.indexOf("\"first_failed_predicate\":\"ENH_STATE_NOT_OPENING_FORGE\"") >= 0);
+        Zeus.emitForgeDispatchDiagnostic(false);
+        check("17.22: Diagnostic emitted when enhState != 6 during flow without force", diagOutFile.exists());
+        diagOutFile.delete();
+        Zeus.enhState = 6;
+
+        // When armed_generation == 0, verify predicate and unforced emission
+        long savedGen = Zeus.enhArmedBlacksmithGeneration;
+        Zeus.enhArmedBlacksmithGeneration = 0L;
+        String genZeroDiag = Zeus.getForgeDispatchDiagnosticJson();
+        check("17.22: armed_generation == 0 reports ARMED_GENERATION_ZERO",
+            genZeroDiag.indexOf("\"first_failed_predicate\":\"ARMED_GENERATION_ZERO\"") >= 0);
+        Zeus.emitForgeDispatchDiagnostic(false);
+        check("17.22: Diagnostic emitted when armed_generation == 0 without force", diagOutFile.exists());
+        diagOutFile.delete();
+        Zeus.enhArmedBlacksmithGeneration = savedGen;
+
+        // When armed_npc != -36, verify ARMED_NPC_NOT_BLACKSMITH
+        int savedNpc = Zeus.enhArmedBlacksmithNpcId;
+        Zeus.enhArmedBlacksmithNpcId = -99;
+        String armedNpcDiag = Zeus.getForgeDispatchDiagnosticJson();
+        check("17.22: armed_npc != -36 reports ARMED_NPC_NOT_BLACKSMITH",
+            armedNpcDiag.indexOf("\"first_failed_predicate\":\"ARMED_NPC_NOT_BLACKSMITH\"") >= 0);
+        Zeus.enhArmedBlacksmithNpcId = savedNpc;
+
+        // When ObjFocus is wrong
+        MainObject savedFocus = GameScreen.ObjFocus;
+        MainObject wrongFocus = new MainObject();
+        wrongFocus.ID = -99;
+        GameScreen.ObjFocus = wrongFocus;
+        String objFocusDiag = Zeus.getForgeDispatchDiagnosticJson();
+        check("17.22: Wrong ObjFocus reports OBJ_FOCUS_NOT_BLACKSMITH",
+            objFocusDiag.indexOf("\"first_failed_predicate\":\"OBJ_FOCUS_NOT_BLACKSMITH\"") >= 0);
+        GameScreen.ObjFocus = savedFocus;
+
+        // When currentDialog is present
+        GameCanvas.currentDialog = genericDlg;
+        String dlgDiag = Zeus.getForgeDispatchDiagnosticJson();
+        check("17.22: Dialog present reports CURRENT_DIALOG_PRESENT",
+            dlgDiag.indexOf("\"first_failed_predicate\":\"CURRENT_DIALOG_PRESENT\"") >= 0);
+        GameCanvas.currentDialog = null;
+
+        // When menu not shown
+        GameCanvas.menu2.isShowMenu = false;
+        String menuShownDiag = Zeus.getForgeDispatchDiagnosticJson();
+        check("17.22: menu not shown reports MENU_NOT_SHOWN",
+            menuShownDiag.indexOf("\"first_failed_predicate\":\"MENU_NOT_SHOWN\"") >= 0);
+        GameCanvas.menu2.isShowMenu = true;
 
         // When isSv is forced true, verify first_failed_predicate is MENU_IS_SV
         GameCanvas.menu2.isSv = true;
@@ -2759,8 +2816,19 @@ public class EnhancementEngineTest {
         check("17.22: Wrong title reports TITLE_MISMATCH",
             titleDiag.indexOf("\"first_failed_predicate\":\"TITLE_MISMATCH\"") >= 0);
 
+        // When tuple is mismatched, verify first_failed_predicate is TUPLE_MISMATCH
+        mVector wrongItems = new mVector();
+        wrongItems.addElement(new iCommand("Khac", 4, 0, prodPhapSu));
+        wrongItems.addElement(new iCommand("Dong", 1, 0, prodPhapSu));
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", wrongItems);
+        String tupleDiag = Zeus.getForgeDispatchDiagnosticJson();
+        check("17.22: Wrong tuple reports TUPLE_MISMATCH",
+            tupleDiag.indexOf("\"first_failed_predicate\":\"TUPLE_MISMATCH\"") >= 0);
+
+        // Restore valid local menu
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+
         // Verify emitForgeDispatchDiagnostic writes diagnostic file to user.home
-        java.io.File diagOutFile = new java.io.File(System.getProperty("user.home"), "zeus-enhance-diagnostic.json");
         diagOutFile.delete();
         Zeus.emitForgeDispatchDiagnostic(true);
         check("17.22: emitForgeDispatchDiagnostic created diagnostic file", diagOutFile.exists());
