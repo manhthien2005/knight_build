@@ -1,10 +1,10 @@
 {
-  "jar_sha256":         "c177d9ace4cd2c45fbebb4422c0bec8c8021e81872254e84b3d0960c8c510bd5",
+  "jar_sha256":         "31c8fbed80a2d18dbf3641b78056034a7136f551f3e27b73dcf6d2d0f0e0ae36",
   "jar_size":           1532209,
   "ctl_version":        15,
   "snapshot_version":   6,
   "ctl_key_count":      38,
   "snapshot_key_count": 49,
-  "built_at":           "2026-10-07T12:21:01Z",
+  "built_at":           "2026-10-08T04:19:32Z",
   "patcher_sha256":     "53763370d4f348c96c2af46f41d2549f285f46e0773f328ce0436f3d4949fbe7"
 }

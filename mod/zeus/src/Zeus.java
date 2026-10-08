@@ -5681,10 +5681,10 @@ public final class Zeus {
         }
         iCommand cmd0 = (iCommand) e0;
         iCommand cmd1 = (iCommand) e1;
-        if (!"cuong hoa".equals(normSemantic(cmd0.caption)) || cmd0.indexMenu != 4 || cmd0.subIndex != 0) {
+        if (!"cuong hoa".equals(normSemantic(cmd0.caption)) || cmd0.indexMenu != 4 || cmd0.subIndex != -1) {
             return false;
         }
-        if (!"dong".equals(normSemantic(cmd1.caption)) || cmd1.indexMenu != 1 || cmd1.subIndex != 0) {
+        if (!"dong".equals(normSemantic(cmd1.caption)) || cmd1.indexMenu != 1 || cmd1.subIndex != -1) {
             return false;
         }
         return true;
