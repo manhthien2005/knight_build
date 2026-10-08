@@ -2367,13 +2367,44 @@ public class EnhancementEngineTest {
         check("17.0g: Old artificial title with prefix 'Pháp sư: ' returns false (regression proof)",
             !Zeus.isPhapSuForgeTitle("Pháp sư: Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng"));
 
-        // 17.1: Exact 2-item live menu is accepted (without artificial Menu2.IdNpc)
+        // 17.1: Exact production ownership path (R4_20 fallback path without Zeus.menu hook)
+        call("cleanEnhancementRouting");
+        clearQueue();
+        setupWorldState(1);
+        localPhapSu = new TestMenuTargetNpc("Pháp sư", -36, 2, 324, 624);
+        GameScreen.Vecplayers = new mVector("npcs");
+        GameScreen.Vecplayers.addElement(localPhapSu);
+        GameScreen.ObjFocus = localPhapSu;
+        set("enhValidationOnly", true);
+        set("enhState", 6); // OPENING_FORGE
+        set("enhWait", 0);
+        armBlacksmithInteraction(-36);
+
+        // Fallback test per R4_20 production ownership path:
+        // 1. Do NOT depend on Zeus.menu() observation hook
+        check("17.1: No pending record before inspection", Zeus.getPendingLocalForgeMenu() == null);
+
+        // 2-5, 8-9. Put valid local Menu2 directly into GameCanvas.menu2 with exact live title and native -1/-1 tuple
         mVector validLocalItems = makePhapSuLocalMenuItems(localPhapSu);
         setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        check("17.1: menu2.isShowMenu is true", GameCanvas.menu2.isShowMenu);
+        check("17.1: menu2.isSv is false", !GameCanvas.menu2.isSv);
+        check("17.1: ObjFocus.ID is -36", GameScreen.ObjFocus.ID == -36);
+
+        // Fallback inspectPhapSuLocalMenu() detects the live menu and creates pending record
+        Object fallbackRecord = Zeus.inspectPhapSuLocalMenu();
+        check("17.1: Fallback inspectPhapSuLocalMenu() detects the live menu", fallbackRecord != null);
+        check("17.1: Pending record is created", Zeus.getPendingLocalForgeMenu() != null);
+
+        // 10. Run the normal enhancement tick
         enhanceMethod.invoke(null);
-        check("17.1: Exact 2-item live menu is accepted", localPhapSu.pressCount == 1);
+        check("17.1: Native perform executes exactly once", localPhapSu.pressCount == 1);
         check("17.1: Dispatched command index is 4", localPhapSu.lastIndex == 4);
-        check("17.1: Zero raw Dynamic_Menu or Opcode 67 packets emitted", queue().size() == 0);
+        check("17.1: Zero Opcode67", queue().size() == 0);
+
+        // Duplicate tick does not execute it again
+        enhanceMethod.invoke(null);
+        check("17.1: Duplicate tick does not execute perform again", localPhapSu.pressCount == 1);
 
         // 17.2: 3-item menu containing the same first two actions is rejected
         call("cleanEnhancementRouting");
@@ -2405,23 +2436,35 @@ public class EnhancementEngineTest {
         set("enhWait", 0);
         armBlacksmithInteraction(-36);
         mVector badIndex0 = new mVector("badIndex0");
-        badIndex0.addElement(new iCommand("Cường hóa", 2, 0, localPhapSu));
-        badIndex0.addElement(new iCommand("Đóng", 1, 0, GameCanvas.menu2));
+        badIndex0.addElement(new iCommand("Cường hóa", 2, -1, localPhapSu));
+        badIndex0.addElement(new iCommand("Đóng", 1, -1, GameCanvas.menu2));
         setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badIndex0);
         enhanceMethod.invoke(null);
         check("17.4: Cường hóa caption with indexMenu != 4 rejected", localPhapSu.pressCount == 0);
 
-        // 17.5: Cường hóa indexMenu=4 with subIndex != 0 rejected
+        // 17.5: Cường hóa indexMenu=4 with subIndex != -1 rejected
         call("cleanEnhancementRouting");
         set("enhState", 6);
         set("enhWait", 0);
         armBlacksmithInteraction(-36);
         mVector badSub0 = new mVector("badSub0");
-        badSub0.addElement(new iCommand("Cường hóa", 4, 1, localPhapSu));
-        badSub0.addElement(new iCommand("Đóng", 1, 0, GameCanvas.menu2));
+        badSub0.addElement(new iCommand("Cường hóa", 4, 0, localPhapSu));
+        badSub0.addElement(new iCommand("Đóng", 1, -1, GameCanvas.menu2));
         setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badSub0);
         enhanceMethod.invoke(null);
-        check("17.5: Cường hóa indexMenu=4 with subIndex != 0 rejected", localPhapSu.pressCount == 0);
+        check("17.5: Cường hóa indexMenu=4 with subIndex != -1 (0) rejected", localPhapSu.pressCount == 0);
+
+        // 17.5b: Old synthetic (0,0) tuple rejected
+        call("cleanEnhancementRouting");
+        set("enhState", 6);
+        set("enhWait", 0);
+        armBlacksmithInteraction(-36);
+        mVector oldSyntheticZeroTuple = new mVector("oldSyntheticZeroTuple");
+        oldSyntheticZeroTuple.addElement(new iCommand("Cường hóa", 4, 0, localPhapSu));
+        oldSyntheticZeroTuple.addElement(new iCommand("Đóng", 1, 0, GameCanvas.menu2));
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", oldSyntheticZeroTuple);
+        enhanceMethod.invoke(null);
+        check("17.5b: Old synthetic (0,0) tuple rejected", localPhapSu.pressCount == 0);
 
         // 17.6: Different caption with indexMenu=4 rejected
         call("cleanEnhancementRouting");
@@ -2429,8 +2472,8 @@ public class EnhancementEngineTest {
         set("enhWait", 0);
         armBlacksmithInteraction(-36);
         mVector badCap0 = new mVector("badCap0");
-        badCap0.addElement(new iCommand("Chế tạo", 4, 0, localPhapSu));
-        badCap0.addElement(new iCommand("Đóng", 1, 0, GameCanvas.menu2));
+        badCap0.addElement(new iCommand("Chế tạo", 4, -1, localPhapSu));
+        badCap0.addElement(new iCommand("Đóng", 1, -1, GameCanvas.menu2));
         setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badCap0);
         enhanceMethod.invoke(null);
         check("17.6: Different caption with indexMenu=4 rejected", localPhapSu.pressCount == 0);
@@ -2441,8 +2484,8 @@ public class EnhancementEngineTest {
         set("enhWait", 0);
         armBlacksmithInteraction(-36);
         mVector badIndex1 = new mVector("badIndex1");
-        badIndex1.addElement(new iCommand("Cường hóa", 4, 0, localPhapSu));
-        badIndex1.addElement(new iCommand("Đóng", 2, 0, GameCanvas.menu2));
+        badIndex1.addElement(new iCommand("Cường hóa", 4, -1, localPhapSu));
+        badIndex1.addElement(new iCommand("Đóng", 2, -1, GameCanvas.menu2));
         setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badIndex1);
         enhanceMethod.invoke(null);
         check("17.7: Đóng caption with indexMenu != 1 rejected", localPhapSu.pressCount == 0);
@@ -2453,23 +2496,23 @@ public class EnhancementEngineTest {
         set("enhWait", 0);
         armBlacksmithInteraction(-36);
         mVector badCap1 = new mVector("badCap1");
-        badCap1.addElement(new iCommand("Cường hóa", 4, 0, localPhapSu));
-        badCap1.addElement(new iCommand("Hủy", 1, 0, GameCanvas.menu2));
+        badCap1.addElement(new iCommand("Cường hóa", 4, -1, localPhapSu));
+        badCap1.addElement(new iCommand("Hủy", 1, -1, GameCanvas.menu2));
         setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badCap1);
         enhanceMethod.invoke(null);
         check("17.8: indexMenu=1 with caption != Đóng rejected", localPhapSu.pressCount == 0);
 
-        // 17.9: Đóng with subIndex != 0 rejected
+        // 17.9: Đóng with subIndex != -1 rejected
         call("cleanEnhancementRouting");
         set("enhState", 6);
         set("enhWait", 0);
         armBlacksmithInteraction(-36);
         mVector badSub1 = new mVector("badSub1");
-        badSub1.addElement(new iCommand("Cường hóa", 4, 0, localPhapSu));
-        badSub1.addElement(new iCommand("Đóng", 1, 1, GameCanvas.menu2));
+        badSub1.addElement(new iCommand("Cường hóa", 4, -1, localPhapSu));
+        badSub1.addElement(new iCommand("Đóng", 1, 0, GameCanvas.menu2));
         setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", badSub1);
         enhanceMethod.invoke(null);
-        check("17.9: Đóng with subIndex != 0 rejected", localPhapSu.pressCount == 0);
+        check("17.9: Đóng with subIndex != -1 (0) rejected", localPhapSu.pressCount == 0);
 
         // 17.10: Reversed Cường hóa/Đóng order rejected
         call("cleanEnhancementRouting");
@@ -2477,11 +2520,22 @@ public class EnhancementEngineTest {
         set("enhWait", 0);
         armBlacksmithInteraction(-36);
         mVector reversed = new mVector("reversed");
-        reversed.addElement(new iCommand("Đóng", 1, 0, GameCanvas.menu2));
-        reversed.addElement(new iCommand("Cường hóa", 4, 0, localPhapSu));
+        reversed.addElement(new iCommand("Đóng", 1, -1, GameCanvas.menu2));
+        reversed.addElement(new iCommand("Cường hóa", 4, -1, localPhapSu));
         setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", reversed);
         enhanceMethod.invoke(null);
         check("17.10: Reversed Cường hóa/Đóng order rejected", localPhapSu.pressCount == 0);
+
+        // 17.10b: isSv=true rejected
+        call("cleanEnhancementRouting");
+        set("enhState", 6);
+        set("enhWait", 0);
+        armBlacksmithInteraction(-36);
+        setupMockLocalMenu2(-36, "Ta có thể gia tăng sức mạnh của một món đồ bằng thuật cường hóa chúng", validLocalItems);
+        GameCanvas.menu2.isSv = true;
+        enhanceMethod.invoke(null);
+        check("17.10b: isSv=true rejected", localPhapSu.pressCount == 0);
+        GameCanvas.menu2.isSv = false;
 
         // 17.11: Wrong title/context rejected
         call("cleanEnhancementRouting");
@@ -2860,8 +2914,9 @@ public class EnhancementEngineTest {
 
     static mVector makePhapSuLocalMenuItems(AvMain targetNpc) {
         mVector items = new mVector("menuItems");
-        iCommand cmdCuongHoa = new iCommand("Cường hóa", 4, 0, targetNpc);
-        iCommand cmdDong = new iCommand("Đóng", 1, 0, GameCanvas.menu2);
+        // Native construction using official iCommand constructor (String, int, AvMain) sets subIndex = -1
+        iCommand cmdCuongHoa = new iCommand("Cường hóa", 4, targetNpc);
+        iCommand cmdDong = new iCommand("Đóng", 1, GameCanvas.menu2);
         items.addElement(cmdCuongHoa);
         items.addElement(cmdDong);
         return items;
