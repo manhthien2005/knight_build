@@ -1,6 +1,6 @@
 ---
 name: knight-runtime-acceptance
-description: Safely stage and manually validate a pinned Knight Zeus candidate on an isolated Windows MicroEmulator profile. Use for JAR SHA-256 guard, launcher DryRun, NPC dialogs, Boss Hunt, movement, combat, snapshots, operator emergency stop and live acceptance.
+description: Safely stage and manually validate a pinned Knight Zeus candidate on an isolated Windows MicroEmulator profile. Use when staging a JAR with SHA-256 guard and launcher DryRun or checking NPC dialogs, Boss Hunt, movement, combat, snapshots and operator emergency stop.
 ---
 # Knight Runtime Acceptance
 
