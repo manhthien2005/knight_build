@@ -1,6 +1,6 @@
 ---
 name: knight-source-trace
-description: Investigate Knight/Zeus source, ModByTminh v4.0.3 native ABI, J2ME Menu2/MsgDialog, packets, NPC flows, Rust-to-Java transport, state machine, or live bugs. Use before proposing a fix when code behavior or integration is uncertain.
+description: Investigate Knight/Zeus source, ModByTminh v4.0.3 native ABI, J2ME Menu2/MsgDialog, packets, NPC flows, Rust-to-Java transport, state machine, or live bugs. Use when debugging failures, tracing native J2ME calls, or investigating uncertain code behavior before any fix.
 ---
 # Knight Source Trace
 
