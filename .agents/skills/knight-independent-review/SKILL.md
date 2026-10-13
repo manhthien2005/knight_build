@@ -1,6 +1,6 @@
 ---
 name: knight-independent-review
-description: Independently review Knight Zeus/Rust implementation, PR, diff, candidate JAR, native ABI changes or tests. Use to detect real defects, source-vs-runtime gaps, regression risk, missing cleanup and fabricated or weak PASS evidence before staging.
+description: Independently review Knight Zeus/Rust implementation, PR, diff, candidate JAR, native ABI changes or tests. Use when reviewing a pinned diff or JAR before staging to detect defects, source-vs-runtime gaps, regressions and weak PASS evidence.
 ---
 # Knight Independent Review
 
