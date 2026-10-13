@@ -477,22 +477,22 @@ public class BossHuntIntegrationTest {
 
         long now = 1000000L;
         boolean handled = Zeus.handleBossScheduleDialog(alisama, now);
-        check("Valid Alisama dialog accepted", handled);
-        checkEquals("Buy action invoked once", 1, buyCalls[0]);
+        check("Unproven Alisama dialog rejected", !handled);
+        checkEquals("Unproven dialog never invokes buy action", 0, buyCalls[0]);
         checkEquals("Close action not invoked", 0, closeCalls[0]);
 
         // 2. Debounce: immediate second call is suppressed
         boolean debounced = Zeus.handleBossScheduleDialog(alisama, now + 500L);
-        check("Immediate duplicate call debounced", !debounced);
-        checkEquals("Buy action still invoked once", 1, buyCalls[0]);
+        check("Repeated unproven dialog rejected", !debounced);
+        checkEquals("Repeated unproven dialog still has no buy action", 0, buyCalls[0]);
 
         // 3. Retry limit: 3rd and 4th attempt after debounce
         Zeus.handleBossScheduleDialog(alisama, now + 2000L); // try 2
         Zeus.handleBossScheduleDialog(alisama, now + 4000L); // try 3
-        checkEquals("Buy action called 3 times across retries", 3, buyCalls[0]);
+        checkEquals("Repeated unproven dialog never dispatches", 0, buyCalls[0]);
         boolean retryExhausted = Zeus.handleBossScheduleDialog(alisama, now + 6000L);
-        check("4th attempt fail-closed on retry exhaustion", !retryExhausted);
-        checkEquals("Buy action capped at 3", 3, buyCalls[0]);
+        check("Repeated attempts remain fail-closed without provenance", !retryExhausted);
+        checkEquals("No buy action after repeated attempts", 0, buyCalls[0]);
 
         // 4. Negative test: Unrelated shop dialog (e.g. potion / purchase prompt)
         Zeus.resetBossDialogBridgeState();
@@ -626,9 +626,15 @@ public class BossHuntIntegrationTest {
         closeCalls[0] = 0;
         Zeus.bossHuntTick();
 
-        checkEquals("Scenario A: Buy action invoked through bossHuntTick when background menu2.isShowMenu is true", 1, buyCalls[0]);
+        checkEquals("F01-SAFE-01: Historical attempt cannot dispatch foreground command", 0, buyCalls[0]);
         checkEquals("Scenario A: Close action not invoked", 0, closeCalls[0]);
-        checkEquals("Scenario A: Diagnostic recorded bridge dispatched", "BRIDGE_DISPATCHED", Zeus.getLastBossHuntDiagReason());
+        checkEquals("Scenario A: Reason is unverified provenance", "DIALOG_PROVENANCE_UNVERIFIED", Zeus.getLastBossHuntDiagReason());
+
+        // F01-SAFE-01: repeated ticks cannot turn a stale attempt into ownership.
+        Zeus.bossHuntTick();
+        checkEquals("Scenario A: Repeated tick never performs buy", 0, buyCalls[0]);
+        check("Scenario A: Foreground dialog is not dismissed", GameCanvas.currentDialog == validDialog);
+        check("Scenario A: Background Menu2 remains unmodified", GameCanvas.menu2.isShowMenu);
 
         // 2. SCENARIO B: Foreground MsgDialog visible WITHOUT menu (menu2.isShowMenu == false)
         if (GameCanvas.menu2 == null) {
@@ -641,8 +647,8 @@ public class BossHuntIntegrationTest {
         buyCalls[0] = 0;
 
         Zeus.bossHuntTick();
-        checkEquals("Scenario B: Buy action invoked without background menu", 1, buyCalls[0]);
-        checkEquals("Scenario B: Diagnostic recorded bridge dispatched", "BRIDGE_DISPATCHED", Zeus.getLastBossHuntDiagReason());
+        checkEquals("Scenario B: Unproven dialog rejected without background menu", 0, buyCalls[0]);
+        checkEquals("Scenario B: Reason is unverified provenance", "DIALOG_PROVENANCE_UNVERIFIED", Zeus.getLastBossHuntDiagReason());
 
         // 3. SCENARIO C: Pending native menu selection BLOCKED when foreground dialog is active
         Zeus.resetBossDialogBridgeState();
@@ -682,6 +688,10 @@ public class BossHuntIntegrationTest {
         check("Scenario C: Menu dispatch blocked while foreground dialog is active", !dispatchBlocked);
         check("Scenario C: Pending selection retained (not prematurely executed behind dialog)", Zeus.pendingBossMenuSelection != null);
 
+        Zeus.bossHuntTick();
+        check("F01-SAFE-02: Foreground tick retains pending background Menu2", Zeus.pendingBossMenuSelection != null);
+        checkEquals("F01-SAFE-02: No foreground buy on pending background menu", 0, buyCalls[0]);
+
         // Cleanup pending selection and menu2
         Zeus.resetBossMenuSelectionState();
         GameCanvas.menu2.isShowMenu = false;
@@ -704,10 +714,14 @@ public class BossHuntIntegrationTest {
             throw new RuntimeException(e);
         }
         GameCanvas.currentDialog = unrelatedDialog;
+        GameCanvas.menu2.isShowMenu = true; // F01-SAFE-02: unrelated foreground over background menu
 
         Zeus.bossHuntTick();
         checkEquals("Scenario D: Unrelated purchase dialog not advanced through bossHuntTick", 0, buyCalls[0]);
         checkEquals("Scenario D: Diagnostic recorded DIALOG_TEXT_UNRECOGNIZED", "DIALOG_TEXT_UNRECOGNIZED", Zeus.getLastBossHuntDiagReason());
+        check("Scenario D: Background Menu2 was not dismissed", GameCanvas.menu2.isShowMenu);
+        check("Scenario D: Unrelated foreground was not dismissed", GameCanvas.currentDialog == unrelatedDialog);
+        GameCanvas.menu2.isShowMenu = false;
 
         // 5. SCENARIO E: Wrong NPC (not Alisama / Doubar) fails closed
         Zeus.resetBossDialogBridgeState();
@@ -794,8 +808,8 @@ public class BossHuntIntegrationTest {
         buyCalls[0] = 0;
 
         Zeus.bossHuntTick();
-        checkEquals("Scenario I: 4th attempt rejected by retry bound", 0, buyCalls[0]);
-        checkEquals("Scenario I: Diagnostic recorded BRIDGE_RETRY_LIMIT", "BRIDGE_RETRY_LIMIT", Zeus.getLastBossHuntDiagReason());
+        checkEquals("Scenario I: Repeated attempts cannot bypass provenance", 0, buyCalls[0]);
+        checkEquals("Scenario I: Repeated dialogs remain unverified", "DIALOG_PROVENANCE_UNVERIFIED", Zeus.getLastBossHuntDiagReason());
 
         // 10. SCENARIO J: Higher priority yields and records HIGHER_PRIORITY
         Zeus.resetBossDialogBridgeState();

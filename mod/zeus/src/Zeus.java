@@ -729,23 +729,11 @@ public final class Zeus {
             return false;
         }
 
-        if (now - lastBossDialogBridgeTime < 1500L) {
-            return false;
-        }
-        if (bossDialogBridgeTries >= 3) {
-            recordBossHuntDiagReason("BRIDGE_RETRY_LIMIT");
-            return false;
-        }
-
-        lastBossDialogBridgeTime = now;
-        bossDialogBridgeTries++;
-        try {
-            recordBossHuntDiagReason("BRIDGE_DISPATCHED");
-            buyCmd.perform();
-            return true;
-        } catch (Throwable t) {
-            return false;
-        }
+        // F-01 containment: native MsgDialog exposes no verified correlation to
+        // the initiating NPC interaction. A name, caption, text or attempt count
+        // cannot authorize execution of a foreground command. Leave UI untouched.
+        recordBossHuntDiagReason("DIALOG_PROVENANCE_UNVERIFIED");
+        return false;
     }
 
     private static void releaseBossHuntControls() {
