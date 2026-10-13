@@ -11,9 +11,18 @@ SRC="$REPO_ROOT/mod/zeus"
 DST=/work/zeus
 
 [ -d "$SRC" ] || { echo "khong thay $SRC — repository missing mod/zeus"; exit 1; }
-[ -f "$SRC/src/Zeus.java" ] || { echo "khong thay $SRC/src/Zeus.java — repository missing Zeus"; exit 1; }
-[ -f "$SRC/src/BossScheduleParser.java" ] || { echo "khong thay $SRC/src/BossScheduleParser.java — repository missing BossScheduleParser"; exit 1; }
-[ -f "$SRC/src/BossScheduleReader.java" ] || { echo "khong thay $SRC/src/BossScheduleReader.java — repository missing BossScheduleReader"; exit 1; }
+# Keep this list aligned with the eight javac inputs in build-zeus-jar.sh.
+REQUIRED_SOURCES=(
+    BossCatalog.java BossHuntState.java BossHuntConfig.java
+    BossScheduleParser.java BossScheduleReader.java BossHuntScheduler.java
+    BossHuntController.java Zeus.java
+)
+for source in "${REQUIRED_SOURCES[@]}"; do
+    [ -f "$SRC/src/$source" ] || {
+        echo "ERROR: required build source missing: $SRC/src/$source" >&2
+        exit 1
+    }
+done
 
 mkdir -p "$DST/src" "$DST/tools"
 if [ -f "$SRC/vanilla.jar" ]; then
@@ -22,10 +31,14 @@ fi
 if [ -f "$REPO_ROOT/vendor/microemulator-2.0.4/microemulator.jar" ]; then
     cp "$REPO_ROOT/vendor/microemulator-2.0.4/microemulator.jar" /work/jar/microemulator.jar
 fi
-rm -f "$DST/src/BossScheduleParser.java"
-cp "$SRC/src/Zeus.java"               "$DST/src/Zeus.java"
-cp "$SRC/src/BossScheduleParser.java" "$DST/src/BossScheduleParser.java"
-cp "$SRC/src/BossScheduleReader.java" "$DST/src/BossScheduleReader.java"
+for source in "${REQUIRED_SOURCES[@]}"; do
+    # Remove stale copies or symlink destinations before writing the current source.
+    cp --remove-destination -- "$SRC/src/$source" "$DST/src/$source"
+    cmp -s -- "$SRC/src/$source" "$DST/src/$source" || {
+        echo "ERROR: source sync integrity mismatch: $source" >&2
+        exit 1
+    }
+done
 cp "$SRC/tools"/*.java                "$DST/tools/"
 cp "$SRC/build-zeus-jar.sh"           "$DST/build-zeus-jar.sh"
 chmod +x "$DST/build-zeus-jar.sh"
