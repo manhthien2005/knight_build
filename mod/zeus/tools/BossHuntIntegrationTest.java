@@ -561,8 +561,13 @@ public class BossHuntIntegrationTest {
             GameCanvas.currentDialog = null;
             GameCanvas.menu2 = null;
             Zeus.clearBossHuntDiagReason();
+            boolean schedulerEmpty = Zeus.bossHunt.getScheduler()
+                    .nextEntry(System.currentTimeMillis()) == null;
             check("F01-ACQ-SAFE-01: Fixture scheduler has no selected entry",
-                    Zeus.bossHunt.getScheduler().nextEntry(System.currentTimeMillis()) == null);
+                    schedulerEmpty);
+            if (!schedulerEmpty) {
+                return; // finally restores all test-owned fields, without a native tick.
+            }
             Zeus.bossHuntTick();
             checkEquals("F01-ACQ-SAFE-01: Cross-map requires separately owned route",
                     "SCHEDULE_ROUTE_MANUAL_REQUIRED", Zeus.getLastBossHuntDiagReason());
