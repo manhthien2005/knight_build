@@ -463,6 +463,7 @@ public class BossHuntIntegrationTest {
         final MainDialog oldDialog = GameCanvas.currentDialog;
         final Menu2 oldMenu = GameCanvas.menu2;
         final String oldConfigPath = Zeus.bossHuntConfigPath;
+        final String oldStatusPath = Zeus.bossHuntStatusPath;
         final boolean oldEnabled = Zeus.bossHunt.getConfig().isEnabled();
         final BossHuntState oldState = Zeus.bossHunt.getState();
         final String oldStatus = Zeus.bossHunt.getStatusText();
@@ -470,7 +471,34 @@ public class BossHuntIntegrationTest {
         final Zeus.PendingBossMenuSelection oldPending = Zeus.pendingBossMenuSelection;
         final String oldReason = Zeus.getLastBossHuntDiagReason();
 
+        // These are the controller fields tick() can change after selecting a
+        // schedule entry. Snapshot them without editing the shared scheduler table.
+        final String[] controllerNames = {
+            "targetMapId", "targetZoneNumber", "targetZoneSubIndex", "arrivedAt", "absentSince"
+        };
+        final java.lang.reflect.Field[] controllerFields =
+                new java.lang.reflect.Field[controllerNames.length];
+        final Object[] controllerValues = new Object[controllerNames.length];
+        boolean controllerSnapshotReady = false;
+        java.lang.reflect.Field statusTimer = null;
+        long oldStatusTimer = 0L;
+        boolean statusTimerSnapshotReady = false;
+
         try {
+            // Fail before touching fixture state if we cannot restore the emit timer.
+            statusTimer = Zeus.class.getDeclaredField("lastBossStatusEmit");
+            statusTimer.setAccessible(true);
+            oldStatusTimer = statusTimer.getLong(null);
+            statusTimerSnapshotReady = true;
+            for (int fieldIndex = 0; fieldIndex < controllerNames.length; fieldIndex++) {
+                controllerFields[fieldIndex] =
+                        BossHuntController.class.getDeclaredField(controllerNames[fieldIndex]);
+                controllerFields[fieldIndex].setAccessible(true);
+                controllerValues[fieldIndex] = controllerFields[fieldIndex].get(Zeus.bossHunt);
+            }
+            controllerSnapshotReady = true;
+            // No test tick may overwrite the operator's status JSON.
+            Zeus.bossHuntStatusPath = null;
             if (GameScreen.player == null) {
                 GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
             }
@@ -510,10 +538,21 @@ public class BossHuntIntegrationTest {
             check("F01-ACQ-SAFE-01: Merchant-only scene has no schedule NPC",
                     findNpc.invoke(null) == null);
 
+            // F01-ACQ-T03: same eligible Doubar and same vector on both maps.
+            // Removing the production map guard must make the map-1 assertion RED.
+            GameScreen.Vecplayers = new mVector();
+            GameScreen.Vecplayers.addElement(doubar);
             GameCanvas.loadmap.idMap = 1;
-            GameScreen.Vecplayers.removeAllElements();
-            check("F01-ACQ-RED-02: No NPC can be acquired outside map 33",
+            check("F01-ACQ-RED-02: Eligible Doubar rejected outside map 33",
                     findNpc.invoke(null) == null);
+            GameCanvas.loadmap.idMap = 33;
+            check("F01-ACQ-POS-01: Same Doubar accepted on recorded map",
+                    findNpc.invoke(null) == doubar);
+
+            // Cross-map routing probe is separate from map identity regression:
+            // its scene has no NPC, and its state has no valid schedule entry.
+            GameScreen.Vecplayers = new mVector();
+            GameCanvas.loadmap.idMap = 1;
             Zeus.bossHuntConfigPath = null;
             Zeus.bossHunt.getConfig().setEnabled(true);
             Zeus.bossHunt.setActiveEntry(null);
@@ -522,16 +561,14 @@ public class BossHuntIntegrationTest {
             GameCanvas.currentDialog = null;
             GameCanvas.menu2 = null;
             Zeus.clearBossHuntDiagReason();
+            check("F01-ACQ-SAFE-01: Fixture scheduler has no selected entry",
+                    Zeus.bossHunt.getScheduler().nextEntry(System.currentTimeMillis()) == null);
             Zeus.bossHuntTick();
             checkEquals("F01-ACQ-SAFE-01: Cross-map requires separately owned route",
                     "SCHEDULE_ROUTE_MANUAL_REQUIRED", Zeus.getLastBossHuntDiagReason());
             check("F01-ACQ-SAFE-01: No automatic movement lock acquired", !Player.isLockKey);
             check("F01-ACQ-SAFE-01: No route path written", GameScreen.player.posTransRoad == null);
 
-            GameCanvas.loadmap.idMap = 33;
-            GameScreen.Vecplayers.addElement(doubar);
-            check("F01-ACQ-POS-01: Doubar visible on the recorded map",
-                    findNpc.invoke(null) == doubar);
             // Native GiaoTiep and Menu2 are checked by the existing independent harness.
         } catch (Throwable error) {
             check("Schedule NPC acquisition test setup: " + error.getMessage(), false);
@@ -556,6 +593,16 @@ public class BossHuntIntegrationTest {
             Zeus.bossHunt.getConfig().setEnabled(oldEnabled);
             Zeus.bossHunt.setActiveEntry(oldEntry);
             Zeus.bossHunt.setState(oldState);
+            if (controllerSnapshotReady) {
+                for (int fieldIndex = 0; fieldIndex < controllerFields.length; fieldIndex++) {
+                    try {
+                        controllerFields[fieldIndex].set(Zeus.bossHunt, controllerValues[fieldIndex]);
+                    } catch (Exception error) {
+                        check("Failed to restore controller " + controllerNames[fieldIndex]
+                                + ": " + error.getMessage(), false);
+                    }
+                }
+            }
             try {
                 java.lang.reflect.Field status = BossHuntController.class.getDeclaredField("lastStatus");
                 status.setAccessible(true);
@@ -565,6 +612,14 @@ public class BossHuntIntegrationTest {
             }
             Zeus.pendingBossMenuSelection = oldPending;
             Zeus.recordBossHuntDiagReason(oldReason);
+            Zeus.bossHuntStatusPath = oldStatusPath;
+            if (statusTimerSnapshotReady) {
+                try {
+                    statusTimer.setLong(null, oldStatusTimer);
+                } catch (Exception error) {
+                    check("Failed to restore status emission timer: " + error.getMessage(), false);
+                }
+            }
         }
     }
 
