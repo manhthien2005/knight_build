@@ -615,11 +615,17 @@ public final class Zeus {
     private static boolean isBossScheduleNpc(String name) {
         if (name == null) return false;
         String s = name.toLowerCase(java.util.Locale.ENGLISH).trim();
-        return s.indexOf("doubar") >= 0 || s.indexOf("douber") >= 0 || s.indexOf("alisama") >= 0;
+        return s.indexOf("doubar") >= 0 || s.indexOf("douber") >= 0;
     }
 
+    // Recorded schedule menu source: map 33, idNPC -22 (native Menu2).
+    // The menu id is verified at dispatch; do not assume MainObject.ID == idNPC.
+    private static final int BOSS_SCHEDULE_SOURCE_MAP = 33;
+
     private static MainObject findBossScheduleNpc() {
-        if (GameScreen.Vecplayers == null || GameScreen.player == null) {
+        // Map identity is known from the native capture; no cross-map name fallback.
+        if (GameCanvas.loadmap == null || GameCanvas.loadmap.idMap != BOSS_SCHEDULE_SOURCE_MAP
+                || GameScreen.Vecplayers == null || GameScreen.player == null) {
             return null;
         }
         MainObject best = null;
@@ -644,7 +650,7 @@ public final class Zeus {
         return best;
     }
 
-    // BHX-13: Safe MsgDialog bridge for Boss Schedule NPC (Alisama / Doubar)
+    // BHX-13: Fail-closed MsgDialog bridge (native command provenance unverified)
     public static boolean handleBossScheduleDialog(MainObject scheduleNpc, long now) {
         if (GameCanvas.currentDialog == null || !(GameCanvas.currentDialog instanceof MsgDialog)) {
             return false;
@@ -11312,7 +11318,20 @@ public final class Zeus {
                         }
                     }
 
-                    // Priority 3: NPC interaction or approach if no foreground modal/menu is active
+                    // Priority 3: NPC interaction or approach if no foreground modal/menu is active.
+                    // A recorded native menu on map 33 does NOT give this state ownership of
+                    // cross-map travel (travelMove's lock would be treated as manual control).
+                    if (scheduleNpc == null && GameCanvas.currentDialog == null
+                            && (GameCanvas.menu2 == null || !GameCanvas.menu2.isShowMenu)) {
+                        if (curMap < 0) {
+                            recordBossHuntDiagReason("SCHEDULE_MAP_UNKNOWN");
+                        } else if (curMap != BOSS_SCHEDULE_SOURCE_MAP) {
+                            recordBossHuntDiagReason(mapNextHop(curMap, BOSS_SCHEDULE_SOURCE_MAP) < 0
+                                    ? "SCHEDULE_ROUTE_UNAVAILABLE" : "SCHEDULE_ROUTE_MANUAL_REQUIRED");
+                        } else {
+                            recordBossHuntDiagReason("SCHEDULE_NPC_NOT_VISIBLE");
+                        }
+                    }
                     if (scheduleNpc != null && GameCanvas.currentDialog == null) {
                         boolean menuOpen = (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu);
                         if (!menuOpen) {

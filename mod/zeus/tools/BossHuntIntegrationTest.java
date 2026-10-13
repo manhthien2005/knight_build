@@ -8,6 +8,7 @@ import InterfaceComponents.iCommand;
 import InterfaceComponents.IAction;
 import Model.Menu2;
 import CLib.mVector;
+import Thread_More.LoadMap;
 import java.io.File;
 
 import java.io.FileOutputStream;
@@ -62,6 +63,7 @@ public class BossHuntIntegrationTest {
         testMovementLockSeparationAndPriorityPreemption();
         testOwnershipAwareAutofireAndLockCleanup();
         testSafeAtomicFileReplacement();
+        testScheduleNpcAcquisitionBoundary();
         testAlisamaMsgDialogBridge();
         testForegroundAlisamaDialogPriorityGateThroughTick();
         testServerMenuNativeSelectionDispatch();
@@ -428,6 +430,75 @@ public class BossHuntIntegrationTest {
         }
     }
 
+    private static void testScheduleNpcAcquisitionBoundary() {
+        System.out.println("\\n--- testScheduleNpcAcquisitionBoundary ---");
+        try {
+            if (GameScreen.player == null) {
+                GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
+            }
+            GameScreen.player.x = 100;
+            GameScreen.player.y = 100;
+            GameScreen.player.hp = 1000;
+            Player.isLockKey = false;
+            if (GameCanvas.loadmap == null) {
+                java.lang.reflect.Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+                uf.setAccessible(true);
+                sun.misc.Unsafe unsafe = (sun.misc.Unsafe) uf.get(null);
+                GameCanvas.loadmap = (LoadMap) unsafe.allocateInstance(LoadMap.class);
+            }
+
+            MainObject alisama = new MainObject();
+            alisama.name = "Alisama";
+            alisama.typeObject = 2;
+            alisama.x = 101;
+            alisama.y = 100;
+            MainObject doubar = new MainObject();
+            doubar.name = "Doubar";
+            doubar.typeObject = 2;
+            doubar.x = 110;
+            doubar.y = 100;
+
+            GameCanvas.loadmap.idMap = 33;
+            GameScreen.Vecplayers = new mVector();
+            GameScreen.Vecplayers.addElement(alisama);
+            GameScreen.Vecplayers.addElement(doubar);
+            java.lang.reflect.Method findNpc = Zeus.class.getDeclaredMethod("findBossScheduleNpc");
+            findNpc.setAccessible(true);
+            check("F01-ACQ-RED-01: Nearby Alisama cannot supersede Doubar", findNpc.invoke(null) == doubar);
+
+            GameScreen.Vecplayers = new mVector();
+            GameScreen.Vecplayers.addElement(alisama);
+            check("F01-ACQ-SAFE-01: Merchant-only scene has no schedule NPC", findNpc.invoke(null) == null);
+
+            GameCanvas.loadmap.idMap = 1;
+            GameScreen.Vecplayers.removeAllElements();
+            check("F01-ACQ-RED-02: No NPC can be acquired outside map 33", findNpc.invoke(null) == null);
+            Zeus.bossHuntConfigPath = null;
+            Zeus.bossHunt.getConfig().setEnabled(true);
+            Zeus.bossHunt.setActiveEntry(null);
+            Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
+            Zeus.resetBossMenuSelectionState();
+            GameCanvas.currentDialog = null;
+            GameCanvas.menu2 = null;
+            Zeus.clearBossHuntDiagReason();
+            Zeus.bossHuntTick();
+            checkEquals("F01-ACQ-SAFE-01: Cross-map acquisition requires approved route ownership",
+                    "SCHEDULE_ROUTE_MANUAL_REQUIRED", Zeus.getLastBossHuntDiagReason());
+
+            GameCanvas.loadmap.idMap = 33;
+            GameScreen.Vecplayers.addElement(doubar);
+            check("F01-ACQ-POS-01: Doubar visible on the recorded map", findNpc.invoke(null) == doubar);
+            // Native GiaoTiep and Menu2 dispatch are verified by a separate offline harness.
+        } catch (Throwable error) {
+            check("Schedule NPC acquisition test setup: " + error.getMessage(), false);
+        } finally {
+            GameCanvas.currentDialog = null;
+            Zeus.bossHunt.getConfig().setEnabled(false);
+            Zeus.bossHunt.setState(BossHuntState.IDLE);
+            Zeus.clearBossHuntDiagReason();
+        }
+    }
+
     private static void testAlisamaMsgDialogBridge() {
         System.out.println("\n--- testAlisamaMsgDialogBridge ---");
 
@@ -576,7 +647,7 @@ public class BossHuntIntegrationTest {
         Player.isLockKey = false;
 
         MainObject alisama = new MainObject();
-        alisama.name = "Alisama";
+        alisama.name = "Doubar";
         alisama.x = 110;
         alisama.y = 100;
         alisama.typeObject = 2; // NPC
@@ -609,6 +680,18 @@ public class BossHuntIntegrationTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+
+        // Record the schedule source map before running the production tick.
+        // This also protects the test from a stale map set by another scenario.
+        try {
+            if (GameCanvas.loadmap == null) {
+                java.lang.reflect.Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+                uf.setAccessible(true);
+                sun.misc.Unsafe unsafe = (sun.misc.Unsafe) uf.get(null);
+                GameCanvas.loadmap = (LoadMap) unsafe.allocateInstance(LoadMap.class);
+            }
+            GameCanvas.loadmap.idMap = 33;
+        } catch (Throwable error) { throw new RuntimeException("Cannot set schedule map", error); }
 
         // 1. SCENARIO A: Foreground MsgDialog visible WHILE background menu2.isShowMenu is TRUE!
         Zeus.bossHuntConfigPath = null;
