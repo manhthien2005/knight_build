@@ -164,11 +164,13 @@ public final class Zeus {
         // never drank at all. Same reasoning that moved revive() out.
         potions();
         attack();
+        bossHuntTick();
         items();
         player();
         // Last, so a trace records what the modules above already did this tick, and so the flush
         // is the final thing that happens: a client crash still leaves everything recorded.
         traceCheck(mSystem.currentTimeMillis());
+        bossCaptureCheck(mSystem.currentTimeMillis());
         traceTick();
         if (probeArmed) {
             probeArmed = false;
@@ -266,6 +268,11 @@ public final class Zeus {
      * Trace marker and log names, declared here rather than beside the trace code because the
      * static initializer below derives their paths and a later declaration is a forward reference.
      */
+    public static final String BOSS_CAPTURE_MARKER = "zeus-boss-capture.on";
+    public static final String BOSS_CAPTURE_FILE = "zeus-boss-capture.txt";
+    public static final String BOSS_SCHEDULE_FILE = "zeus-boss-schedule.json";
+    public static final int BOSS_CAPTURE_MAX_BYTES = 256 * 1024;
+
     private static final String TRACE_MARKER = "zeus-trace.on";
     private static final String TRACE_FILE = "zeus-trace.txt";
     /**
@@ -301,6 +308,553 @@ public final class Zeus {
      * initializer meant `= null` executed *after* the block had filled them in and silently undid
      * it. Tracing then could never turn on, with nothing to see anywhere.
      */
+    private static String bossCaptureMarkerPath;
+    private static String bossCapturePath;
+    private static String bossSchedulePath;
+    public static boolean bossCaptureOn = false;
+    private static long bossCaptureCheckedAt = 0L;
+    private static int bossCaptureCount = 0;
+    private static String lastBossCaptureFingerprint = null;
+    private static long lastBossCaptureTime = 0L;
+
+    public static final BossHuntController bossHunt = new BossHuntController(new BossHuntConfig());
+    public static String bossHuntConfigPath = null;
+    public static String bossHuntStatusPath = null;
+    public static final String BOSS_HUNT_CONFIG_FILE = "zeus-boss-hunt-config.json";
+    public static final String BOSS_HUNT_STATUS_FILE = "zeus-boss-hunt-status.json";
+    private static long lastBossStatusEmit = 0L;
+    private static long lastBossHuntConfigCheck = 0L;
+    private static long lastBossHuntConfigModified = 0L;
+    private static boolean bossHuntHoldingLock = false;
+    private static boolean bossHuntHoldingPath = false;
+    private static short[] bossHuntOwnedPath = null;
+    private static boolean bossHuntHoldingAutoFire = false;
+    private static boolean bossHuntHoldingFocus = false;
+    private static MainObject bossHuntOwnedFocus = null;
+    private static boolean bossHuntHoldingAutoHPMP = false;
+    private static boolean bossHuntSavedAutoHPMP = false;
+    private static long lastBossNpcInteractAttempt = 0L;
+    private static int bossNpcInteractTries = 0;
+    private static String lastAutoBossMenuReason = null;
+    private static long lastAutoBossMenuStepTime = 0L;
+    private static int bossDialogBridgeTries = 0;
+    private static long lastBossDialogBridgeTime = 0L;
+
+    public static void setBossNpcInteractTriesForTest(int v) {
+        bossNpcInteractTries = v;
+    }
+
+    public static final class PendingBossMenuSelection {
+        public final int npcId;
+        public final int menuId;
+        public final int targetRow;
+        public final String targetCaption;
+        public final String stage;
+        public final long timestamp;
+
+        public PendingBossMenuSelection(int npcId, int menuId, int targetRow, String targetCaption, String stage, long timestamp) {
+            this.npcId = npcId;
+            this.menuId = menuId;
+            this.targetRow = targetRow;
+            this.targetCaption = targetCaption;
+            this.stage = stage;
+            this.timestamp = timestamp;
+        }
+    }
+
+    public static PendingBossMenuSelection pendingBossMenuSelection = null;
+
+    private static java.lang.reflect.Field fMenu2IdMenu = null;
+    private static java.lang.reflect.Field fMenu2IdNpc = null;
+    private static boolean fMenu2FieldsInitialized = false;
+
+    private static synchronized void initMenu2Fields() {
+        if (fMenu2FieldsInitialized) return;
+        fMenu2FieldsInitialized = true;
+        try {
+            fMenu2IdMenu = Menu2.class.getDeclaredField("IdMenu");
+            fMenu2IdMenu.setAccessible(true);
+        } catch (Throwable t) {
+            fMenu2IdMenu = null;
+        }
+        try {
+            fMenu2IdNpc = Menu2.class.getDeclaredField("IdNpc");
+            fMenu2IdNpc.setAccessible(true);
+        } catch (Throwable t) {
+            fMenu2IdNpc = null;
+        }
+    }
+
+    public static int getMenu2IdMenu(Menu2 m) {
+        if (m == null) return Integer.MIN_VALUE;
+        initMenu2Fields();
+        if (fMenu2IdMenu != null) {
+            try {
+                return fMenu2IdMenu.getInt(m);
+            } catch (Throwable t) {}
+        }
+        return Integer.MIN_VALUE;
+    }
+
+    public static int getMenu2IdNpc(Menu2 m) {
+        if (m == null) return Integer.MIN_VALUE;
+        initMenu2Fields();
+        if (fMenu2IdNpc != null) {
+            try {
+                return fMenu2IdNpc.getInt(m);
+            } catch (Throwable t) {}
+        }
+        return Integer.MIN_VALUE;
+    }
+
+    public static void setMenu2IdMenu(Menu2 m, int id) {
+        if (m == null) return;
+        initMenu2Fields();
+        if (fMenu2IdMenu != null) {
+            try {
+                fMenu2IdMenu.setInt(m, id);
+            } catch (Throwable t) {}
+        }
+    }
+
+    public static void setMenu2IdNpc(Menu2 m, int id) {
+        if (m == null) return;
+        initMenu2Fields();
+        if (fMenu2IdNpc != null) {
+            try {
+                fMenu2IdNpc.setInt(m, id);
+            } catch (Throwable t) {}
+        }
+    }
+
+    public static void resetBossMenuSelectionState() {
+        pendingBossMenuSelection = null;
+        autoBossMenuStepCount = 0;
+        lastAutoBossMenuReason = null;
+        lastAutoBossMenuStepTime = 0L;
+    }
+
+
+    private static String lastBossHuntDiagReason = null;
+
+    public static void recordBossHuntDiagReason(String reason) {
+        lastBossHuntDiagReason = reason;
+    }
+
+    public static String getLastBossHuntDiagReason() {
+        return lastBossHuntDiagReason;
+    }
+
+    public static void clearBossHuntDiagReason() {
+        lastBossHuntDiagReason = null;
+    }
+
+    public static void writeBossHuntStatusSafe(String path, long now) {
+        if (path == null || bossHunt == null) {
+            return;
+        }
+        java.io.FileOutputStream fos = null;
+        java.io.File temp = null;
+        try {
+            String baseJson = bossHunt.toStatusJson(now);
+            String json = baseJson;
+            if (lastBossHuntDiagReason != null) {
+                int insertPos = baseJson.lastIndexOf('}');
+                if (insertPos > 0) {
+                    String before = baseJson.substring(0, insertPos).trim();
+                    if (before.endsWith(",")) {
+                        json = before + "\n  \"diagnosticReason\": \"" + lastBossHuntDiagReason + "\"\n}\n";
+                    } else {
+                        json = before + ",\n  \"diagnosticReason\": \"" + lastBossHuntDiagReason + "\"\n}\n";
+                    }
+                }
+            }
+            byte[] bytes = json.getBytes("UTF-8");
+            java.io.File target = new java.io.File(path);
+            java.io.File parent = target.getParentFile();
+            if (parent != null && !parent.exists()) {
+                parent.mkdirs();
+            }
+            temp = new java.io.File(path + ".tmp." + System.currentTimeMillis());
+            fos = new java.io.FileOutputStream(temp);
+            fos.write(bytes);
+            fos.flush();
+            try {
+                fos.getFD().sync();
+            } catch (Throwable ignored) {}
+            fos.close();
+            fos = null;
+
+            java.io.File bak = new java.io.File(path + ".bak");
+            boolean hadTarget = target.exists();
+            if (hadTarget) {
+                if (bak.exists()) {
+                    bak.delete();
+                }
+                if (!target.renameTo(bak)) {
+                    temp.delete();
+                    return;
+                }
+            }
+            if (!temp.renameTo(target)) {
+                if (hadTarget && bak.exists()) {
+                    bak.renameTo(target);
+                }
+                temp.delete();
+                return;
+            }
+            if (bak.exists()) {
+                bak.delete();
+            }
+        } catch (Throwable t) {
+            if (fos != null) {
+                try { fos.close(); } catch (Throwable ignored) {}
+            }
+            if (temp != null && temp.exists()) {
+                temp.delete();
+            }
+        }
+    }
+
+    public static boolean dispatchPendingBossMenuSelection(long now) {
+        if (pendingBossMenuSelection == null) {
+            return false;
+        }
+
+        // Native UI priority: Menu2 cannot be dispatched if a foreground dialog is active
+        if (GameCanvas.currentDialog != null) {
+            return false;
+        }
+        PendingBossMenuSelection pending = pendingBossMenuSelection;
+
+        // 1. Timeout / Stale intent check (3000ms max)
+        if (now - pending.timestamp > 3000L || now < pending.timestamp) {
+            pendingBossMenuSelection = null;
+            return false;
+        }
+
+        // 2. Preemption & Higher priority checks
+        if (bossHunt == null || !bossHunt.isEnabled() || bossHunt.getState() != BossHuntState.NEED_SCHEDULE || isHigherPriorityActive()) {
+            pendingBossMenuSelection = null;
+            return false;
+        }
+
+        // 3. Verify Menu2 is active and visible
+        if (GameCanvas.menu2 == null || !GameCanvas.menu2.isShowMenu) {
+            return false;
+        }
+
+        Menu2 menu = GameCanvas.menu2;
+
+        // 4. Verify native ABI access for IdMenu and IdNpc
+        int activeMenuId = getMenu2IdMenu(menu);
+        int activeNpcId = getMenu2IdNpc(menu);
+
+        if (activeMenuId != pending.menuId || activeNpcId != pending.npcId) {
+            pendingBossMenuSelection = null;
+            return false;
+        }
+
+        // 5. Verify row count and target row index
+        CLib.mVector items = menu.menuItems;
+        if (items == null || pending.targetRow < 0 || pending.targetRow >= items.size()) {
+            pendingBossMenuSelection = null;
+            return false;
+        }
+
+        // 6. Verify native iCommand provenance and caption at targetRow
+        Object entry = items.elementAt(pending.targetRow);
+        if (!(entry instanceof InterfaceComponents.iCommand)) {
+            pendingBossMenuSelection = null;
+            return false;
+        }
+        InterfaceComponents.iCommand nativeCmd = (InterfaceComponents.iCommand) entry;
+
+        if (nativeCmd.caption == null) {
+            pendingBossMenuSelection = null;
+            return false;
+        }
+        String cleanNative = cleanBossString(nativeCmd.caption, 128);
+        String cleanTarget = cleanBossString(pending.targetCaption, 128);
+        if (!cleanNative.equalsIgnoreCase(cleanTarget)) {
+            pendingBossMenuSelection = null;
+            return false;
+        }
+
+        boolean isNativeReady = (nativeCmd.Pointer == menu && nativeCmd.indexMenu == 2) || (nativeCmd.action != null);
+        if (!isNativeReady) {
+            pendingBossMenuSelection = null;
+            return false;
+        }
+
+        // 7. Debounce check
+        if (now - lastAutoBossMenuStepTime < 1000L) {
+            return false;
+        }
+
+        // 8. Execute authentic dispatch ONCE
+        pendingBossMenuSelection = null;
+        lastAutoBossMenuStepTime = now;
+        autoBossMenuStepCount++;
+
+        try {
+            menu.menuSelectedItem = pending.targetRow;
+            nativeCmd.perform();
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    public static void resetBossDialogBridgeState() {
+        bossDialogBridgeTries = 0;
+        lastBossDialogBridgeTime = 0L;
+    }
+    private static int autoBossMenuStepCount = 0;
+
+    private static boolean isBossScheduleNpc(String name) {
+        if (name == null) return false;
+        String s = name.toLowerCase(java.util.Locale.ENGLISH).trim();
+        return s.indexOf("doubar") >= 0 || s.indexOf("douber") >= 0 || s.indexOf("alisama") >= 0;
+    }
+
+    private static MainObject findBossScheduleNpc() {
+        if (GameScreen.Vecplayers == null || GameScreen.player == null) {
+            return null;
+        }
+        MainObject best = null;
+        int bestDistance = Integer.MAX_VALUE;
+        for (int i = 0; i < GameScreen.Vecplayers.size(); i++) {
+            Object entry = GameScreen.Vecplayers.elementAt(i);
+            if (!(entry instanceof MainObject)) {
+                continue;
+            }
+            MainObject candidate = (MainObject) entry;
+            if (candidate.typeObject != 2) {
+                continue;
+            }
+            if (candidate.name != null && isBossScheduleNpc(candidate.name)) {
+                int distance = Math.abs(GameScreen.player.x - candidate.x) + Math.abs(GameScreen.player.y - candidate.y);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    best = candidate;
+                }
+            }
+        }
+        return best;
+    }
+
+    // BHX-13: Safe MsgDialog bridge for Boss Schedule NPC (Alisama / Doubar)
+    public static boolean handleBossScheduleDialog(MainObject scheduleNpc, long now) {
+        if (GameCanvas.currentDialog == null || !(GameCanvas.currentDialog instanceof MsgDialog)) {
+            return false;
+        }
+        if (scheduleNpc == null) {
+            recordBossHuntDiagReason("NPC_NOT_FOUND");
+            return false;
+        }
+        if (scheduleNpc.name == null || !isBossScheduleNpc(scheduleNpc.name)) {
+            recordBossHuntDiagReason("NPC_NOT_FOUND");
+            return false;
+        }
+        if (!dungeonNpcEligible(scheduleNpc)) {
+            recordBossHuntDiagReason("NPC_OUT_OF_RANGE");
+            return false;
+        }
+        if (bossNpcInteractTries <= 0) {
+            recordBossHuntDiagReason("NO_OWN_INTERACT_ATTEMPT");
+            return false;
+        }
+
+        MsgDialog md = (MsgDialog) GameCanvas.currentDialog;
+        mVector buttons = md.cmdList;
+        if (buttons == null || buttons.size() != 2) {
+            recordBossHuntDiagReason("DIALOG_BUTTON_MISMATCH");
+            return false;
+        }
+
+        iCommand buyCmd = null;
+        iCommand closeCmd = null;
+        for (int i = 0; i < buttons.size(); i++) {
+            Object o = buttons.elementAt(i);
+            if (!(o instanceof iCommand)) {
+                recordBossHuntDiagReason("DIALOG_BUTTON_MISMATCH");
+                return false;
+            }
+            iCommand cmd = (iCommand) o;
+            if (cmd.caption == null) {
+                recordBossHuntDiagReason("DIALOG_BUTTON_MISMATCH");
+                return false;
+            }
+            String cap = norm(cmd.caption);
+            if (cap.equals("mua ban") || cap.indexOf("mua ban") >= 0) {
+                if (buyCmd != null) {
+                    recordBossHuntDiagReason("DIALOG_BUTTON_MISMATCH");
+                    return false;
+                }
+                buyCmd = cmd;
+            } else if (cap.equals("dong") || cap.indexOf("dong") >= 0 || cap.equals("huy") || cap.indexOf("huy") >= 0) {
+                if (closeCmd != null) {
+                    recordBossHuntDiagReason("DIALOG_BUTTON_MISMATCH");
+                    return false;
+                }
+                closeCmd = cmd;
+            } else {
+                recordBossHuntDiagReason("DIALOG_BUTTON_MISMATCH");
+                return false;
+            }
+        }
+
+        if (buyCmd == null || closeCmd == null) {
+            recordBossHuntDiagReason("DIALOG_BUTTON_MISMATCH");
+            return false;
+        }
+
+        String text = norm(dialogText(md));
+        if (text.indexOf("ban co muon mua") >= 0 || text.indexOf("ban co chac") >= 0
+                || text.indexOf("ton hao") >= 0 || text.indexOf("gia ban") >= 0
+                || text.indexOf("dong xu") >= 0 || text.indexOf("nguyen lieu") >= 0
+                || text.indexOf("me day") >= 0 || text.indexOf("pho chi huy") >= 0
+                || text.indexOf("nga tu") >= 0 || text.indexOf("thu kho") >= 0) {
+            recordBossHuntDiagReason("DIALOG_TEXT_UNRECOGNIZED");
+            return false;
+        }
+
+        String npcNorm = norm(scheduleNpc.name);
+        boolean hasNpcName = (text.indexOf("alisama") >= 0 || text.indexOf("doubar") >= 0 || text.indexOf("douber") >= 0 || (npcNorm.length() > 0 && text.indexOf(npcNorm) >= 0));
+        boolean hasEquipContext = (text.indexOf("trang bi") >= 0 || text.indexOf("vu khi") >= 0 || text.indexOf("thiet bi") >= 0 || text.indexOf("ao giap") >= 0 || text.indexOf("cua hang") >= 0);
+
+        if (!hasNpcName && !hasEquipContext) {
+            recordBossHuntDiagReason("DIALOG_TEXT_UNRECOGNIZED");
+            return false;
+        }
+
+        if (now - lastBossDialogBridgeTime < 1500L) {
+            return false;
+        }
+        if (bossDialogBridgeTries >= 3) {
+            recordBossHuntDiagReason("BRIDGE_RETRY_LIMIT");
+            return false;
+        }
+
+        lastBossDialogBridgeTime = now;
+        bossDialogBridgeTries++;
+        try {
+            recordBossHuntDiagReason("BRIDGE_DISPATCHED");
+            buyCmd.perform();
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static void releaseBossHuntControls() {
+        if (bossHuntHoldingLock) {
+            Player.isLockKey = false;
+            bossHuntHoldingLock = false;
+        }
+        if (bossHuntHoldingPath) {
+            if (GameScreen.player != null && bossHuntOwnedPath != null && GameScreen.player.posTransRoad == bossHuntOwnedPath) {
+                GameScreen.player.posTransRoad = null;
+            }
+            bossHuntHoldingPath = false;
+            bossHuntOwnedPath = null;
+        }
+        if (bossHuntHoldingAutoFire) {
+            Player.isAutoFire = (byte) -1;
+            Player.isCurAutoFire = false;
+            bossHuntHoldingAutoFire = false;
+        }
+        if (bossHuntHoldingAutoHPMP) {
+            Player.isAutoHPMP = bossHuntSavedAutoHPMP;
+            bossHuntHoldingAutoHPMP = false;
+        }
+        if (bossHuntHoldingFocus) {
+            if (GameScreen.ObjFocus != null) {
+                if (bossHuntOwnedFocus != null) {
+                    if (GameScreen.ObjFocus == bossHuntOwnedFocus) {
+                        GameScreen.ObjFocus = null;
+                    }
+                } else {
+                    GameScreen.ObjFocus = null;
+                }
+            }
+            bossHuntHoldingFocus = false;
+            bossHuntOwnedFocus = null;
+        }
+        pendingBossMenuSelection = null;
+        bossDialogBridgeTries = 0;
+        lastBossDialogBridgeTime = 0L;
+    }
+
+    private static boolean isHigherPriorityActive() {
+        return (enhNavigating || enhOwnsForgeScreen || enhOwnsResultDialog
+                || (dungeonEnabled && (dungeonNavigating || dungeonTripActive || dungeonCombatEngaged)));
+    }
+
+    public static void reloadBossHuntConfigSafe() {
+        try {
+            if (bossHuntConfigPath != null) {
+                java.io.File cfgFile = new java.io.File(bossHuntConfigPath);
+                if (cfgFile.exists()) {
+                    lastBossHuntConfigModified = cfgFile.lastModified();
+                    bossHunt.getConfig().reloadFromFile(bossHuntConfigPath);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static void setBossHuntEnabled(boolean enabled) {
+        bossHunt.setEnabled(enabled);
+        try {
+            if (bossHuntConfigPath != null) {
+                bossHunt.getConfig().saveToFile(bossHuntConfigPath);
+            }
+        } catch (Throwable ignored) {
+        }
+        if (!enabled) {
+            releaseBossHuntControls();
+        }
+    }
+
+    public static boolean isBossHuntEnabled() {
+        return bossHunt.isEnabled();
+    }
+
+    private static void bossHuntCheckConfig(long now) {
+        if (bossHuntConfigPath != null && (now - lastBossHuntConfigCheck >= 1000L)) {
+            lastBossHuntConfigCheck = now;
+            try {
+                java.io.File cfgFile = new java.io.File(bossHuntConfigPath);
+                if (cfgFile.exists()) {
+                    long mod = cfgFile.lastModified();
+                    if (mod != lastBossHuntConfigModified) {
+                        lastBossHuntConfigModified = mod;
+                        bossHunt.getConfig().reloadFromFile(bossHuntConfigPath);
+                        if (!bossHunt.isEnabled()) {
+                            releaseBossHuntControls();
+                        }
+                    }
+                } else {
+                    // BHX-06: Config file deleted or missing -> fail closed immediately
+                    if (bossHunt.isEnabled() || lastBossHuntConfigModified != 0L) {
+                        lastBossHuntConfigModified = 0L;
+                        bossHunt.setEnabled(false);
+                        bossHunt.getConfig().setEnabled(false);
+                        releaseBossHuntControls();
+                    }
+                }
+            } catch (Throwable t) {
+                if (bossHunt.isEnabled()) {
+                    bossHunt.setEnabled(false);
+                    bossHunt.getConfig().setEnabled(false);
+                    releaseBossHuntControls();
+                }
+            }
+        }
+    }
+
     private static String traceMarkerPath;
     private static String tracePath;
     private static String probeMarkerPath;
@@ -1101,6 +1655,17 @@ public final class Zeus {
             enhCancelPath = home + ENH_CANCEL_FILE;
             healthPath = home + HEALTH_FILE;
             reconnectStatusPath = home + RECONNECT_STATUS_FILE;
+            bossCaptureMarkerPath = home + BOSS_CAPTURE_MARKER;
+            bossCapturePath = home + BOSS_CAPTURE_FILE;
+            bossSchedulePath = home + BOSS_SCHEDULE_FILE;
+            bossHuntConfigPath = home + BOSS_HUNT_CONFIG_FILE;
+            bossHuntStatusPath = home + BOSS_HUNT_STATUS_FILE;
+            bossHunt.setMapResolver(new BossHuntController.MapResolver() {
+                public int resolveMapId(String mapName) {
+                    return mapByName(mapName);
+                }
+            });
+            reloadBossHuntConfigSafe();
         }
         String explicitHealth = System.getProperty("zeus.health.out");
         if (explicitHealth != null && explicitHealth.trim().length() > 0) {
@@ -2858,6 +3423,10 @@ public final class Zeus {
      * after the fact was not enough, because the frame in between still showed it.
      */
     public static boolean menu(mVector items, String title) {
+        try {
+            observeBossMenu("LOCAL", items, -1, -1, title, mSystem.currentTimeMillis());
+        } catch (Throwable ignored) {
+        }
         // Captured before the trace gate, because ZONE needs the roster whether or not the operator
         // asked for a log. Only while a board is being waited on: reading every local menu into
         // module state would make a shop or an inventory menu look like a board reply.
@@ -2926,6 +3495,10 @@ public final class Zeus {
      */
     public static boolean serverMenu(mVector items, int idMenu, int idNPC, String title) {
         boolean taken = false;
+        try {
+            observeBossMenu("SERVER", items, idMenu, idNPC, title, mSystem.currentTimeMillis());
+        } catch (Throwable ignored) {
+        }
         // Captured before the trace gate, because TRAVEL needs the labels whether or not the operator
         // asked for a log. Only while a stone is being waited on: hooking every server menu into
         // module state would make a shop visit look like a travel reply.
@@ -4552,6 +5125,12 @@ public final class Zeus {
         }
         if (dungeonNavigating) {
             return DUNGEON_NPC_MAP;
+        }
+        if (bossHunt.isEnabled() && bossHunt.getState() == BossHuntState.TRAVEL) {
+            int bossMap = bossHunt.getBossHuntTargetMapId();
+            if (bossMap >= 0) {
+                return bossMap;
+            }
         }
         return -1;
     }
@@ -10193,6 +10772,756 @@ public final class Zeus {
             return expectedHost.equalsIgnoreCase(trimmedCurrent);
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    // ---- PASSIVE BOSS MENU CAPTURE (R2.3B) -----------------------------------
+    /**
+     * Opt-in, passive Boss NPC menu capture sidecar (zeus-boss-capture.txt).
+     * Strictly observe-only: zero mutations to menu state, zero packets, fail-silent.
+     */
+    public static void setBossCapturePaths(String markerPath, String outPath) {
+        bossCaptureMarkerPath = markerPath;
+        bossCapturePath = outPath;
+    }
+
+    public static void bossCaptureReset() {
+        bossCaptureCount = 0;
+        bossCaptureCheckedAt = 0L;
+        lastBossCaptureFingerprint = null;
+        lastBossCaptureTime = 0L;
+        boolean present = false;
+        try {
+            present = bossCaptureMarkerPath != null && new java.io.File(bossCaptureMarkerPath).exists();
+        } catch (Throwable t) {
+            present = false;
+        }
+        bossCaptureOn = present;
+    }
+
+    public static void bossCaptureCheck(long now) {
+        if (bossCaptureMarkerPath == null || (bossCaptureCheckedAt > 0 && now - bossCaptureCheckedAt < CTL_EVERY_MS)) {
+            return;
+        }
+        bossCaptureCheckedAt = now;
+        boolean present = false;
+        try {
+            present = new java.io.File(bossCaptureMarkerPath).exists();
+        } catch (Throwable t) {
+            present = false;
+        }
+        bossCaptureOn = present;
+    }
+
+    public static boolean containsSensitive(String s) {
+        if (s == null) {
+            return false;
+        }
+        String lower = s.toLowerCase(java.util.Locale.ENGLISH);
+        return lower.indexOf("user") >= 0
+                || lower.indexOf("pass") >= 0
+                || lower.indexOf("mật khẩu") >= 0
+                || lower.indexOf("mat khau") >= 0
+                || lower.indexOf("tài khoản") >= 0
+                || lower.indexOf("tai khoan") >= 0
+                || lower.indexOf("pin") >= 0
+                || lower.indexOf("token") >= 0
+                || lower.indexOf("auth") >= 0
+                || lower.indexOf("login") >= 0
+                || lower.indexOf("otp") >= 0
+                || lower.indexOf("mã xác nhận") >= 0
+                || lower.indexOf("ma xac nhan") >= 0;
+    }
+
+    public static boolean hasTimePattern(String s) {
+        if (s == null) {
+            return false;
+        }
+        int len = s.length();
+        for (int i = 0; i + 7 < len; i++) {
+            if (s.charAt(i + 2) == ':' && s.charAt(i + 5) == ':') {
+                if (Character.isDigit(s.charAt(i)) && Character.isDigit(s.charAt(i + 1))) {
+                    if (Character.isDigit(s.charAt(i + 3))) {
+                        if (Character.isDigit(s.charAt(i + 6)) && Character.isDigit(s.charAt(i + 7))) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    public static boolean hasZonePattern(String s) {
+        if (s == null) {
+            return false;
+        }
+        String lower = s.toLowerCase(java.util.Locale.ENGLISH);
+        int idx = lower.indexOf("khu");
+        if (idx >= 0) {
+            for (int i = idx + 3; i < lower.length() && i < idx + 8; i++) {
+                if (Character.isDigit(lower.charAt(i))) {
+                    return true;
+                }
+            }
+        }
+        for (int i = 0; i < lower.length() - 1; i++) {
+            char c = lower.charAt(i);
+            if (c == 'k') {
+                if (i == 0 || lower.charAt(i - 1) == ' ' || lower.charAt(i - 1) == '-') {
+                    int next = i + 1;
+                    if (next < lower.length() && lower.charAt(next) == ' ') {
+                        next++;
+                    }
+                    if (next < lower.length() && Character.isDigit(lower.charAt(next))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    public static boolean hasKnownBossToken(String lower) {
+        if (lower == null) {
+            return false;
+        }
+        return lower.indexOf("dơi quỷ") >= 0 || lower.indexOf("doi quy") >= 0
+                || lower.indexOf("dê vàng") >= 0 || lower.indexOf("de vang") >= 0
+                || lower.indexOf("dê bạc") >= 0 || lower.indexOf("de bac") >= 0
+                || lower.indexOf("xà nữ") >= 0 || lower.indexOf("xa nu") >= 0
+                || lower.indexOf("kỵ sĩ địa ngục") >= 0 || lower.indexOf("ky si dia nguc") >= 0
+                || lower.indexOf("thằn lằn") >= 0 || lower.indexOf("than lan") >= 0
+                || lower.indexOf("sói quỷ") >= 0 || lower.indexOf("soi quy") >= 0
+                || lower.indexOf("sói") >= 0 || lower.indexOf("soi") >= 0
+                || lower.indexOf("dơi") >= 0 || lower.indexOf("doi") >= 0
+                || lower.indexOf("khỉ đột") >= 0 || lower.indexOf("khi dot") >= 0
+                || lower.indexOf("ma trăn") >= 0 || lower.indexOf("ma tran") >= 0
+                || lower.indexOf("tinh linh") >= 0
+                || lower.indexOf("quỷ đầu bò") >= 0 || lower.indexOf("quy dau bo") >= 0
+                || lower.indexOf("nhện chúa") >= 0 || lower.indexOf("nhen chua") >= 0
+                || lower.indexOf("vua bọ hung") >= 0 || lower.indexOf("vua bo hung") >= 0
+                || lower.indexOf("bọ cạp chúa") >= 0 || lower.indexOf("bo cap chua") >= 0
+                || lower.indexOf("khổng lồ xanh") >= 0 || lower.indexOf("khong lo xanh") >= 0
+                || lower.indexOf("rồng lửa") >= 0 || lower.indexOf("rong lua") >= 0
+                || lower.indexOf("alisama") >= 0
+                || lower.indexOf("doubar") >= 0 || lower.indexOf("douber") >= 0
+                || lower.indexOf("giant skeleton") >= 0;
+    }
+
+    public static boolean isBossTitle(String lowerTitle) {
+        if (lowerTitle == null) {
+            return false;
+        }
+        return lowerTitle.indexOf("thông tin boss") >= 0
+                || lowerTitle.indexOf("thong tin boss") >= 0
+                || lowerTitle.indexOf("lịch boss") >= 0
+                || lowerTitle.indexOf("lich boss") >= 0
+                || lowerTitle.indexOf("alisama") >= 0
+                || lowerTitle.indexOf("doubar") >= 0
+                || lowerTitle.indexOf("douber") >= 0
+                || lowerTitle.indexOf("giant skeleton") >= 0;
+    }
+
+    public static String cleanBossString(String s, int maxLen) {
+        if (s == null) {
+            return null;
+        }
+        StringBuffer sb = new StringBuffer(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 32 || c == 127) {
+                sb.append(' ');
+            } else {
+                sb.append(c);
+            }
+        }
+        String res = sb.toString().trim();
+        if (res.length() > maxLen) {
+            int cut = maxLen;
+            if (cut > 0) {
+                if (Character.isHighSurrogate(res.charAt(cut - 1))) {
+                    cut--;
+                } else if (Character.isLowSurrogate(res.charAt(cut - 1))) {
+                    if (cut < 2 || !Character.isHighSurrogate(res.charAt(cut - 2))) {
+                        cut--;
+                    }
+                }
+            }
+            res = res.substring(0, cut);
+        }
+        return res;
+    }
+
+    public static boolean isExactBossName(String s) {
+        if (s == null) {
+            return false;
+        }
+        String lower = s.toLowerCase(java.util.Locale.ENGLISH).trim();
+        if (lower.length() > 3 && Character.isDigit(lower.charAt(0))) {
+            int p = 1;
+            while (p < lower.length() && Character.isDigit(lower.charAt(p))) {
+                p++;
+            }
+            if (p < lower.length() && (lower.charAt(p) == '.' || lower.charAt(p) == '-' || lower.charAt(p) == ' ')) {
+                p++;
+                while (p < lower.length() && Character.isWhitespace(lower.charAt(p))) {
+                    p++;
+                }
+                lower = lower.substring(p).trim();
+            }
+        }
+        return lower.equals("dê bạc") || lower.equals("de bac")
+                || lower.equals("dê vàng") || lower.equals("de vang")
+                || lower.equals("xà nữ") || lower.equals("xa nu")
+                || lower.equals("quỷ đầu bò") || lower.equals("quy dau bo")
+                || lower.equals("kỵ sĩ địa ngục") || lower.equals("ky si dia nguc")
+                || lower.equals("nhện chúa") || lower.equals("nhen chua")
+                || lower.equals("giant skeleton")
+                || lower.equals("dơi quỷ") || lower.equals("doi quy")
+                || lower.equals("thằn lằn") || lower.equals("than lan")
+                || lower.equals("sói quỷ") || lower.equals("soi quy")
+                || lower.equals("khỉ đột") || lower.equals("khi dot")
+                || lower.equals("ma trăn") || lower.equals("ma tran")
+                || lower.equals("tinh linh")
+                || lower.equals("vua bọ hung") || lower.equals("vua bo hung")
+                || lower.equals("bọ cạp chúa") || lower.equals("bo cap chua")
+                || lower.equals("khổng lồ xanh") || lower.equals("khong lo xanh")
+                || lower.equals("rồng lửa") || lower.equals("rong lua");
+    }
+
+    public static String classifyBossMenu(String title, String[] captions) {
+        if (containsSensitive(title)) {
+            return null;
+        }
+        if (captions != null) {
+            for (int i = 0; i < captions.length; i++) {
+                if (containsSensitive(captions[i])) {
+                    return null;
+                }
+            }
+        }
+        boolean titleBoss = false;
+        if (title != null) {
+            String lowerTitle = title.toLowerCase(java.util.Locale.ENGLISH);
+            if (isBossTitle(lowerTitle)) {
+                titleBoss = true;
+            }
+        }
+        if (titleBoss) {
+            return "MATCH_TITLE";
+        }
+        if (captions != null) {
+            // 1. Exact normalized caption "Thông tin boss" -> MATCH_BOSS_ENTRY
+            for (int i = 0; i < captions.length; i++) {
+                String cap = captions[i];
+                if (cap == null) {
+                    continue;
+                }
+                String lower = cap.toLowerCase(java.util.Locale.ENGLISH).trim();
+                if (lower.equals("thông tin boss") || lower.equals("thong tin boss")) {
+                    return "MATCH_BOSS_ENTRY";
+                }
+            }
+
+            // 2. Spawned / Unavailable / Schedule rows
+            int rosterBossCount = 0;
+            for (int i = 0; i < captions.length; i++) {
+                String cap = captions[i];
+                if (cap == null) {
+                    continue;
+                }
+                String lower = cap.toLowerCase(java.util.Locale.ENGLISH);
+                boolean capHasBoss = hasKnownBossToken(lower) || lower.indexOf("boss") >= 0;
+
+                // OBS-01: Require proven boss context for MATCH_SPAWNED and MATCH_UNAVAILABLE
+                if (capHasBoss) {
+                    if (lower.indexOf("đang xuất hiện") >= 0 || lower.indexOf("dang xuat hien") >= 0
+                            || lower.indexOf("đã xuất hiện") >= 0 || lower.indexOf("da xuat hien") >= 0) {
+                        return "MATCH_SPAWNED";
+                    }
+                    if (lower.indexOf("không có thông tin") >= 0 || lower.indexOf("khong co thong tin") >= 0
+                            || lower.indexOf("không có lịch") >= 0 || lower.indexOf("khong co lich") >= 0) {
+                        return "MATCH_UNAVAILABLE";
+                    }
+                }
+
+                // Grounded Boss Lexicon requirement: time + zone + known boss
+                if (hasTimePattern(cap) && hasZonePattern(cap) && hasKnownBossToken(lower)) {
+                    return "MATCH_BOSS_SCHEDULE";
+                }
+
+                if (isExactBossName(cap)) {
+                    rosterBossCount++;
+                }
+            }
+
+            // 3. Boss Roster via exact known boss names and multi-entry structural evidence (>= 2)
+            if (rosterBossCount >= 2) {
+                return "MATCH_BOSS_ROSTER";
+            }
+        }
+        return null;
+    }
+
+    public static String classifyBossMenu(String title, mVector items) {
+        if (items == null) {
+            return classifyBossMenu(title, (String[]) null);
+        }
+        int count = items.size();
+        if (count > 20) {
+            count = 20;
+        }
+        String[] caps = new String[count];
+        for (int i = 0; i < count; i++) {
+            Object obj = items.elementAt(i);
+            if (obj instanceof iCommand) {
+                caps[i] = ((iCommand) obj).caption;
+            }
+        }
+        return classifyBossMenu(title, caps);
+    }
+
+    public static void observeBossMenu(String origin, mVector items, int idMenu, int idNPC, String title, long now) {
+        try {
+            String reason = classifyBossMenu(title, items);
+            if (reason == null) {
+                return;
+            }
+            int count = (items == null) ? 0 : items.size();
+            if (count > 20) {
+                count = 20;
+            }
+            String[] caps = new String[count];
+            for (int i = 0; i < count; i++) {
+                Object entry = items.elementAt(i);
+                if (entry instanceof iCommand) {
+                    String cap = ((iCommand) entry).caption;
+                    caps[i] = cleanBossString(cap, 128);
+                }
+            }
+            String cleanTitle = cleanBossString(title, 64);
+
+            // A2 / F-03: Ingest valid SERVER schedule independently of raw debug capture marker
+            if ("MATCH_BOSS_SCHEDULE".equals(reason) && origin != null && origin.equals("SERVER")) {
+                try {
+                    BossScheduleReader.processSchedule(origin, caps, idMenu, idNPC, cleanTitle, now, bossSchedulePath);
+                    pendingBossMenuSelection = null;
+                    autoBossMenuStepCount = 0;
+                    lastAutoBossMenuReason = null;
+                    lastAutoBossMenuStepTime = 0L;
+                    bossNpcInteractTries = 0;
+                    lastBossNpcInteractAttempt = 0L;
+                    bossDialogBridgeTries = 0;
+                    lastBossDialogBridgeTime = 0L;
+                } catch (Throwable ignored) {
+                }
+            }
+
+            // Slice B / BHX-04 / BHX-09: Bounded operator-enabled NPC schedule stepping
+            if (origin != null && origin.equals("SERVER") && bossHunt != null && bossHunt.isEnabled()
+                    && bossHunt.getState() == BossHuntState.NEED_SCHEDULE && items != null
+                    && !isHigherPriorityActive()) {
+                boolean isNewStage = (lastAutoBossMenuReason == null || !lastAutoBossMenuReason.equals(reason));
+                boolean debounceOk = isNewStage || (now - lastAutoBossMenuStepTime >= 1000L);
+                if (debounceOk && autoBossMenuStepCount < 5) {
+                    if ("MATCH_BOSS_ENTRY".equals(reason)) {
+                        for (int i = 0; i < items.size(); i++) {
+                            Object itemObj = items.elementAt(i);
+                            if (itemObj instanceof iCommand) {
+                                String c = ((iCommand) itemObj).caption;
+                                if (c != null) {
+                                    String norm = c.toLowerCase(java.util.Locale.ENGLISH).trim();
+                                    if (norm.indexOf("thong tin boss") >= 0 || (norm.indexOf("th") >= 0 && norm.indexOf("ng tin boss") >= 0)) {
+                                        pendingBossMenuSelection = new PendingBossMenuSelection(idNPC, idMenu, i, c, reason, now);
+                                        lastAutoBossMenuReason = reason;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else if ("MATCH_BOSS_ROSTER".equals(reason)) {
+                        int targetBossId = -1;
+                        for (int b = 0; b < BossCatalog.BOSS_COUNT; b++) {
+                            if (bossHunt.getConfig().getZoneMask(b) > 0) {
+                                targetBossId = b;
+                                break;
+                            }
+                        }
+                        if (targetBossId >= 0) {
+                            String targetBossName = BossCatalog.getBossName(targetBossId);
+                            for (int i = 0; i < items.size(); i++) {
+                                Object itemObj = items.elementAt(i);
+                                if (itemObj instanceof iCommand) {
+                                    String c = ((iCommand) itemObj).caption;
+                                    if (c != null && targetBossName != null && c.trim().equalsIgnoreCase(targetBossName.trim())) {
+                                        pendingBossMenuSelection = new PendingBossMenuSelection(idNPC, idMenu, i, c, reason, now);
+                                        lastAutoBossMenuReason = reason;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Raw debug logging is strictly opt-in via bossCaptureOn marker
+            if (!bossCaptureOn) {
+                return;
+            }
+
+            // Fingerprint for duplicate suppression (5s window)
+            StringBuffer fp = new StringBuffer(128);
+            fp.append(origin).append('|').append(cleanTitle != null ? cleanTitle : "").append('|').append(idNPC).append('|').append(idMenu);
+            for (int i = 0; i < count; i++) {
+                fp.append('|').append(caps[i] != null ? caps[i] : "");
+            }
+            String fpStr = fp.toString();
+            if (fpStr.equals(lastBossCaptureFingerprint) && (now - lastBossCaptureTime < 5000L)) {
+                return;
+            }
+            lastBossCaptureFingerprint = fpStr;
+            lastBossCaptureTime = now;
+
+            StringBuffer sb = new StringBuffer(512);
+            sb.append("{\"t\":").append(now);
+            sb.append(",\"origin\":\"").append(origin).append("\"");
+            sb.append(",\"title\":");
+            escapeJsonString(cleanTitle != null ? cleanTitle : "", sb);
+            sb.append(",\"idNPC\":").append(idNPC);
+            sb.append(",\"idMenu\":").append(idMenu);
+            int mapId = -1;
+            int zoneId = -1;
+            try {
+                if (GameCanvas.loadmap != null) {
+                    mapId = GameCanvas.loadmap.idMap;
+                }
+                if (LoadMap.Area >= 0) {
+                    zoneId = LoadMap.Area;
+                }
+            } catch (Throwable ignored) {
+            }
+            sb.append(",\"mapId\":").append(mapId);
+            sb.append(",\"zone\":").append(zoneId);
+            sb.append(",\"reason\":");
+            escapeJsonString(reason, sb);
+            sb.append(",\"captions\":[");
+            for (int i = 0; i < count; i++) {
+                if (i > 0) {
+                    sb.append(",");
+                }
+                escapeJsonString(caps[i] != null ? caps[i] : "", sb);
+            }
+            sb.append("]}\n");
+
+            writeBossCapture(sb.toString());
+        } catch (Throwable t) {
+            // Fail silent
+        }
+    }
+
+    public static void writeBossCapture(String line) {
+        if (bossCapturePath == null || line == null) {
+            return;
+        }
+        java.io.OutputStream stream = null;
+        try {
+            byte[] lineBytes = line.getBytes("UTF-8");
+            java.io.File target = new java.io.File(bossCapturePath);
+            // B-03: Pre-write cap check guarantees file length mathematically never exceeds 256 KiB
+            if (target.exists() && (target.length() + lineBytes.length > BOSS_CAPTURE_MAX_BYTES)) {
+                return;
+            }
+            stream = new java.io.FileOutputStream(target, true);
+            stream.write(lineBytes);
+            stream.close();
+            stream = null;
+            bossCaptureCount++;
+        } catch (Throwable t) {
+            // Fail silent: menu capture must never affect the client tick or gameplay
+        } finally {
+            if (stream != null) {
+                try {
+                    stream.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    public static void bossHuntTick() {
+        long now = mSystem.currentTimeMillis();
+        bossHuntCheckConfig(now);
+        if (!bossHunt.isEnabled()) {
+            if (bossHuntHoldingLock || bossHuntHoldingAutoFire || bossHuntHoldingFocus) {
+                releaseBossHuntControls();
+            }
+            return;
+        }
+        try {
+            int curMap = (GameCanvas.loadmap != null) ? GameCanvas.loadmap.idMap : -1;
+            int curZone = (LoadMap.Area >= 0) ? LoadMap.Area : 0;
+            int pHp = (GameScreen.player != null) ? GameScreen.player.hp : 0;
+            boolean pDead = (!alive() || pHp <= 0 || (GameScreen.player != null && GameScreen.player.Action == 4));
+            boolean manualMovement = (Player.isLockKey && !bossHuntHoldingLock);
+            boolean higherPriority = isHigherPriorityActive();
+
+            bossHunt.tick(now, curMap, curZone, pHp, pDead, manualMovement, higherPriority);
+
+            if (pDead || higherPriority || manualMovement || !bossHunt.controlsMovement()) {
+                if (higherPriority) {
+                    recordBossHuntDiagReason("HIGHER_PRIORITY");
+                } else if (manualMovement) {
+                    recordBossHuntDiagReason("MANUAL_CONTROL");
+                }
+                if (bossHuntHoldingLock) {
+                    Player.isLockKey = false;
+                    bossHuntHoldingLock = false;
+                }
+                if (pDead || higherPriority) {
+                    releaseBossHuntControls();
+                    return;
+                }
+            }
+
+            if (bossHunt.getState() != BossHuntState.COMBAT && bossHuntHoldingAutoFire) {
+                Player.isAutoFire = (byte) -1;
+                Player.isCurAutoFire = false;
+                bossHuntHoldingAutoFire = false;
+            }
+
+            // 0. Initial schedule acquisition via NPC when in NEED_SCHEDULE (BHX-09 & R4.3.9 Foreground Gate)
+            if (bossHunt.getState() == BossHuntState.NEED_SCHEDULE) {
+                if (pDead) {
+                    // Character dead
+                } else if (higherPriority) {
+                    recordBossHuntDiagReason("HIGHER_PRIORITY");
+                } else if (manualMovement) {
+                    recordBossHuntDiagReason("MANUAL_CONTROL");
+                } else {
+                    MainObject scheduleNpc = findBossScheduleNpc();
+
+                    // Native GameCanvas UI Priority Gate:
+                    // Priority 1: Foreground currentDialog (MsgDialog)
+                    if (GameCanvas.currentDialog instanceof MsgDialog) {
+                        if (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu) {
+                            recordBossHuntDiagReason("MENU_BACKGROUND_IGNORED");
+                        } else {
+                            recordBossHuntDiagReason("FOREGROUND_MSG_DIALOG");
+                        }
+                        handleBossScheduleDialog(scheduleNpc, now);
+                        return;
+                    }
+
+                    // Priority 2: Foreground native Menu2 dispatch (only when currentDialog == null)
+                    if (GameCanvas.currentDialog == null && pendingBossMenuSelection != null) {
+                        if (dispatchPendingBossMenuSelection(now)) {
+                            return;
+                        }
+                        if (pendingBossMenuSelection != null) {
+                            return;
+                        }
+                    }
+
+                    // Priority 3: NPC interaction or approach if no foreground modal/menu is active
+                    if (scheduleNpc != null && GameCanvas.currentDialog == null) {
+                        boolean menuOpen = (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu);
+                        if (!menuOpen) {
+                            if (dungeonNpcEligible(scheduleNpc)) {
+                                if (now - lastBossNpcInteractAttempt >= 5000L && bossNpcInteractTries < 3) {
+                                    lastBossNpcInteractAttempt = now;
+                                    bossNpcInteractTries++;
+                                    nativeNpcInteract(scheduleNpc);
+                                }
+                            } else if (canMove() || bossHuntHoldingLock) {
+                                try {
+                                    short[] path = GameCanvas.game.updateFindRoad(scheduleNpc.x / 24, scheduleNpc.y / 24, GameScreen.player.x / 24, GameScreen.player.y / 24, 500);
+                                    if (path != null && path.length <= 500) {
+                                        GameScreen.player.posTransRoad = path;
+                                        GameScreen.player.countAutoMove = 0;
+                                        GameScreen.player.xStopMove = 0;
+                                        GameScreen.player.yStopMove = 0;
+                                        GameScreen.player.toX = GameScreen.player.x;
+                                        GameScreen.player.toY = GameScreen.player.y;
+                                        bossHuntHoldingLock = true;
+                                        bossHuntHoldingPath = true;
+                                        bossHuntOwnedPath = path;
+                                        Player.isLockKey = true;
+                                    }
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 1. Zone switching on boss map (throttled & retry capped)
+            if (bossHunt.getState() == BossHuntState.SWITCH_ZONE && curMap == bossHunt.getBossHuntTargetMapId()) {
+                if (curZone == bossHunt.getTargetZoneSubIndex()) {
+                    bossHunt.onZoneConfirmed();
+                } else if (bossHunt.isZoneSwitchExhausted()) {
+                    bossHunt.onZoneSwitchFailed();
+                } else if (bossHunt.shouldAttemptZoneSwitch(now)) {
+                    bossHunt.recordZoneSwitchAttempt(now);
+                    byte targetSub = (byte) bossHunt.getTargetZoneSubIndex();
+                    try {
+                        GlobalService.gI().Change_Area(targetSub);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+
+            // 2. Boss combat & patrol on target map and zone
+            if ((bossHunt.getState() == BossHuntState.PATROL || bossHunt.getState() == BossHuntState.COMBAT)
+                    && GameScreen.Vecplayers != null && curMap == bossHunt.getBossHuntTargetMapId()
+                    && curZone == bossHunt.getTargetZoneSubIndex()) {
+                BossHuntScheduler.ScheduleEntry active = bossHunt.getActiveEntry();
+                if (active != null) {
+                    // Check if targeted boss was defeated
+                    boolean defeated = false;
+                    int trackedId = bossHunt.getActiveBossTargetId();
+                    for (int i = 0; i < GameScreen.Vecplayers.size(); i++) {
+                        Object o = GameScreen.Vecplayers.elementAt(i);
+                        if (o instanceof MainObject) {
+                            MainObject mo = (MainObject) o;
+                            if (trackedId >= 0 && mo.ID == trackedId) {
+                                if (mo.hp <= 0 || mo.isDie || mo.Action == 4) {
+                                    defeated = true;
+                                    break;
+                                }
+                            } else if (BossHuntController.isBossDefeated(active.bossId, mo.name, mo.typeObject, mo.hp, mo.isDie, mo.Action)) {
+                                defeated = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (defeated) {
+                        bossHunt.onBossDefeated(now);
+                        releaseBossHuntControls();
+                    } else {
+                        // Look for alive target boss
+                        MainObject bossObj = null;
+                        for (int i = 0; i < GameScreen.Vecplayers.size(); i++) {
+                            Object o = GameScreen.Vecplayers.elementAt(i);
+                            if (o instanceof MainObject) {
+                                MainObject mo = (MainObject) o;
+                                if (BossHuntController.isValidBossTarget(active.bossId, mo.name, mo.typeObject, mo.hp, mo.isDie, mo.Action)) {
+                                    bossObj = mo;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (bossObj != null) {
+                            bossHunt.setActiveBossTarget(bossObj.ID, bossObj.name);
+                            bossHunt.setState(BossHuntState.COMBAT);
+                            GameScreen.ObjFocus = bossObj;
+                            bossHuntHoldingFocus = true;
+                            bossHuntOwnedFocus = bossObj;
+
+                            // BH-08 / BHX-08: Check 3-second no-damage rule -> immediately abandon attack and return
+                            if (bossHunt.checkNoDamageFor3s(bossObj.ID, bossObj.hp, now)) {
+                                bossHunt.onNoDamageTimeout(now);
+                                releaseBossHuntControls();
+                                return;
+                            }
+
+                            int dist = Math.max(Math.abs(bossObj.x - GameScreen.player.x), Math.abs(bossObj.y - GameScreen.player.y));
+                            if (dist > 80) {
+                                if (bossHuntHoldingAutoFire) {
+                                    Player.isAutoFire = (byte) -1;
+                                    Player.isCurAutoFire = false;
+                                    bossHuntHoldingAutoFire = false;
+                                }
+                                if (canMove() || bossHuntHoldingLock) {
+                                    try {
+                                        short[] path = GameCanvas.game.updateFindRoad(bossObj.x / 24, bossObj.y / 24, GameScreen.player.x / 24, GameScreen.player.y / 24, 500);
+                                        if (path != null && path.length <= 500) {
+                                            GameScreen.player.posTransRoad = path;
+                                            GameScreen.player.countAutoMove = 0;
+                                            GameScreen.player.xStopMove = 0;
+                                            GameScreen.player.yStopMove = 0;
+                                            GameScreen.player.toX = GameScreen.player.x;
+                                            GameScreen.player.toY = GameScreen.player.y;
+                                            bossHuntHoldingLock = true;
+                                            bossHuntHoldingPath = true;
+                                            bossHuntOwnedPath = path;
+                                            Player.isLockKey = true;
+                                        }
+                                    } catch (Throwable ignored) {
+                                    }
+                                }
+                            } else {
+                                if (bossHuntHoldingLock) {
+                                    Player.isLockKey = false;
+                                    bossHuntHoldingLock = false;
+                                }
+                                if (bossHuntHoldingPath) {
+                                    if (GameScreen.player != null && bossHuntOwnedPath != null && GameScreen.player.posTransRoad == bossHuntOwnedPath) {
+                                        GameScreen.player.posTransRoad = null;
+                                    }
+                                    bossHuntHoldingPath = false;
+                                    bossHuntOwnedPath = null;
+                                }
+                                Player.xBeginAutoFire = bossObj.x;
+                                Player.yBeginAutofire = bossObj.y;
+                                Player.isAutoFire = (byte) 1;
+                                if (!bossHuntHoldingAutoHPMP) {
+                                    bossHuntSavedAutoHPMP = Player.isAutoHPMP;
+                                    bossHuntHoldingAutoHPMP = true;
+                                }
+                                Player.isAutoHPMP = true;
+                                Player.isCurAutoFire = true;
+                                bossHuntHoldingAutoFire = true;
+                                try {
+                                    GameScreen.player.dofire_();
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                        } else {
+                            // Boss not present alive and not confirmed dead (e.g. vanished/despawned or still searching)
+                            if (bossHuntHoldingLock) {
+                                Player.isLockKey = false;
+                                bossHuntHoldingLock = false;
+                            }
+                            if (bossHuntHoldingAutoFire) {
+                                Player.isAutoFire = (byte) -1;
+                                Player.isCurAutoFire = false;
+                                bossHuntHoldingAutoFire = false;
+                            }
+                            if (bossHuntHoldingFocus) {
+                                if (GameScreen.ObjFocus != null) {
+                                    if (bossHuntOwnedFocus != null) {
+                                        if (GameScreen.ObjFocus == bossHuntOwnedFocus) {
+                                            GameScreen.ObjFocus = null;
+                                        }
+                                    } else {
+                                        GameScreen.ObjFocus = null;
+                                    }
+                                }
+                                bossHuntHoldingFocus = false;
+                                bossHuntOwnedFocus = null;
+                            }
+                            bossHunt.clearActiveBossTarget();
+                            if (bossHunt.getState() == BossHuntState.COMBAT) {
+                                bossHunt.setState(BossHuntState.PATROL);
+                                bossHunt.resetNoDamageTimer();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. Periodic status emission
+            if (now - lastBossStatusEmit >= 2000L) {
+                lastBossStatusEmit = now;
+                writeBossHuntStatusSafe(bossHuntStatusPath, now);
+            }
+        } catch (Throwable t) {
+            // Fail closed
         }
     }
 }

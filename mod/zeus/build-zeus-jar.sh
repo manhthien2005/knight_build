@@ -25,6 +25,15 @@ BUILD=/work/zeus/build
 CP="$JARS/vanilla.jar:$JARS/microemulator.jar"
 RELEASE=6
 
+[ -f "$SRC/Zeus.java" ] || { echo "khong thay $SRC/Zeus.java — missing Zeus source"; exit 1; }
+[ -f "$SRC/BossCatalog.java" ] || { echo "khong thay $SRC/BossCatalog.java — missing BossCatalog source"; exit 1; }
+[ -f "$SRC/BossHuntState.java" ] || { echo "khong thay $SRC/BossHuntState.java — missing BossHuntState source"; exit 1; }
+[ -f "$SRC/BossHuntConfig.java" ] || { echo "khong thay $SRC/BossHuntConfig.java — missing BossHuntConfig source"; exit 1; }
+[ -f "$SRC/BossScheduleParser.java" ] || { echo "khong thay $SRC/BossScheduleParser.java — missing BossScheduleParser source"; exit 1; }
+[ -f "$SRC/BossScheduleReader.java" ] || { echo "khong thay $SRC/BossScheduleReader.java — missing BossScheduleReader source"; exit 1; }
+[ -f "$SRC/BossHuntScheduler.java" ] || { echo "khong thay $SRC/BossHuntScheduler.java — missing BossHuntScheduler source"; exit 1; }
+[ -f "$SRC/BossHuntController.java" ] || { echo "khong thay $SRC/BossHuntController.java — missing BossHuntController source"; exit 1; }
+
 rm -rf "$BUILD"
 mkdir -p "$BUILD/classes" "$BUILD/stage" "$BUILD/tools"
 
@@ -36,10 +45,24 @@ echo "== running PatchZeus against v4.0.3 =="
 java -cp "$BUILD/tools:$JARS/microemulator.jar" PatchZeus \
     "$JARS/vanilla.jar" "$BUILD/classes"
 
-echo "== compiling Zeus.java against patched classes (--release $RELEASE) =="
+echo "== compiling sources against patched classes (--release $RELEASE) =="
 javac -nowarn -encoding UTF-8 --release "$RELEASE" \
     -cp "$BUILD/classes:$CP" -d "$BUILD/classes" \
-    "$SRC"/Zeus.java
+    "$SRC/BossCatalog.java" "$SRC/BossHuntState.java" "$SRC/BossHuntConfig.java" \
+    "$SRC/BossScheduleParser.java" "$SRC/BossScheduleReader.java" \
+    "$SRC/BossHuntScheduler.java" "$SRC/BossHuntController.java" "$SRC/Zeus.java"
+
+echo "== verifying generated classes =="
+for cls in BossCatalog.class BossHuntState.class BossHuntConfig.class \
+    BossHuntScheduler.class 'BossHuntScheduler$ScheduleEntry.class' \
+    BossHuntController.class 'BossHuntController$MapResolver.class' \
+    BossScheduleParser.class 'BossScheduleParser$Result.class' 'BossScheduleParser$Status.class' 'BossScheduleParser$ZoneInfo.class' \
+    BossScheduleReader.class 'BossScheduleReader$Entry.class' 'BossScheduleReader$ScheduleReport.class'; do
+    if [ ! -f "$BUILD/classes/$cls" ]; then
+        echo "ERROR: Required class $cls was not generated in $BUILD/classes" >&2
+        exit 1
+    fi
+done
 
 echo "== staging vanilla jar =="
 cd "$BUILD/stage"
@@ -80,6 +103,18 @@ with zipfile.ZipFile(out_jar, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
         with open(full, 'rb') as f:
             zout.writestr(zinfo, f.read())
 "
+echo "== verifying packaged parser classes in $OUT =="
+for cls in BossCatalog.class BossHuntState.class BossHuntConfig.class \
+    BossHuntScheduler.class 'BossHuntScheduler$ScheduleEntry.class' \
+    BossHuntController.class 'BossHuntController$MapResolver.class' \
+    BossScheduleParser.class 'BossScheduleParser$Result.class' 'BossScheduleParser$Status.class' 'BossScheduleParser$ZoneInfo.class' \
+    BossScheduleReader.class 'BossScheduleReader$Entry.class' 'BossScheduleReader$ScheduleReport.class'; do
+    if ! jar tf "$JARS/$OUT" | grep -Fqx "$cls"; then
+        echo "ERROR: Required class $cls missing from $OUT" >&2
+        exit 1
+    fi
+done
+
 cd /
 ls -la "$JARS/$OUT"
 echo "== done =="

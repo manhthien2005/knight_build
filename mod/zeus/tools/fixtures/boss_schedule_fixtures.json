@@ -1,0 +1,319 @@
+{
+  "provenance_note": "Distinguishes synthetic test fixtures from bytecode patterns extracted from ModByTminh v4.0.3 (SHA256: 2930bbddf301476ddccc5898e0b2ce54557ab30f77cede022641fb5016b57e97). No live server NPC responses were captured or claimed. All collision identity, arithmetic overflow, token boundary, duplicate zone, and locale fixtures are strictly synthetic validation cases.",
+  "bytecode_extracted_patterns": [
+    {
+      "type": "SPAWNED_KEYWORD",
+      "keyword": "dang xuat hien",
+      "diacritic_form": "đang xuất hiện",
+      "method": "AutoTravel.BossHunt.consume"
+    },
+    {
+      "type": "SPAWNED_KEYWORD",
+      "keyword": "da xuat hien",
+      "diacritic_form": "đã xuất hiện",
+      "method": "AutoTravel.BossHunt.consume"
+    },
+    {
+      "type": "UNAVAILABLE_KEYWORD",
+      "keyword": "khong co thong tin",
+      "diacritic_form": "không có thông tin",
+      "method": "AutoTravel.BossHunt.consume"
+    },
+    {
+      "type": "UNAVAILABLE_KEYWORD",
+      "keyword": "khong co lich",
+      "diacritic_form": "không có lịch",
+      "method": "AutoTravel.BossHunt.consume"
+    },
+    {
+      "type": "TIMEZONE",
+      "value": "GMT+07:00",
+      "method": "AutoTravel.BossHunt.parseDue"
+    },
+    {
+      "type": "ZONE_SUFFIX",
+      "suffixes": [
+        "k",
+        "khu"
+      ],
+      "method": "AutoTravel.BossHunt.scheduleRow"
+    }
+  ],
+  "synthetic_test_cases": [
+    {
+      "description": "Absolute timestamp in GMT+07:00 independent of host timezone",
+      "caption": "Dơi quỷ 14:30:00 Đèo băng giá Khu 2",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "SCHEDULED",
+      "expected_due_epoch_ms": 1791444600000,
+      "expected_map_alias": "Đèo băng giá"
+    },
+    {
+      "description": "Midnight rollover across day boundary",
+      "caption": "Thằn lằn 01:15:00 Hang nhện Khu 1",
+      "expected_boss": "Thằn lằn",
+      "expected_zone": 1,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791477900000,
+      "expected_status": "SCHEDULED",
+      "expected_due_epoch_ms": 1791483300000,
+      "expected_map_alias": "Hang nhện"
+    },
+    {
+      "description": "Within past 60s window (spawned/arrived, no rollover)",
+      "caption": "Dơi quỷ 12:00:00 Vực đá Khu 1",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 1,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791435630000,
+      "expected_status": "SPAWNED_OR_PAST",
+      "expected_due_epoch_ms": 1791435600000,
+      "expected_map_alias": "Vực đá"
+    },
+    {
+      "description": "Relative countdown duration",
+      "caption": "Sói quỷ 01:30:15 Rừng ma k3",
+      "expected_boss": "Sói quỷ",
+      "expected_zone": 3,
+      "clock_mode": 2,
+      "injected_now_epoch_ms": 1000000000,
+      "expected_status": "SCHEDULED",
+      "expected_due_epoch_ms": 1005415000,
+      "expected_map_alias": "Rừng ma"
+    },
+    {
+      "description": "[B-05 Synthetic] Substring collision rejection: 'Sói' must not match 'Sói quỷ'",
+      "caption": "Sói quỷ 14:30:00 Núi đá Khu 1",
+      "expected_boss": "Sói",
+      "expected_zone": 1,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-05 Synthetic] Substring collision rejection: 'Dê' must not match 'Dê bạc'",
+      "caption": "Dê bạc 14:30:00 Núi đá Khu 1",
+      "expected_boss": "Dê",
+      "expected_zone": 1,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-05 Synthetic] Substring collision rejection: 'Dơi' must not match 'Dơi quỷ'",
+      "caption": "Dơi quỷ 14:30:00 Đèo băng giá Khu 2",
+      "expected_boss": "Dơi",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-05 Synthetic] Positive match for exact single-word boss 'Sói'",
+      "caption": "Sói 14:30:00 Núi đá Khu 1",
+      "expected_boss": "Sói",
+      "expected_zone": 1,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "SCHEDULED",
+      "expected_due_epoch_ms": 1791444600000,
+      "expected_map_alias": "Núi đá"
+    },
+    {
+      "description": "[B-05 Synthetic] Positive match for exact single-word boss 'Dê'",
+      "caption": "Dê 14:30:00 Núi đá Khu 1",
+      "expected_boss": "Dê",
+      "expected_zone": 1,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "SCHEDULED",
+      "expected_due_epoch_ms": 1791444600000,
+      "expected_map_alias": "Núi đá"
+    },
+    {
+      "description": "[B-06 Synthetic] Epoch overflow guard: Countdown with Long.MAX_VALUE",
+      "caption": "Dơi quỷ 01:00:00 Núi đá Khu 1",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 1,
+      "clock_mode": 2,
+      "injected_now_epoch_ms": 9223372036854775807,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-06 Synthetic] Epoch overflow guard: Absolute mode with negative epoch",
+      "caption": "Dơi quỷ 14:30:00 Núi đá Khu 1",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 1,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": -1000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-07 Synthetic] 3-digit hour token boundary violation rejected",
+      "caption": "Dơi quỷ: 123:45:00 Đèo băng giá Khu 2",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-08 Synthetic] 3-digit second token boundary violation rejected",
+      "caption": "Dơi quỷ - 12:45:006 Đèo băng giá Khu 2",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-09 Synthetic] Multiple conflicting zone tokens rejected",
+      "caption": "Dơi quỷ 14:30:00 Đèo băng giá Khu 2 Khu 3",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 3,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-09 Synthetic] Duplicate identical zone tokens rejected",
+      "caption": "Dơi quỷ 14:30:00 Đèo băng giá Khu 2 Khu 2",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-10 Synthetic] Zone number followed by trailing alphanumeric suffix rejected",
+      "caption": "Dơi quỷ 14:30:00 Đèo băng giá Khu 2xyz",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-11 Synthetic] Locale-neutral normalization under uppercase boss input",
+      "caption": "GIANT Skeleton 14:30:00 Núi đá Khu 2",
+      "expected_boss": "Giant Skeleton",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "SCHEDULED",
+      "expected_due_epoch_ms": 1791444600000,
+      "expected_map_alias": "Núi đá"
+    },
+    {
+      "description": "[B-13 Synthetic] Spawned caption with colon following zone digits accepted",
+      "caption": "Dơi quỷ - Núi đá - Khu 2: đang xuất hiện",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "SPAWNED_OR_PAST",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": "Núi đá"
+    },
+    {
+      "description": "[B-13 Synthetic] Spawned caption with k-zone and colon accepted",
+      "caption": "Dơi quỷ - Núi đá - k2: đang xuất hiện",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "SPAWNED_OR_PAST",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": "Núi đá"
+    },
+    {
+      "description": "[B-13 Synthetic] Unavailable caption with colon following zone digits accepted",
+      "caption": "Dơi quỷ - Núi đá - Khu 2: không có lịch",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNAVAILABLE",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-13 Synthetic] Scheduled caption with trailing zone colon punctuation accepted",
+      "caption": "Dơi quỷ 14:30:00 Núi đá Khu 2:",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "SCHEDULED",
+      "expected_due_epoch_ms": 1791444600000,
+      "expected_map_alias": "Núi đá"
+    },
+    {
+      "description": "[B-12 Synthetic] Zone token with underscore subzone suffix rejected",
+      "caption": "Dơi quỷ 14:30:00 Núi đá Khu 2_3",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-12 Synthetic] Zone token with dot numeric suffix rejected",
+      "caption": "Dơi quỷ 14:30:00 Núi đá Khu 2.3",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-12 Synthetic] Zone token with hyphen numeric range suffix rejected",
+      "caption": "Dơi quỷ 14:30:00 Núi đá Khu 2-3",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "UNKNOWN",
+      "expected_due_epoch_ms": null,
+      "expected_map_alias": null
+    },
+    {
+      "description": "[B-12 Control] Clean zone token accepted",
+      "caption": "Dơi quỷ 14:30:00 Núi đá Khu 2",
+      "expected_boss": "Dơi quỷ",
+      "expected_zone": 2,
+      "clock_mode": 1,
+      "injected_now_epoch_ms": 1791428400000,
+      "expected_status": "SCHEDULED",
+      "expected_due_epoch_ms": 1791444600000,
+      "expected_map_alias": "Núi đá"
+    }
+  ]
+}

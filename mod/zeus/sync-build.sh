@@ -11,6 +11,9 @@ SRC="$REPO_ROOT/mod/zeus"
 DST=/work/zeus
 
 [ -d "$SRC" ] || { echo "khong thay $SRC — repository missing mod/zeus"; exit 1; }
+[ -f "$SRC/src/Zeus.java" ] || { echo "khong thay $SRC/src/Zeus.java — repository missing Zeus"; exit 1; }
+[ -f "$SRC/src/BossScheduleParser.java" ] || { echo "khong thay $SRC/src/BossScheduleParser.java — repository missing BossScheduleParser"; exit 1; }
+[ -f "$SRC/src/BossScheduleReader.java" ] || { echo "khong thay $SRC/src/BossScheduleReader.java — repository missing BossScheduleReader"; exit 1; }
 
 mkdir -p "$DST/src" "$DST/tools"
 if [ -f "$SRC/vanilla.jar" ]; then
@@ -19,15 +22,21 @@ fi
 if [ -f "$REPO_ROOT/vendor/microemulator-2.0.4/microemulator.jar" ]; then
     cp "$REPO_ROOT/vendor/microemulator-2.0.4/microemulator.jar" /work/jar/microemulator.jar
 fi
-cp "$SRC/src/Zeus.java"        "$DST/src/Zeus.java"
-cp "$SRC/tools"/*.java         "$DST/tools/"
-cp "$SRC/build-zeus-jar.sh"    "$DST/build-zeus-jar.sh"
+rm -f "$DST/src/BossScheduleParser.java"
+cp "$SRC/src/Zeus.java"               "$DST/src/Zeus.java"
+cp "$SRC/src/BossScheduleParser.java" "$DST/src/BossScheduleParser.java"
+cp "$SRC/src/BossScheduleReader.java" "$DST/src/BossScheduleReader.java"
+cp "$SRC/tools"/*.java                "$DST/tools/"
+cp "$SRC/build-zeus-jar.sh"           "$DST/build-zeus-jar.sh"
 chmod +x "$DST/build-zeus-jar.sh"
 
 echo "== source da sync =="
 printf '   Zeus.java   %s dong  md5 %s\n' \
     "$(wc -l < "$DST/src/Zeus.java")" \
     "$(md5sum "$DST/src/Zeus.java" | cut -c1-12)"
+printf '   Parser.java %s dong  md5 %s\n' \
+    "$(wc -l < "$DST/src/BossScheduleParser.java")" \
+    "$(md5sum "$DST/src/BossScheduleParser.java" | cut -c1-12)"
 printf '   K_* hang    %s\n' \
     "$(grep -oE 'K_[A-Z_0-9]+ *= *[0-9]+' "$DST/src/Zeus.java" | sort -u | wc -l)"
 printf '   CTL_VERSION %s\n' \
@@ -43,6 +52,8 @@ cd "$TMP"
 cp "/work/jar/$OUT" .
 jar xf "$OUT" \
     Zeus.class \
+    BossScheduleParser.class \
+    BossScheduleReader.class \
     Main/GameCanvas.class \
     GameScreen/GameScreen.class \
     GameScreen/SelectCharScreen.class \
@@ -74,8 +85,21 @@ ls_login_guard=$(javap -c -p GameScreen/LoginScreen.class | grep -c 'invokestati
 midlet_ver=$(grep -oP 'MIDlet-Version: *\K[0-9.]+' META-INF/MANIFEST.MF)
 potato_class=$(jar tf "$OUT" | grep -c 'POTATO\.class' || true)
 bx_class=$(jar tf "$OUT" | grep -c '^bx\.class$' || true)
-
 potato_calls=$(jar tf "$OUT" | grep '\.class$' | while read -r c; do javap -c "${c%.class}" 2>/dev/null; done | grep -cE 'POTATO\.(doRepaint|skipLayer|countDraw)' || true)
+parser_class=$(jar tf "$OUT" | grep -c '^BossScheduleParser\.class$' || true)
+parser_result_class=$(jar tf "$OUT" | grep -c '^BossScheduleParser\$Result\.class$' || true)
+parser_status_class=$(jar tf "$OUT" | grep -c '^BossScheduleParser\$Status\.class$' || true)
+parser_zone_class=$(jar tf "$OUT" | grep -c '^BossScheduleParser\$ZoneInfo\.class$' || true)
+reader_class=$(jar tf "$OUT" | grep -c '^BossScheduleReader\.class$' || true)
+reader_entry_class=$(jar tf "$OUT" | grep -c '^BossScheduleReader\$Entry\.class$' || true)
+reader_report_class=$(jar tf "$OUT" | grep -c '^BossScheduleReader\$ScheduleReport\.class$' || true)
+catalog_class=$(jar tf "$OUT" | grep -c '^BossCatalog\.class$' || true)
+state_class=$(jar tf "$OUT" | grep -c '^BossHuntState\.class$' || true)
+config_class=$(jar tf "$OUT" | grep -c '^BossHuntConfig\.class$' || true)
+scheduler_class=$(jar tf "$OUT" | grep -c '^BossHuntScheduler\.class$' || true)
+scheduler_entry_class=$(jar tf "$OUT" | grep -c '^BossHuntScheduler\$ScheduleEntry\.class$' || true)
+controller_class=$(jar tf "$OUT" | grep -c '^BossHuntController\.class$' || true)
+controller_resolver_class=$(jar tf "$OUT" | grep -c '^BossHuntController\$MapResolver\.class$' || true)
 
 pub_bytecode=$(javap -p -constants -c Zeus.class | awk '
   /^[ ]*private static void publish\(long\);/ { in_pub=1; next }
@@ -109,6 +133,10 @@ printf '   MIDlet-Version         %s (phai la 4.0.3)\n' "$midlet_ver"
 printf '   POTATO.class           %s (phai la 0)\n' "$potato_class"
 printf '   bx.class               %s (phai la 0)\n' "$bx_class"
 printf '   POTATO calls           %s (phai la 0)\n' "$potato_calls"
+printf '   BossScheduleParser     %s (phai la 1)\n' "$parser_class"
+printf '   BossScheduleParser inner %s (phai la 3)\n' "$((parser_result_class + parser_status_class + parser_zone_class))"
+printf '   BossScheduleReader     %s (phai la 1)\n' "$reader_class"
+printf '   BossScheduleReader inner %s (phai la 2)\n' "$((reader_entry_class + reader_report_class))" 
 
 rc=0
 [ "$keys" = "$srckeys" ]   || { echo "   !! so khoa jar khac source"; rc=1; }
@@ -130,6 +158,17 @@ rc=0
 [ "$potato_class" = "0" ]  || { echo "   !! POTATO.class co mat trong jar"; rc=1; }
 [ "$bx_class" = "0" ]      || { echo "   !! legacy bx.class co mat trong jar"; rc=1; }
 [ "$potato_calls" = "0" ]  || { echo "   !! POTATO calls con ton tai trong jar"; rc=1; }
+[ "$parser_class" = "1" ]        || { echo "   !! BossScheduleParser.class thieu trong jar"; rc=1; }
+[ "$parser_result_class" = "1" ] || { echo "   !! BossScheduleParser\$Result.class thieu trong jar"; rc=1; }
+[ "$parser_status_class" = "1" ] || { echo "   !! BossScheduleParser\$Status.class thieu trong jar"; rc=1; }
+[ "$parser_zone_class" = "1" ]   || { echo "   !! BossScheduleParser\$ZoneInfo.class thieu trong jar"; rc=1; }
+[ "$catalog_class" = "1" ]       || { echo "   !! BossCatalog.class thieu trong jar"; rc=1; }
+[ "$state_class" = "1" ]         || { echo "   !! BossHuntState.class thieu trong jar"; rc=1; }
+[ "$config_class" = "1" ]        || { echo "   !! BossHuntConfig.class thieu trong jar"; rc=1; }
+[ "$scheduler_class" = "1" ]     || { echo "   !! BossHuntScheduler.class thieu trong jar"; rc=1; }
+[ "$scheduler_entry_class" = "1" ] || { echo "   !! BossHuntScheduler\$ScheduleEntry.class thieu trong jar"; rc=1; }
+[ "$controller_class" = "1" ]    || { echo "   !! BossHuntController.class thieu trong jar"; rc=1; }
+[ "$controller_resolver_class" = "1" ] || { echo "   !! BossHuntController\$MapResolver.class thieu trong jar"; rc=1; }
 
 if [ "$rc" = 0 ]; then
     echo "== running ServerFailClosedTest =="
