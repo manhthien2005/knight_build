@@ -1,6 +1,6 @@
 ---
 name: knight-implementation
-description: Implement an authorized Knight Zeus Java 6 or Rust change on a pinned branch. Use for focused bug fixes, J2ME native UI/packet integration, state-machine changes, Rust tool changes, tests and scoped refactoring after source tracing.
+description: Implement an authorized Knight Zeus Java 6 or Rust change on a pinned branch. Use when implementing focused bug fixes, J2ME native UI/packet or state-machine changes, Rust tool changes, tests and scoped refactoring after source tracing.
 ---
 # Knight Implementation
 
