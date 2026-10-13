@@ -455,6 +455,7 @@ public class BossHuntIntegrationTest {
         final int oldX = oldPlayer != null ? oldPlayer.x : 0;
         final int oldY = oldPlayer != null ? oldPlayer.y : 0;
         final int oldHp = oldPlayer != null ? oldPlayer.hp : 0;
+        final int oldAction = oldPlayer != null ? oldPlayer.Action : 0;
         final short[] oldRoad = oldPlayer != null ? oldPlayer.posTransRoad : null;
         final mVector oldPlayers = GameScreen.Vecplayers;
         final MainObject oldFocus = GameScreen.ObjFocus;
@@ -464,6 +465,7 @@ public class BossHuntIntegrationTest {
         final String oldConfigPath = Zeus.bossHuntConfigPath;
         final boolean oldEnabled = Zeus.bossHunt.getConfig().isEnabled();
         final BossHuntState oldState = Zeus.bossHunt.getState();
+        final String oldStatus = Zeus.bossHunt.getStatusText();
         final BossHuntScheduler.ScheduleEntry oldEntry = Zeus.bossHunt.getActiveEntry();
         final Zeus.PendingBossMenuSelection oldPending = Zeus.pendingBossMenuSelection;
         final String oldReason = Zeus.getLastBossHuntDiagReason();
@@ -475,6 +477,7 @@ public class BossHuntIntegrationTest {
             GameScreen.player.x = 100;
             GameScreen.player.y = 100;
             GameScreen.player.hp = 1000;
+            GameScreen.player.Action = 0;
             GameScreen.player.posTransRoad = null;
             Player.isLockKey = false;
             GameScreen.ObjFocus = null;
@@ -540,6 +543,7 @@ public class BossHuntIntegrationTest {
                 oldPlayer.x = oldX;
                 oldPlayer.y = oldY;
                 oldPlayer.hp = oldHp;
+                oldPlayer.Action = (byte) oldAction;
                 oldPlayer.posTransRoad = oldRoad;
             }
             GameScreen.player = oldPlayer;
@@ -552,6 +556,13 @@ public class BossHuntIntegrationTest {
             Zeus.bossHunt.getConfig().setEnabled(oldEnabled);
             Zeus.bossHunt.setActiveEntry(oldEntry);
             Zeus.bossHunt.setState(oldState);
+            try {
+                java.lang.reflect.Field status = BossHuntController.class.getDeclaredField("lastStatus");
+                status.setAccessible(true);
+                status.set(Zeus.bossHunt, oldStatus);
+            } catch (Exception error) {
+                check("Failed to restore Boss Hunt status: " + error.getMessage(), false);
+            }
             Zeus.pendingBossMenuSelection = oldPending;
             Zeus.recordBossHuntDiagReason(oldReason);
         }
