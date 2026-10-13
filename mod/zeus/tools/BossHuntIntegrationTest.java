@@ -430,8 +430,44 @@ public class BossHuntIntegrationTest {
         }
     }
 
+    /**
+     * Use reflection only inside the offline harness. A direct sun.misc.Unsafe type
+     * reference does not compile under the supported --release 6 class library.
+     * The client LoadMap constructor is not a usable isolated fixture constructor.
+     */
+    private static LoadMap allocateBossScheduleTestMap() throws Exception {
+        Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+        java.lang.reflect.Field singletonField = unsafeClass.getDeclaredField("theUnsafe");
+        singletonField.setAccessible(true);
+        Object unsafe = singletonField.get(null);
+        java.lang.reflect.Method allocate = unsafeClass.getMethod("allocateInstance",
+                new Class[] { Class.class });
+        return (LoadMap) allocate.invoke(unsafe, new Object[] { LoadMap.class });
+    }
+
     private static void testScheduleNpcAcquisitionBoundary() {
-        System.out.println("\\n--- testScheduleNpcAcquisitionBoundary ---");
+        System.out.println("\n--- testScheduleNpcAcquisitionBoundary ---");
+
+        // Snapshot everything this test replaces; never leak fixture world state.
+        final LoadMap oldLoadMap = GameCanvas.loadmap;
+        final int oldMapId = oldLoadMap != null ? oldLoadMap.idMap : -1;
+        final Player oldPlayer = GameScreen.player;
+        final int oldX = oldPlayer != null ? oldPlayer.x : 0;
+        final int oldY = oldPlayer != null ? oldPlayer.y : 0;
+        final int oldHp = oldPlayer != null ? oldPlayer.hp : 0;
+        final short[] oldRoad = oldPlayer != null ? oldPlayer.posTransRoad : null;
+        final mVector oldPlayers = GameScreen.Vecplayers;
+        final MainObject oldFocus = GameScreen.ObjFocus;
+        final boolean oldLock = Player.isLockKey;
+        final MainDialog oldDialog = GameCanvas.currentDialog;
+        final Menu2 oldMenu = GameCanvas.menu2;
+        final String oldConfigPath = Zeus.bossHuntConfigPath;
+        final boolean oldEnabled = Zeus.bossHunt.getConfig().isEnabled();
+        final BossHuntState oldState = Zeus.bossHunt.getState();
+        final BossHuntScheduler.ScheduleEntry oldEntry = Zeus.bossHunt.getActiveEntry();
+        final Zeus.PendingBossMenuSelection oldPending = Zeus.pendingBossMenuSelection;
+        final String oldReason = Zeus.getLastBossHuntDiagReason();
+
         try {
             if (GameScreen.player == null) {
                 GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
@@ -439,12 +475,11 @@ public class BossHuntIntegrationTest {
             GameScreen.player.x = 100;
             GameScreen.player.y = 100;
             GameScreen.player.hp = 1000;
+            GameScreen.player.posTransRoad = null;
             Player.isLockKey = false;
+            GameScreen.ObjFocus = null;
             if (GameCanvas.loadmap == null) {
-                java.lang.reflect.Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
-                uf.setAccessible(true);
-                sun.misc.Unsafe unsafe = (sun.misc.Unsafe) uf.get(null);
-                GameCanvas.loadmap = (LoadMap) unsafe.allocateInstance(LoadMap.class);
+                GameCanvas.loadmap = allocateBossScheduleTestMap();
             }
 
             MainObject alisama = new MainObject();
@@ -464,38 +499,61 @@ public class BossHuntIntegrationTest {
             GameScreen.Vecplayers.addElement(doubar);
             java.lang.reflect.Method findNpc = Zeus.class.getDeclaredMethod("findBossScheduleNpc");
             findNpc.setAccessible(true);
-            check("F01-ACQ-RED-01: Nearby Alisama cannot supersede Doubar", findNpc.invoke(null) == doubar);
+            check("F01-ACQ-RED-01: Nearby Alisama cannot supersede Doubar",
+                    findNpc.invoke(null) == doubar);
 
             GameScreen.Vecplayers = new mVector();
             GameScreen.Vecplayers.addElement(alisama);
-            check("F01-ACQ-SAFE-01: Merchant-only scene has no schedule NPC", findNpc.invoke(null) == null);
+            check("F01-ACQ-SAFE-01: Merchant-only scene has no schedule NPC",
+                    findNpc.invoke(null) == null);
 
             GameCanvas.loadmap.idMap = 1;
             GameScreen.Vecplayers.removeAllElements();
-            check("F01-ACQ-RED-02: No NPC can be acquired outside map 33", findNpc.invoke(null) == null);
+            check("F01-ACQ-RED-02: No NPC can be acquired outside map 33",
+                    findNpc.invoke(null) == null);
             Zeus.bossHuntConfigPath = null;
             Zeus.bossHunt.getConfig().setEnabled(true);
             Zeus.bossHunt.setActiveEntry(null);
             Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
-            Zeus.resetBossMenuSelectionState();
+            Zeus.pendingBossMenuSelection = null;
             GameCanvas.currentDialog = null;
             GameCanvas.menu2 = null;
             Zeus.clearBossHuntDiagReason();
             Zeus.bossHuntTick();
-            checkEquals("F01-ACQ-SAFE-01: Cross-map acquisition requires approved route ownership",
+            checkEquals("F01-ACQ-SAFE-01: Cross-map requires separately owned route",
                     "SCHEDULE_ROUTE_MANUAL_REQUIRED", Zeus.getLastBossHuntDiagReason());
+            check("F01-ACQ-SAFE-01: No automatic movement lock acquired", !Player.isLockKey);
+            check("F01-ACQ-SAFE-01: No route path written", GameScreen.player.posTransRoad == null);
 
             GameCanvas.loadmap.idMap = 33;
             GameScreen.Vecplayers.addElement(doubar);
-            check("F01-ACQ-POS-01: Doubar visible on the recorded map", findNpc.invoke(null) == doubar);
-            // Native GiaoTiep and Menu2 dispatch are verified by a separate offline harness.
+            check("F01-ACQ-POS-01: Doubar visible on the recorded map",
+                    findNpc.invoke(null) == doubar);
+            // Native GiaoTiep and Menu2 are checked by the existing independent harness.
         } catch (Throwable error) {
             check("Schedule NPC acquisition test setup: " + error.getMessage(), false);
         } finally {
-            GameCanvas.currentDialog = null;
-            Zeus.bossHunt.getConfig().setEnabled(false);
-            Zeus.bossHunt.setState(BossHuntState.IDLE);
-            Zeus.clearBossHuntDiagReason();
+            // Restore mutable objects before restoring the globally held references.
+            if (oldLoadMap != null) oldLoadMap.idMap = oldMapId;
+            GameCanvas.loadmap = oldLoadMap;
+            if (oldPlayer != null) {
+                oldPlayer.x = oldX;
+                oldPlayer.y = oldY;
+                oldPlayer.hp = oldHp;
+                oldPlayer.posTransRoad = oldRoad;
+            }
+            GameScreen.player = oldPlayer;
+            GameScreen.Vecplayers = oldPlayers;
+            GameScreen.ObjFocus = oldFocus;
+            Player.isLockKey = oldLock;
+            GameCanvas.currentDialog = oldDialog;
+            GameCanvas.menu2 = oldMenu;
+            Zeus.bossHuntConfigPath = oldConfigPath;
+            Zeus.bossHunt.getConfig().setEnabled(oldEnabled);
+            Zeus.bossHunt.setActiveEntry(oldEntry);
+            Zeus.bossHunt.setState(oldState);
+            Zeus.pendingBossMenuSelection = oldPending;
+            Zeus.recordBossHuntDiagReason(oldReason);
         }
     }
 
@@ -636,6 +694,9 @@ public class BossHuntIntegrationTest {
 
 
     private static void testForegroundAlisamaDialogPriorityGateThroughTick() {
+        final LoadMap oldLoadMap = GameCanvas.loadmap;
+        final int oldMapId = oldLoadMap != null ? oldLoadMap.idMap : -1;
+        try {
         System.out.println("\n--- testForegroundAlisamaDialogPriorityGateThroughTick ---");
 
         if (GameScreen.player == null) {
@@ -681,17 +742,15 @@ public class BossHuntIntegrationTest {
             throw new RuntimeException(e);
         }
 
-        // Record the schedule source map before running the production tick.
-        // This also protects the test from a stale map set by another scenario.
+        // Recorded schedule map; restore the original fixture in finally.
         try {
             if (GameCanvas.loadmap == null) {
-                java.lang.reflect.Field uf = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
-                uf.setAccessible(true);
-                sun.misc.Unsafe unsafe = (sun.misc.Unsafe) uf.get(null);
-                GameCanvas.loadmap = (LoadMap) unsafe.allocateInstance(LoadMap.class);
+                GameCanvas.loadmap = allocateBossScheduleTestMap();
             }
             GameCanvas.loadmap.idMap = 33;
-        } catch (Throwable error) { throw new RuntimeException("Cannot set schedule map", error); }
+        } catch (Exception error) {
+            throw new RuntimeException("Cannot set schedule map", error);
+        }
 
         // 1. SCENARIO A: Foreground MsgDialog visible WHILE background menu2.isShowMenu is TRUE!
         Zeus.bossHuntConfigPath = null;
@@ -942,6 +1001,10 @@ public class BossHuntIntegrationTest {
         Zeus.resetBossDialogBridgeState();
         Zeus.resetBossMenuSelectionState();
         Zeus.clearBossHuntDiagReason();
+        } finally {
+            if (oldLoadMap != null) oldLoadMap.idMap = oldMapId;
+            GameCanvas.loadmap = oldLoadMap;
+        }
     }
 
     private static void testServerMenuNativeSelectionDispatch() {
