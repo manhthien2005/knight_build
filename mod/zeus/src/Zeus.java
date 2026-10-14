@@ -119,6 +119,47 @@ public final class Zeus {
         authRefusalTraced = false;
     }
 
+    // Phase 1: passive native input provenance, not consumed by movement systems.
+    private static int nativeKeyboardCaptureCount = 0;
+    private static int nativePointerCaptureCount = 0;
+    private static int nativeInputGeneration = 0;
+    private static short[] nativeLastPointerPath = null;
+
+    private static void resetNativeInputCapture() {
+        nativeKeyboardCaptureCount = 0;
+        nativePointerCaptureCount = 0;
+        nativeInputGeneration = 0;
+        nativeLastPointerPath = null;
+    }
+
+    private static void advanceNativeInputGeneration() {
+        if (nativeInputGeneration < Integer.MAX_VALUE) nativeInputGeneration++;
+    }
+
+    /** Observe directional keys before the client's movement lock gate. */
+    public static void onNativeUpdateKey() {
+        try {
+            if (GameCanvas.currentScreen != GameCanvas.game || GameCanvas.currentDialog != null
+                    || GameCanvas.subDialog != null
+                    || (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu)
+                    || ChatTextField.isShow) return;
+            if (GameCanvas.keyMove(0) || GameCanvas.keyMove(1)
+                    || GameCanvas.keyMove(2) || GameCanvas.keyMove(3)) {
+                if (nativeKeyboardCaptureCount < Integer.MAX_VALUE) nativeKeyboardCaptureCount++;
+                advanceNativeInputGeneration();
+            }
+        } catch (Throwable ignored) {
+            // Observation failure cannot interfere with the native game.
+        }
+    }
+
+    /** Receives the exact path reference written by native pointer handling. */
+    public static void onNativePointerMovement(short[] newPath) {
+        nativeLastPointerPath = newPath;
+        if (nativePointerCaptureCount < Integer.MAX_VALUE) nativePointerCaptureCount++;
+        advanceNativeInputGeneration();
+    }
+
     /** Called at the end of GameCanvas.login() every tick. */
     public static void tick() {
         healthSidecarTick();
@@ -4334,6 +4375,7 @@ public final class Zeus {
      * Called on character-select / world entry transitions.
      */
     public static void sessionReset() {
+        resetNativeInputCapture();
         readySettleTicks = 0;
         dialogLastFingerprint = "";
         dialogStableTicks = 0;

@@ -13,6 +13,8 @@
  *      - setinfoDynamic(mVector, int, int, int, String): inject server menu hook Zeus.serverMenu(mVector, idMenu, idNPC, String).
  *   6. GameScreen/GameScreen.paint(mGraphics)V: inject `Zeus.paint(g)` before RETURN.
  *   7. GameScreen/LoginScreen.login(String, String)V: inject `invokestatic Zeus.serverTargetSafe()Z` guard at prologue.
+ *   8. GameScreen/GameScreen.updatekey()V: passive directional-input observer.
+ *   9. GameScreen/PaintInfoGameScreen: passive observer after both path PUTFIELD sites.
  *
  * usage: PatchZeus <in.jar> <out-class-dir>
  */
@@ -115,9 +117,12 @@ public final class PatchZeus {
         ClassWriter gsw = new ClassWriter(ClassWriter.COMPUTE_MAXS);
         PaintHook paintHook = new PaintHook(gsw);
         gsr.accept(paintHook, 0);
-        if (paintHook.targetMethodCount != 1 || paintHook.returnCount != 1) {
+        if (paintHook.targetMethodCount != 1 || paintHook.returnCount != 1
+                || paintHook.updateKeyMethodCount != 1 || paintHook.updateKeyHookCount != 1) {
             throw new IllegalStateException("GameScreen/GameScreen.paint(LCLib/mGraphics;)V: expected exactly 1 method and 1 RETURN, found "
-                    + paintHook.targetMethodCount + " methods and " + paintHook.returnCount + " RETURNs — refusing to write");
+                    + paintHook.targetMethodCount + " methods and " + paintHook.returnCount
+                    + " RETURNs; updatekey " + paintHook.updateKeyMethodCount + "/" + paintHook.updateKeyHookCount
+                    + " — refusing to write");
         }
         writeClass(outDir, "GameScreen/GameScreen.class", gsw.toByteArray());
 
@@ -133,8 +138,22 @@ public final class PatchZeus {
         }
         writeClass(outDir, "GameScreen/LoginScreen.class", lsw.toByteArray());
 
+        // Validate the two native path-write sites before publishing patched pointer class.
+        byte[] pointerBytes = readAll(zf.getInputStream(zf.getEntry("GameScreen/PaintInfoGameScreen.class")));
+        ClassReader pointerReader = new ClassReader(pointerBytes);
+        ClassWriter pointerWriter = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        NativePointerHook pointerHook = new NativePointerHook(pointerWriter);
+        pointerReader.accept(pointerHook, 0);
+        if (pointerHook.portalMethods != 1 || pointerHook.portalWrites != 1
+                || pointerHook.terrainMethods != 1 || pointerHook.terrainWrites != 1) {
+            throw new IllegalStateException("Native pointer capture expected one method/write per origin, got portal "
+                    + pointerHook.portalMethods + "/" + pointerHook.portalWrites + ", terrain "
+                    + pointerHook.terrainMethods + "/" + pointerHook.terrainWrites + " — refusing candidate");
+        }
+        writeClass(outDir, "GameScreen/PaintInfoGameScreen.class", pointerWriter.toByteArray());
+
         zf.close();
-        System.out.println("PatchZeus complete: patched GameCanvas, SelectCharScreen, MsgDialog, Cmd_Message, Menu2, GameScreen, LoginScreen");
+        System.out.println("PatchZeus complete: patched GameCanvas, SelectCharScreen, MsgDialog, Cmd_Message, Menu2, GameScreen, LoginScreen, PaintInfoGameScreen");
     }
 
     // ── Main/GameCanvas hook: update() tick hook + connect() serverTargetSafe guard ──
@@ -264,21 +283,40 @@ public final class PatchZeus {
         }
     }
 
-    // ── Paint hook: GameScreen.paint(mGraphics) ─────────────────────────
+    // ── GameScreen paint and keyboard hooks in ONE patched class ────
     private static final class PaintHook extends ClassAdapter {
         int targetMethodCount = 0;
         int returnCount = 0;
+        int updateKeyMethodCount = 0;
+        int updateKeyHookCount = 0;
 
-        PaintHook(ClassWriter cw) {
-            super(cw);
-        }
+        PaintHook(ClassWriter cw) { super(cw); }
 
         public MethodVisitor visitMethod(int access, String name, String desc,
                                          String signature, String[] exceptions) {
             MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
-            if (mv == null || !"paint".equals(name) || !"(LCLib/mGraphics;)V".equals(desc)) {
-                return mv;
+            if (mv == null) return mv;
+            if ("updatekey".equals(name)) {
+                if (!"()V".equals(desc)) {
+                    throw new IllegalStateException("Unexpected GameScreen.updatekey descriptor " + desc);
+                }
+                updateKeyMethodCount++;
+                return new MethodAdapter(mv) {
+                    public void visitCode() {
+                        super.visitCode();
+                        updateKeyHookCount++;
+                        super.visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "onNativeUpdateKey", "()V");
+                    }
+                    public void visitMethodInsn(int opcode, String owner, String method, String descriptor) {
+                        if (opcode == Opcodes.INVOKESTATIC && "Zeus".equals(owner)
+                                && "onNativeUpdateKey".equals(method)) {
+                            throw new IllegalStateException("GameScreen.updatekey already contains capture hook");
+                        }
+                        super.visitMethodInsn(opcode, owner, method, descriptor);
+                    }
+                };
             }
+            if (!"paint".equals(name) || !"(LCLib/mGraphics;)V".equals(desc)) return mv;
             targetMethodCount++;
             return new MethodAdapter(mv) {
                 public void visitInsn(int opcode) {
@@ -288,6 +326,56 @@ public final class PatchZeus {
                         visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus", "paint", "(LCLib/mGraphics;)V");
                     }
                     super.visitInsn(opcode);
+                }
+            };
+        }
+    }
+
+    /**
+     * The matched PUTFIELD consumes two category-1 references (player, short[]).
+     * DUP2 keeps them, then SWAP/POP discards only the saved player ref.
+     * The callback receives the very same short[] AFTER the native write.
+     */
+    private static final class NativePointerHook extends ClassAdapter {
+        int portalMethods = 0, portalWrites = 0;
+        int terrainMethods = 0, terrainWrites = 0;
+        NativePointerHook(ClassWriter cw) { super(cw); }
+
+        public MethodVisitor visitMethod(int access, String name, String desc,
+                                         String signature, String[] exceptions) {
+            MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
+            if (mv == null) return mv;
+            final boolean portal = "updatePoiterAll".equals(name);
+            final boolean terrain = "updatePointMoveIngame".equals(name);
+            if (!portal && !terrain) return mv;
+            if (!"()V".equals(desc)) {
+                throw new IllegalStateException("Unexpected pointer method " + name + desc);
+            }
+            if (portal) portalMethods++; else terrainMethods++;
+            return new MethodAdapter(mv) {
+                public void visitFieldInsn(int opcode, String owner, String field, String descriptor) {
+                    if (opcode == Opcodes.PUTFIELD && "posTransRoad".equals(field)) {
+                        if (!"GameObjects/MainObject".equals(owner) || !"[S".equals(descriptor)) {
+                            throw new IllegalStateException("Unexpected posTransRoad owner/descriptor "
+                                    + owner + "." + field + ":" + descriptor);
+                        }
+                        if (portal) portalWrites++; else terrainWrites++;
+                        visitInsn(Opcodes.DUP2);
+                        super.visitFieldInsn(opcode, owner, field, descriptor);
+                        visitInsn(Opcodes.SWAP);
+                        visitInsn(Opcodes.POP);
+                        super.visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus",
+                                "onNativePointerMovement", "([S)V");
+                        return;
+                    }
+                    super.visitFieldInsn(opcode, owner, field, descriptor);
+                }
+                public void visitMethodInsn(int opcode, String owner, String method, String descriptor) {
+                    if (opcode == Opcodes.INVOKESTATIC && "Zeus".equals(owner)
+                            && "onNativePointerMovement".equals(method)) {
+                        throw new IllegalStateException("Native pointer callback already present");
+                    }
+                    super.visitMethodInsn(opcode, owner, method, descriptor);
                 }
             };
         }

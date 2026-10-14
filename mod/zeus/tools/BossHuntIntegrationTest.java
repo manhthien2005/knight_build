@@ -64,6 +64,7 @@ public class BossHuntIntegrationTest {
         testOwnershipAwareAutofireAndLockCleanup();
         testSafeAtomicFileReplacement();
         testScheduleNpcAcquisitionBoundary();
+        testNativeInputCapturePassive();
         testAlisamaMsgDialogBridge();
         testForegroundAlisamaDialogPriorityGateThroughTick();
         testServerMenuNativeSelectionDispatch();
@@ -624,6 +625,62 @@ public class BossHuntIntegrationTest {
                 } catch (Exception error) {
                     check("Failed to restore status emission timer: " + error.getMessage(), false);
                 }
+            }
+        }
+    }
+
+    private static void testNativeInputCapturePassive() {
+        System.out.println("\n--- testNativeInputCapturePassive ---");
+        final Player oldPlayer = GameScreen.player;
+        final short[] oldPath = oldPlayer != null ? oldPlayer.posTransRoad : null;
+        final boolean oldLock = Player.isLockKey;
+        final MainDialog oldDialog = GameCanvas.currentDialog;
+        final Menu2 oldMenu = GameCanvas.menu2;
+        final BossHuntState oldState = Zeus.bossHunt.getState();
+        try {
+            if (GameScreen.player == null) {
+                GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
+            }
+            short[] existing = new short[] { 3, 4 };
+            short[] reported = new short[] { 5, 6 };
+            GameScreen.player.posTransRoad = existing;
+            Player.isLockKey = true;
+            java.lang.reflect.Field count = Zeus.class.getDeclaredField("nativePointerCaptureCount");
+            java.lang.reflect.Field reference = Zeus.class.getDeclaredField("nativeLastPointerPath");
+            java.lang.reflect.Field epoch = Zeus.class.getDeclaredField("nativeInputGeneration");
+            java.lang.reflect.Method reset = Zeus.class.getDeclaredMethod("resetNativeInputCapture");
+            count.setAccessible(true);
+            reference.setAccessible(true);
+            epoch.setAccessible(true);
+            reset.setAccessible(true);
+            reset.invoke(null);
+            check("CAPTURE-T08: Zero initial observations", count.getInt(null) == 0
+                    && reference.get(null) == null && epoch.getInt(null) == 0);
+            Zeus.onNativePointerMovement(reported);
+            check("CAPTURE-T06: Exact native path observed", reference.get(null) == reported);
+            check("CAPTURE-T06: Pointer count advanced", count.getInt(null) == 1
+                    && epoch.getInt(null) == 1);
+            check("CAPTURE-T06: Existing movement path unchanged",
+                    GameScreen.player.posTransRoad == existing);
+            check("CAPTURE-T06: Lock unchanged", Player.isLockKey);
+            checkEquals("CAPTURE-T06: Controller state unchanged", oldState, Zeus.bossHunt.getState());
+            reset.invoke(null);
+            check("CAPTURE-T08: Reset is inert", count.getInt(null) == 0
+                    && reference.get(null) == null && epoch.getInt(null) == 0);
+        } catch (Throwable error) {
+            check("Native input passive fixture: " + error.getMessage(), false);
+        } finally {
+            if (oldPlayer != null) oldPlayer.posTransRoad = oldPath;
+            GameScreen.player = oldPlayer;
+            Player.isLockKey = oldLock;
+            GameCanvas.currentDialog = oldDialog;
+            GameCanvas.menu2 = oldMenu;
+            try {
+                java.lang.reflect.Method reset = Zeus.class.getDeclaredMethod("resetNativeInputCapture");
+                reset.setAccessible(true);
+                reset.invoke(null);
+            } catch (Exception error) {
+                check("Native capture reset failed: " + error.getMessage(), false);
             }
         }
     }
