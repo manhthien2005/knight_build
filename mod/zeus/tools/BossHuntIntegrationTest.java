@@ -637,6 +637,8 @@ public class BossHuntIntegrationTest {
         final boolean oldLock = Player.isLockKey;
         final MainDialog oldDialog = GameCanvas.currentDialog;
         final MainDialog oldSubDialog = GameCanvas.subDialog;
+        // Fresh-JVM setup may construct GameCanvas.game; always restore its prior identity.
+        final GameScreen oldGame = GameCanvas.game;
         final Menu2 oldMenu = GameCanvas.menu2;
         final boolean oldChatVisible = ChatTextField.isShow;
         final boolean[] keys = GameCanvas.keyMyHold;
@@ -706,12 +708,23 @@ public class BossHuntIntegrationTest {
                     pointerCount.getInt(null) == 0 && keyboardCount.getInt(null) == 0
                     && pointerReference.get(null) == null && generation.getInt(null) == 0);
 
+            // Reuse only ReconnectTravelTest.setupWorldState's minimal screen fixture.
+            // A fresh JVM may never have constructed the native game screen.
+            if (GameCanvas.game == null) {
+                GameCanvas.game = new GameScreen();
+            }
+            check("FIXTURE-T01: Native GameScreen fixture initialized",
+                    GameCanvas.game != null && (oldGame != null || GameCanvas.game != oldGame));
+
             // Drive the actual native keyMove() predicate. All modified keys are restored.
             // Existing key mappings: direction 0/1/2/3 use D-pad and numeric pairs.
             final int[] directionIndices = { 2, 8, 4, 6, 22, 28, 24, 26 };
-            boolean keyFixtureReady = keys != null && keys.length > 28 && GameCanvas.game != null;
+            boolean keyFixtureReady = keys != null && keys.length > 28
+                    && GameCanvas.keyMyHold == keys && GameCanvas.game != null;
             check("CAPTURE-R03: Native key fixture available", keyFixtureReady);
-            if (keyFixtureReady) {
+            if (!keyFixtureReady) {
+                return; // Failed assertion; finally restores globals. Never silently skip.
+            }
                 for (int i = 0; i < directionIndices.length; i++) {
                     keys[directionIndices[i]] = false;
                 }
@@ -755,7 +768,6 @@ public class BossHuntIntegrationTest {
                         GameScreen.player.posTransRoad == existing && Player.isLockKey);
                 checkEquals("CAPTURE-T06: Keyboard capture preserves controller state",
                         oldState, Zeus.bossHunt.getState());
-            }
             reset.invoke(null);
             check("CAPTURE-T08: Observer reset clears both inputs",
                     pointerCount.getInt(null) == 0 && keyboardCount.getInt(null) == 0
@@ -774,6 +786,7 @@ public class BossHuntIntegrationTest {
                     check("Native screen restore failed: " + error.getMessage(), false);
                 }
             }
+            GameCanvas.game = oldGame;
             GameCanvas.currentDialog = oldDialog;
             GameCanvas.subDialog = oldSubDialog;
             GameCanvas.menu2 = oldMenu;
