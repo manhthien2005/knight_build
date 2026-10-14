@@ -124,12 +124,105 @@ public final class Zeus {
     private static int nativePointerCaptureCount = 0;
     private static int nativeInputGeneration = 0;
     private static short[] nativeLastPointerPath = null;
+    // Passive native pre/post provenance. These fields are NOT movement authority.
+    private static final int POINTER_PRE_NONE = 0;
+    private static final int POINTER_PRE_VALID = 1;
+    private static final int POINTER_PRE_AMBIGUOUS = 2;
+    private static final int POINTER_ORIGIN_UNKNOWN = 0;
+    private static final int POINTER_ORIGIN_TERRAIN = 1;
+    private static final int POINTER_ORIGIN_PORTAL = 2;
+    private static int nativePointerPendingState = POINTER_PRE_NONE;
+    private static int nativePointerPendingOrigin = POINTER_ORIGIN_UNKNOWN;
+    private static short[] nativePointerPendingOldPath = null;
+    private static Player nativePointerPendingPlayer = null;
+    private static boolean nativePointerPendingLock = false;
+    private static int nativePointerPendingMap = -1;
+    private static int nativePointerPendingSession = 0;
+    private static int nativePointerPendingTick = 0;
+    private static int nativePointerPendingSequence = 0;
+    private static int nativePointerSessionGeneration = 0;
+    private static int nativePointerTickGeneration = 0;
+    private static int nativePointerSequence = 0;
+    private static int nativePointerLastOrigin = POINTER_ORIGIN_UNKNOWN;
+    private static short[] nativePointerLastOldPath = null;
+    private static short[] nativePointerLastNewPath = null;
+    private static boolean nativePointerLastPreLock = false;
+    private static int nativePointerLastMap = -1;
+    private static int nativePointerLastSession = 0;
+    private static int nativePointerLastSequence = 0;
+
+    private static int nativePointerMap() {
+        return GameCanvas.loadmap != null ? GameCanvas.loadmap.idMap : -1;
+    }
+
+    private static void clearNativePointerPending() {
+        nativePointerPendingState = POINTER_PRE_NONE;
+        nativePointerPendingOrigin = POINTER_ORIGIN_UNKNOWN;
+        nativePointerPendingOldPath = null;
+        nativePointerPendingPlayer = null;
+        nativePointerPendingLock = false;
+        nativePointerPendingMap = -1;
+        nativePointerPendingSession = 0;
+        nativePointerPendingTick = 0;
+        nativePointerPendingSequence = 0;
+    }
+
+    private static void clearNativePointerLastCorrelation() {
+        nativePointerLastOrigin = POINTER_ORIGIN_UNKNOWN;
+        nativePointerLastOldPath = null;
+        nativePointerLastNewPath = null;
+        nativePointerLastPreLock = false;
+        nativePointerLastMap = -1;
+        nativePointerLastSession = 0;
+        nativePointerLastSequence = 0;
+    }
+
+    private static void captureNativePointerPre(int origin) {
+        // Fail closed on nesting or ambiguous timing. No native field writes.
+        if (nativePointerPendingState != POINTER_PRE_NONE) {
+            clearNativePointerPending();
+            nativePointerPendingState = POINTER_PRE_AMBIGUOUS;
+            return;
+        }
+        nativePointerPendingState = POINTER_PRE_VALID;
+        nativePointerPendingOrigin = origin;
+        nativePointerPendingPlayer = GameScreen.player;
+        nativePointerPendingOldPath = GameScreen.player == null ? null : GameScreen.player.posTransRoad;
+        nativePointerPendingLock = Player.isLockKey;
+        nativePointerPendingMap = nativePointerMap();
+        nativePointerPendingSession = nativePointerSessionGeneration;
+        nativePointerPendingTick = nativePointerTickGeneration;
+        if (nativePointerSequence < Integer.MAX_VALUE) nativePointerSequence++;
+        nativePointerPendingSequence = nativePointerSequence;
+    }
+
+    /** Passive snapshot immediately before native terrain resetMove(). */
+    public static void onNativePrePointerTerrain() {
+        try {
+            captureNativePointerPre(POINTER_ORIGIN_TERRAIN);
+        } catch (Throwable ignored) {
+            clearNativePointerPending();
+        }
+    }
+
+    /** Passive snapshot before native portal posTransRoad assignment. */
+    public static void onNativePrePointerPortal() {
+        try {
+            captureNativePointerPre(POINTER_ORIGIN_PORTAL);
+        } catch (Throwable ignored) {
+            clearNativePointerPending();
+        }
+    }
 
     private static void resetNativeInputCapture() {
         nativeKeyboardCaptureCount = 0;
         nativePointerCaptureCount = 0;
         nativeInputGeneration = 0;
         nativeLastPointerPath = null;
+        clearNativePointerPending();
+        clearNativePointerLastCorrelation();
+        if (nativePointerSessionGeneration < Integer.MAX_VALUE) nativePointerSessionGeneration++;
+        nativePointerSequence = 0;
     }
 
     private static void advanceNativeInputGeneration() {
@@ -156,16 +249,38 @@ public final class Zeus {
     /** Receives the exact path reference written by native pointer handling. */
     public static void onNativePointerMovement(short[] newPath) {
         try {
+            // Retain Phase 1 ABI and counting semantics even for unknown events.
             nativeLastPointerPath = newPath;
             if (nativePointerCaptureCount < Integer.MAX_VALUE) nativePointerCaptureCount++;
             advanceNativeInputGeneration();
+            clearNativePointerLastCorrelation();
+            if (nativePointerPendingState == POINTER_PRE_VALID
+                    && nativePointerPendingSession == nativePointerSessionGeneration
+                    && nativePointerPendingTick == nativePointerTickGeneration
+                    && nativePointerPendingPlayer == GameScreen.player
+                    && nativePointerPendingMap == nativePointerMap()) {
+                nativePointerLastOrigin = nativePointerPendingOrigin;
+                nativePointerLastOldPath = nativePointerPendingOldPath;
+                nativePointerLastNewPath = newPath;
+                nativePointerLastPreLock = nativePointerPendingLock;
+                nativePointerLastMap = nativePointerPendingMap;
+                nativePointerLastSession = nativePointerPendingSession;
+                nativePointerLastSequence = nativePointerPendingSequence;
+            }
+            // One post-event consumes or rejects exactly one pending pre-event.
+            clearNativePointerPending();
         } catch (Throwable ignored) {
             // Observation failure must not interrupt native pointer movement.
+            clearNativePointerPending();
+            clearNativePointerLastCorrelation();
         }
     }
 
     /** Called at the end of GameCanvas.login() every tick. */
     public static void tick() {
+        // The native update-end tick expires any unpaired pointer pre-event.
+        clearNativePointerPending();
+        if (nativePointerTickGeneration < Integer.MAX_VALUE) nativePointerTickGeneration++;
         healthSidecarTick();
         reconnectStatusSidecarTick();
         if (GameCanvas.currentScreen == null) {

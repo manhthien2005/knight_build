@@ -47,14 +47,29 @@ public final class PatchZeus {
         // Validate the two native path-write sites before publishing patched pointer class.
         byte[] pointerBytes = readAll(zf.getInputStream(zf.getEntry("GameScreen/PaintInfoGameScreen.class")));
         ClassReader pointerReader = new ClassReader(pointerBytes);
+        // Prove the entire producer sequence before patching; byte offsets alone are unsafe.
+        NativePointerPreflight pointerProof = new NativePointerPreflight();
+        pointerReader.accept(pointerProof, 0);
+        if (pointerProof.portalMethods != 1 || pointerProof.terrainMethods != 1
+                || pointerProof.portalMatches != 1 || pointerProof.terrainMatches != 1
+                || pointerProof.portalStartOrdinal < 1 || pointerProof.terrainStartOrdinal < 1) {
+            throw new IllegalStateException("Native prewrite matcher ambiguous: portal "
+                    + pointerProof.portalMethods + "/" + pointerProof.portalMatches + ", terrain "
+                    + pointerProof.terrainMethods + "/" + pointerProof.terrainMatches
+                    + " — refusing candidate before any output");
+        }
         ClassWriter pointerWriter = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-        NativePointerHook pointerHook = new NativePointerHook(pointerWriter);
+        NativePointerHook pointerHook = new NativePointerHook(pointerWriter,
+                pointerProof.portalStartOrdinal, pointerProof.terrainStartOrdinal);
         pointerReader.accept(pointerHook, 0);
         if (pointerHook.portalMethods != 1 || pointerHook.portalWrites != 1
-                || pointerHook.terrainMethods != 1 || pointerHook.terrainWrites != 1) {
+                || pointerHook.portalPreHooks != 1
+                || pointerHook.terrainMethods != 1 || pointerHook.terrainWrites != 1
+                || pointerHook.terrainPreHooks != 1) {
             throw new IllegalStateException("Native pointer capture expected one method/write per origin, got portal "
-                    + pointerHook.portalMethods + "/" + pointerHook.portalWrites + ", terrain "
-                    + pointerHook.terrainMethods + "/" + pointerHook.terrainWrites + " — refusing candidate");
+                    + pointerHook.portalMethods + "/" + pointerHook.portalWrites + "/" + pointerHook.portalPreHooks
+                    + ", terrain " + pointerHook.terrainMethods + "/" + pointerHook.terrainWrites
+                    + "/" + pointerHook.terrainPreHooks + " — refusing candidate");
         }
 
 
@@ -335,14 +350,127 @@ public final class PatchZeus {
     }
 
     /**
+     * Read-only bytecode preflight: a six-instruction terrain sequence starts
+     * before Player.resetMove; the four-instruction portal sequence starts
+     * before assignment. Every real opcode (including unrelated ones) shifts
+     * the bounded window. Labels/line numbers do not count as instructions.
+     *
+     * Source references: terrain 906/919, portal 876/883. The numeric offsets
+     * do not authorize injection: only complete owner/descriptor patterns do.
+     */
+    private static final class NativePointerPreflight extends ClassAdapter {
+        int portalMethods, terrainMethods, portalMatches, terrainMatches;
+        int portalStartOrdinal, terrainStartOrdinal;
+
+        NativePointerPreflight() { super(new ClassWriter(0)); }
+
+        public MethodVisitor visitMethod(int access, String name, String desc,
+                                         String signature, String[] exceptions) {
+            MethodVisitor mv = super.visitMethod(access, name, desc, signature, exceptions);
+            final boolean portal = "updatePoiterAll".equals(name);
+            final boolean terrain = "updatePointMoveIngame".equals(name);
+            if (!portal && !terrain) return mv;
+            if (!"()V".equals(desc)) {
+                throw new IllegalStateException("Unexpected native pointer method descriptor " + name + desc);
+            }
+            if (portal) portalMethods++; else terrainMethods++;
+            return new MethodAdapter(mv) {
+                private final String[] tokens = new String[6];
+                private final int[] playerOrdinals = new int[6];
+                private int playerReads = 0;
+
+                private void step(String token, int playerOrdinal) {
+                    for (int i = 0; i < 5; i++) {
+                        tokens[i] = tokens[i + 1];
+                        playerOrdinals[i] = playerOrdinals[i + 1];
+                    }
+                    tokens[5] = token;
+                    playerOrdinals[5] = playerOrdinal;
+                    if (!"WRITE".equals(token)) return;
+                    if (portal && "PLAYER".equals(tokens[2])
+                            && "THIS".equals(tokens[3])
+                            && "POS_TAM".equals(tokens[4])) {
+                        portalMatches++;
+                        portalStartOrdinal = playerOrdinals[2];
+                    }
+                    if (terrain && "PLAYER".equals(tokens[0])
+                            && "RESET".equals(tokens[1])
+                            && "PLAYER".equals(tokens[2])
+                            && "THIS".equals(tokens[3])
+                            && "POS_TAM".equals(tokens[4])) {
+                        terrainMatches++;
+                        terrainStartOrdinal = playerOrdinals[0];
+                    }
+                }
+
+                public void visitFieldInsn(int opcode, String owner, String field, String desc) {
+                    String token = "OTHER";
+                    int ordinal = 0;
+                    if (opcode == Opcodes.GETSTATIC && "GameScreen/GameScreen".equals(owner)
+                            && "player".equals(field) && "LGameObjects/Player;".equals(desc)) {
+                        token = "PLAYER";
+                        ordinal = ++playerReads;
+                    } else if (opcode == Opcodes.GETFIELD
+                            && "GameScreen/PaintInfoGameScreen".equals(owner)
+                            && "posTam".equals(field) && "[S".equals(desc)) {
+                        token = "POS_TAM";
+                    } else if (opcode == Opcodes.PUTFIELD && "posTransRoad".equals(field)) {
+                        if (!"GameObjects/MainObject".equals(owner) || !"[S".equals(desc)) {
+                            throw new IllegalStateException("Unexpected native path field " + owner + "." + field + ":" + desc);
+                        }
+                        token = "WRITE";
+                    }
+                    step(token, ordinal);
+                    super.visitFieldInsn(opcode, owner, field, desc);
+                }
+                public void visitMethodInsn(int opcode, String owner, String method, String desc) {
+                    if (opcode == Opcodes.INVOKESTATIC && "Zeus".equals(owner)
+                            && ("onNativePrePointerPortal".equals(method)
+                                || "onNativePrePointerTerrain".equals(method)
+                                || "onNativePointerMovement".equals(method))) {
+                        throw new IllegalStateException("Native pointer capture hook already present");
+                    }
+                    step(opcode == Opcodes.INVOKEVIRTUAL && "GameObjects/Player".equals(owner)
+                            && "resetMove".equals(method) && "()V".equals(desc) ? "RESET" : "OTHER", 0);
+                    super.visitMethodInsn(opcode, owner, method, desc);
+                }
+                public void visitVarInsn(int opcode, int var) {
+                    step(opcode == Opcodes.ALOAD && var == 0 ? "THIS" : "OTHER", 0);
+                    super.visitVarInsn(opcode, var);
+                }
+                public void visitInsn(int opcode) { step("OTHER", 0); super.visitInsn(opcode); }
+                public void visitIntInsn(int opcode, int operand) { step("OTHER", 0); super.visitIntInsn(opcode, operand); }
+                public void visitTypeInsn(int opcode, String type) { step("OTHER", 0); super.visitTypeInsn(opcode, type); }
+                public void visitJumpInsn(int opcode, Label label) { step("OTHER", 0); super.visitJumpInsn(opcode, label); }
+                public void visitLdcInsn(Object cst) { step("OTHER", 0); super.visitLdcInsn(cst); }
+                public void visitIincInsn(int var, int incr) { step("OTHER", 0); super.visitIincInsn(var, incr); }
+                public void visitTableSwitchInsn(int min, int max, Label dflt, Label[] labels) {
+                    step("OTHER", 0); super.visitTableSwitchInsn(min, max, dflt, labels);
+                }
+                public void visitLookupSwitchInsn(Label dflt, int[] keys, Label[] labels) {
+                    step("OTHER", 0); super.visitLookupSwitchInsn(dflt, keys, labels);
+                }
+                public void visitMultiANewArrayInsn(String desc, int dims) {
+                    step("OTHER", 0); super.visitMultiANewArrayInsn(desc, dims);
+                }
+            };
+        }
+    }
+
+    /**
      * The matched PUTFIELD consumes two category-1 references (player, short[]).
      * DUP2 keeps them, then SWAP/POP discards only the saved player ref.
      * The callback receives the very same short[] AFTER the native write.
      */
     private static final class NativePointerHook extends ClassAdapter {
-        int portalMethods = 0, portalWrites = 0;
-        int terrainMethods = 0, terrainWrites = 0;
-        NativePointerHook(ClassWriter cw) { super(cw); }
+        int portalMethods = 0, portalWrites = 0, portalPreHooks = 0;
+        int terrainMethods = 0, terrainWrites = 0, terrainPreHooks = 0;
+        private final int portalStartOrdinal, terrainStartOrdinal;
+        NativePointerHook(ClassWriter cw, int portalOrdinal, int terrainOrdinal) {
+            super(cw);
+            portalStartOrdinal = portalOrdinal;
+            terrainStartOrdinal = terrainOrdinal;
+        }
 
         public MethodVisitor visitMethod(int access, String name, String desc,
                                          String signature, String[] exceptions) {
@@ -356,7 +484,22 @@ public final class PatchZeus {
             }
             if (portal) portalMethods++; else terrainMethods++;
             return new MethodAdapter(mv) {
+                private int playerReads = 0;
+
                 public void visitFieldInsn(int opcode, String owner, String field, String descriptor) {
+                    if (opcode == Opcodes.GETSTATIC && "GameScreen/GameScreen".equals(owner)
+                            && "player".equals(field) && "LGameObjects/Player;".equals(descriptor)) {
+                        playerReads++;
+                        if (portal && playerReads == portalStartOrdinal) {
+                            portalPreHooks++;
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus",
+                                    "onNativePrePointerPortal", "()V");
+                        } else if (terrain && playerReads == terrainStartOrdinal) {
+                            terrainPreHooks++;
+                            super.visitMethodInsn(Opcodes.INVOKESTATIC, "Zeus",
+                                    "onNativePrePointerTerrain", "()V");
+                        }
+                    }
                     if (opcode == Opcodes.PUTFIELD && "posTransRoad".equals(field)) {
                         if (!"GameObjects/MainObject".equals(owner) || !"[S".equals(descriptor)) {
                             throw new IllegalStateException("Unexpected posTransRoad owner/descriptor "
@@ -375,7 +518,9 @@ public final class PatchZeus {
                 }
                 public void visitMethodInsn(int opcode, String owner, String method, String descriptor) {
                     if (opcode == Opcodes.INVOKESTATIC && "Zeus".equals(owner)
-                            && "onNativePointerMovement".equals(method)) {
+                            && ("onNativePointerMovement".equals(method)
+                                || "onNativePrePointerPortal".equals(method)
+                                || "onNativePrePointerTerrain".equals(method))) {
                         throw new IllegalStateException("Native pointer callback already present");
                     }
                     super.visitMethodInsn(opcode, owner, method, descriptor);

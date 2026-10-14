@@ -53,6 +53,13 @@ public class BossHuntIntegrationTest {
     }
 
     public static void main(String[] args) {
+        // Scratch-only focused entry point; never run unrelated integration tests.
+        if (args != null && args.length == 1 && "--prewrite-only".equals(args[0])) {
+            testNativePointerPrewriteCorrelation();
+            System.out.println("Prewrite focused checks: " + (total - failures) + "/" + total);
+            if (failures != 0) System.exit(1);
+            return;
+        }
         System.out.println("=== BossHuntIntegrationTest Starting ===");
 
         testR43IntegrationProbeParity();
@@ -66,6 +73,7 @@ public class BossHuntIntegrationTest {
         testSafeAtomicFileReplacement();
         testScheduleNpcAcquisitionBoundary();
         testNativeInputCapturePassive();
+        testNativePointerPrewriteCorrelation();
         testAlisamaMsgDialogBridge();
         testForegroundAlisamaDialogPriorityGateThroughTick();
         testServerMenuNativeSelectionDispatch();
@@ -647,6 +655,21 @@ public class BossHuntIntegrationTest {
         java.lang.reflect.Field screenField = null;
         Object oldScreen = null;
         boolean screenSnapshotReady = false;
+        final String[] extraCaptureNames = {
+            "nativePointerPendingState", "nativePointerPendingOrigin",
+            "nativePointerPendingOldPath", "nativePointerPendingPlayer", "nativePointerPendingLock",
+            "nativePointerPendingMap", "nativePointerPendingSession",
+            "nativePointerPendingTick", "nativePointerPendingSequence",
+            "nativePointerSessionGeneration", "nativePointerTickGeneration",
+            "nativePointerSequence", "nativePointerLastOrigin",
+            "nativePointerLastOldPath", "nativePointerLastNewPath",
+            "nativePointerLastPreLock", "nativePointerLastMap",
+            "nativePointerLastSession", "nativePointerLastSequence"
+        };
+        final java.lang.reflect.Field[] extraCaptureFields =
+                new java.lang.reflect.Field[extraCaptureNames.length];
+        final Object[] extraCaptureValues = new Object[extraCaptureNames.length];
+        int extraCapturedCount = 0;
         java.lang.reflect.Field pointerCount = null;
         java.lang.reflect.Field keyboardCount = null;
         java.lang.reflect.Field pointerReference = null;
@@ -671,6 +694,12 @@ public class BossHuntIntegrationTest {
             oldPointerReference = pointerReference.get(null);
             oldGeneration = generation.getInt(null);
             captureSnapshotReady = true;
+            for (int i = 0; i < extraCaptureNames.length; i++) {
+                extraCaptureFields[i] = Zeus.class.getDeclaredField(extraCaptureNames[i]);
+                extraCaptureFields[i].setAccessible(true);
+                extraCaptureValues[i] = extraCaptureFields[i].get(null);
+                extraCapturedCount++;
+            }
             screenField = GameCanvas.class.getField("currentScreen");
             oldScreen = screenField.get(null);
             screenSnapshotReady = true;
@@ -794,6 +823,13 @@ public class BossHuntIntegrationTest {
             if (oldPlayer != null) oldPlayer.posTransRoad = oldPath;
             GameScreen.player = oldPlayer;
             Player.isLockKey = oldLock;
+            for (int i = extraCapturedCount - 1; i >= 0; i--) {
+                try {
+                    extraCaptureFields[i].set(null, extraCaptureValues[i]);
+                } catch (Throwable error) {
+                    check("Native prewrite snapshot restore: " + extraCaptureNames[i], false);
+                }
+            }
             if (captureSnapshotReady) {
                 try {
                     pointerCount.setInt(null, oldPointerCount);
@@ -802,6 +838,177 @@ public class BossHuntIntegrationTest {
                     generation.setInt(null, oldGeneration);
                 } catch (Throwable error) {
                     check("Native capture snapshot restoration failed: " + error.getMessage(), false);
+                }
+            }
+        }
+    }
+
+    /**
+     * PRECAP-T03..T09: direct callback contract, NOT proof of native ASM position.
+     * Every private observation field and native fixture is restored in finally.
+     */
+    private static void testNativePointerPrewriteCorrelation() {
+        System.out.println("\n--- testNativePointerPrewriteCorrelation ---");
+        final Player oldPlayer = GameScreen.player;
+        final short[] oldPath = oldPlayer == null ? null : oldPlayer.posTransRoad;
+        final boolean oldLock = Player.isLockKey;
+        final BossHuntState oldState = Zeus.bossHunt.getState();
+        final String[] fieldNames = {
+            "nativeKeyboardCaptureCount", "nativePointerCaptureCount",
+            "nativeInputGeneration", "nativeLastPointerPath",
+            "nativePointerPendingState", "nativePointerPendingOrigin",
+            "nativePointerPendingOldPath", "nativePointerPendingPlayer", "nativePointerPendingLock",
+            "nativePointerPendingMap", "nativePointerPendingSession",
+            "nativePointerPendingTick", "nativePointerPendingSequence",
+            "nativePointerSessionGeneration", "nativePointerTickGeneration",
+            "nativePointerSequence", "nativePointerLastOrigin",
+            "nativePointerLastOldPath", "nativePointerLastNewPath",
+            "nativePointerLastPreLock", "nativePointerLastMap",
+            "nativePointerLastSession", "nativePointerLastSequence"
+        };
+        final java.lang.reflect.Field[] fields = new java.lang.reflect.Field[fieldNames.length];
+        final Object[] saved = new Object[fieldNames.length];
+        int savedFields = 0;
+        java.lang.reflect.Method reset = null;
+        java.lang.reflect.Field origin = null;
+        java.lang.reflect.Field oldRef = null;
+        java.lang.reflect.Field newRef = null;
+        java.lang.reflect.Field preLock = null;
+        java.lang.reflect.Field pendingState = null;
+        java.lang.reflect.Field tickGeneration = null;
+        java.lang.reflect.Field sessionGeneration = null;
+        java.lang.reflect.Field pointerCount = null;
+        java.lang.reflect.Field inputGeneration = null;
+        java.lang.reflect.Field pointerRef = null;
+        final Thread_More.LoadMap originalMap = GameCanvas.loadmap;
+        final int oldMapId = originalMap == null ? -1 : originalMap.idMap;
+        try {
+            // Take a full private-state snapshot BEFORE resetting the observer.
+            for (int i = 0; i < fieldNames.length; i++) {
+                fields[i] = Zeus.class.getDeclaredField(fieldNames[i]);
+                fields[i].setAccessible(true);
+                saved[i] = fields[i].get(null);
+                savedFields++;
+            }
+            origin = Zeus.class.getDeclaredField("nativePointerLastOrigin");
+            oldRef = Zeus.class.getDeclaredField("nativePointerLastOldPath");
+            newRef = Zeus.class.getDeclaredField("nativePointerLastNewPath");
+            preLock = Zeus.class.getDeclaredField("nativePointerLastPreLock");
+            pendingState = Zeus.class.getDeclaredField("nativePointerPendingState");
+            tickGeneration = Zeus.class.getDeclaredField("nativePointerTickGeneration");
+            sessionGeneration = Zeus.class.getDeclaredField("nativePointerSessionGeneration");
+            pointerCount = Zeus.class.getDeclaredField("nativePointerCaptureCount");
+            inputGeneration = Zeus.class.getDeclaredField("nativeInputGeneration");
+            pointerRef = Zeus.class.getDeclaredField("nativeLastPointerPath");
+            origin.setAccessible(true);
+            oldRef.setAccessible(true);
+            newRef.setAccessible(true);
+            preLock.setAccessible(true);
+            pendingState.setAccessible(true);
+            tickGeneration.setAccessible(true);
+            sessionGeneration.setAccessible(true);
+            pointerCount.setAccessible(true);
+            inputGeneration.setAccessible(true);
+            pointerRef.setAccessible(true);
+            reset = Zeus.class.getDeclaredMethod("resetNativeInputCapture");
+            reset.setAccessible(true);
+            reset.invoke(null);
+
+            if (GameScreen.player == null) {
+                GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
+            }
+            final short[] bossPath = new short[] { 1, 2, 3 };
+            final short[] manualPath = new short[] { 4, 5, 6 };
+            GameScreen.player.posTransRoad = bossPath;
+            Player.isLockKey = true;
+
+            Zeus.onNativePrePointerTerrain();
+            java.lang.reflect.Field pendingOldPath =
+                    Zeus.class.getDeclaredField("nativePointerPendingOldPath");
+            java.lang.reflect.Field pendingLock =
+                    Zeus.class.getDeclaredField("nativePointerPendingLock");
+            pendingOldPath.setAccessible(true);
+            pendingLock.setAccessible(true);
+            check("PRECAP-T01/T03: terrain pre captures exact original path and lock",
+                    pendingState.getInt(null) == 1
+                    && pendingOldPath.get(null) == bossPath && pendingLock.getBoolean(null));
+            // Emulate only the native PUTFIELD between callbacks, never change production code.
+            GameScreen.player.posTransRoad = manualPath;
+            Zeus.onNativePointerMovement(manualPath);
+            check("PRECAP-T03: terrain pre/post correlated once",
+                    origin.getInt(null) == 1 && oldRef.get(null) == bossPath
+                    && newRef.get(null) == manualPath && preLock.getBoolean(null)
+                    && pendingState.getInt(null) == 0);
+            check("PRECAP-T08: callback leaves native path and lock untouched",
+                    GameScreen.player.posTransRoad == manualPath && Player.isLockKey);
+            check("PRECAP-T03: phase one pointer counting retained",
+                    pointerCount.getInt(null) == 1 && inputGeneration.getInt(null) == 1
+                    && pointerRef.get(null) == manualPath);
+
+            GameScreen.player.posTransRoad = bossPath;
+            Zeus.onNativePrePointerPortal();
+            GameScreen.player.posTransRoad = manualPath;
+            Zeus.onNativePointerMovement(manualPath);
+            check("PRECAP-T02/T03: portal origin and old/new references",
+                    origin.getInt(null) == 2 && oldRef.get(null) == bossPath
+                    && newRef.get(null) == manualPath);
+
+            // No pre-event: even the identical new path cannot imply takeover.
+            Zeus.onNativePointerMovement(manualPath);
+            check("PRECAP-T04: orphan post remains UNKNOWN", origin.getInt(null) == 0
+                    && oldRef.get(null) == null);
+
+            Zeus.onNativePrePointerTerrain();
+            Zeus.onNativePrePointerPortal();
+            Zeus.onNativePointerMovement(manualPath);
+            check("PRECAP-T05: nested pre rejects ambiguous pair",
+                    origin.getInt(null) == 0 && pendingState.getInt(null) == 0);
+
+            Zeus.onNativePrePointerTerrain();
+            tickGeneration.setInt(null, tickGeneration.getInt(null) + 1);
+            Zeus.onNativePointerMovement(manualPath);
+            check("PRECAP-T06: stale tick rejects pending pre",
+                    origin.getInt(null) == 0 && pendingState.getInt(null) == 0);
+
+            Zeus.onNativePrePointerTerrain();
+            reset.invoke(null);
+            Zeus.onNativePointerMovement(manualPath);
+            check("PRECAP-T07: reset invalidates stale event",
+                    origin.getInt(null) == 0 && pendingState.getInt(null) == 0
+                    && sessionGeneration.getInt(null) > 0);
+
+            if (originalMap != null) {
+                GameScreen.player.posTransRoad = bossPath;
+                Zeus.onNativePrePointerPortal();
+                originalMap.idMap = oldMapId + 1;
+                Zeus.onNativePointerMovement(manualPath);
+                check("PRECAP-T07: map transition invalidates correlation",
+                        origin.getInt(null) == 0 && pendingState.getInt(null) == 0);
+                originalMap.idMap = oldMapId;
+            }
+
+            GameScreen.player.posTransRoad = null;
+            Zeus.onNativePrePointerTerrain();
+            Zeus.onNativePointerMovement(null);
+            check("PRECAP-T09: null old/new remains passive",
+                    origin.getInt(null) == 1 && oldRef.get(null) == null
+                    && newRef.get(null) == null && pointerRef.get(null) == null
+                    && GameScreen.player.posTransRoad == null);
+            checkEquals("PRECAP-T12: Controller state unchanged", oldState, Zeus.bossHunt.getState());
+            check("PRECAP-T12: Observer does not release native lock", Player.isLockKey);
+        } catch (Throwable error) {
+            check("Prewrite callback fixture: " + error.getMessage(), false);
+        } finally {
+            if (originalMap != null) originalMap.idMap = oldMapId;
+            if (oldPlayer != null) oldPlayer.posTransRoad = oldPath;
+            GameScreen.player = oldPlayer;
+            Player.isLockKey = oldLock;
+            // Restore ALL saved observer fields, even after exceptional completion.
+            for (int i = savedFields - 1; i >= 0; i--) {
+                try {
+                    fields[i].set(null, saved[i]);
+                } catch (Throwable error) {
+                    check("Prewrite observer field restore: " + fieldNames[i], false);
                 }
             }
         }
