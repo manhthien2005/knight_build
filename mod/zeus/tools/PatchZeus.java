@@ -43,6 +43,21 @@ public final class PatchZeus {
         ZipFile zf = new ZipFile(args[0]);
         File outDir = new File(args[1]);
 
+        // Preflight pointer signatures BEFORE writing any output class.
+        // Validate the two native path-write sites before publishing patched pointer class.
+        byte[] pointerBytes = readAll(zf.getInputStream(zf.getEntry("GameScreen/PaintInfoGameScreen.class")));
+        ClassReader pointerReader = new ClassReader(pointerBytes);
+        ClassWriter pointerWriter = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+        NativePointerHook pointerHook = new NativePointerHook(pointerWriter);
+        pointerReader.accept(pointerHook, 0);
+        if (pointerHook.portalMethods != 1 || pointerHook.portalWrites != 1
+                || pointerHook.terrainMethods != 1 || pointerHook.terrainWrites != 1) {
+            throw new IllegalStateException("Native pointer capture expected one method/write per origin, got portal "
+                    + pointerHook.portalMethods + "/" + pointerHook.portalWrites + ", terrain "
+                    + pointerHook.terrainMethods + "/" + pointerHook.terrainWrites + " — refusing candidate");
+        }
+
+
         // ── 1. Hook Main/GameCanvas.update()V (tick) & connect()V (guard) ──
         byte[] gcBytes = readAll(zf.getInputStream(zf.getEntry("Main/GameCanvas.class")));
         ClassReader gcr = new ClassReader(gcBytes);
@@ -138,18 +153,6 @@ public final class PatchZeus {
         }
         writeClass(outDir, "GameScreen/LoginScreen.class", lsw.toByteArray());
 
-        // Validate the two native path-write sites before publishing patched pointer class.
-        byte[] pointerBytes = readAll(zf.getInputStream(zf.getEntry("GameScreen/PaintInfoGameScreen.class")));
-        ClassReader pointerReader = new ClassReader(pointerBytes);
-        ClassWriter pointerWriter = new ClassWriter(ClassWriter.COMPUTE_MAXS);
-        NativePointerHook pointerHook = new NativePointerHook(pointerWriter);
-        pointerReader.accept(pointerHook, 0);
-        if (pointerHook.portalMethods != 1 || pointerHook.portalWrites != 1
-                || pointerHook.terrainMethods != 1 || pointerHook.terrainWrites != 1) {
-            throw new IllegalStateException("Native pointer capture expected one method/write per origin, got portal "
-                    + pointerHook.portalMethods + "/" + pointerHook.portalWrites + ", terrain "
-                    + pointerHook.terrainMethods + "/" + pointerHook.terrainWrites + " — refusing candidate");
-        }
         writeClass(outDir, "GameScreen/PaintInfoGameScreen.class", pointerWriter.toByteArray());
 
         zf.close();
