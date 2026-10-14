@@ -637,7 +637,29 @@ public class BossHuntIntegrationTest {
         final MainDialog oldDialog = GameCanvas.currentDialog;
         final Menu2 oldMenu = GameCanvas.menu2;
         final BossHuntState oldState = Zeus.bossHunt.getState();
+        java.lang.reflect.Field pointerCount = null;
+        java.lang.reflect.Field keyboardCount = null;
+        java.lang.reflect.Field pointerReference = null;
+        java.lang.reflect.Field generation = null;
+        int oldPointerCount = 0;
+        int oldKeyboardCount = 0;
+        int oldGeneration = 0;
+        Object oldPointerReference = null;
+        boolean captureSnapshotReady = false;
         try {
+            pointerCount = Zeus.class.getDeclaredField("nativePointerCaptureCount");
+            keyboardCount = Zeus.class.getDeclaredField("nativeKeyboardCaptureCount");
+            pointerReference = Zeus.class.getDeclaredField("nativeLastPointerPath");
+            generation = Zeus.class.getDeclaredField("nativeInputGeneration");
+            pointerCount.setAccessible(true);
+            keyboardCount.setAccessible(true);
+            pointerReference.setAccessible(true);
+            generation.setAccessible(true);
+            oldPointerCount = pointerCount.getInt(null);
+            oldKeyboardCount = keyboardCount.getInt(null);
+            oldPointerReference = pointerReference.get(null);
+            oldGeneration = generation.getInt(null);
+            captureSnapshotReady = true;
             if (GameScreen.player == null) {
                 GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
             }
@@ -645,13 +667,10 @@ public class BossHuntIntegrationTest {
             short[] reported = new short[] { 5, 6 };
             GameScreen.player.posTransRoad = existing;
             Player.isLockKey = true;
-            java.lang.reflect.Field count = Zeus.class.getDeclaredField("nativePointerCaptureCount");
-            java.lang.reflect.Field reference = Zeus.class.getDeclaredField("nativeLastPointerPath");
-            java.lang.reflect.Field epoch = Zeus.class.getDeclaredField("nativeInputGeneration");
+            java.lang.reflect.Field count = pointerCount;
+            java.lang.reflect.Field reference = pointerReference;
+            java.lang.reflect.Field epoch = generation;
             java.lang.reflect.Method reset = Zeus.class.getDeclaredMethod("resetNativeInputCapture");
-            count.setAccessible(true);
-            reference.setAccessible(true);
-            epoch.setAccessible(true);
             reset.setAccessible(true);
             reset.invoke(null);
             check("CAPTURE-T08: Zero initial observations", count.getInt(null) == 0
@@ -675,12 +694,15 @@ public class BossHuntIntegrationTest {
             Player.isLockKey = oldLock;
             GameCanvas.currentDialog = oldDialog;
             GameCanvas.menu2 = oldMenu;
-            try {
-                java.lang.reflect.Method reset = Zeus.class.getDeclaredMethod("resetNativeInputCapture");
-                reset.setAccessible(true);
-                reset.invoke(null);
-            } catch (Exception error) {
-                check("Native capture reset failed: " + error.getMessage(), false);
+            if (captureSnapshotReady) {
+                try {
+                    pointerCount.setInt(null, oldPointerCount);
+                    keyboardCount.setInt(null, oldKeyboardCount);
+                    pointerReference.set(null, oldPointerReference);
+                    generation.setInt(null, oldGeneration);
+                } catch (Exception error) {
+                    check("Native capture snapshot restoration failed: " + error.getMessage(), false);
+                }
             }
         }
     }
