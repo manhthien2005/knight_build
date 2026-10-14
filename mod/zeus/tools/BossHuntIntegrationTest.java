@@ -880,8 +880,10 @@ public class BossHuntIntegrationTest {
         java.lang.reflect.Field pointerCount = null;
         java.lang.reflect.Field inputGeneration = null;
         java.lang.reflect.Field pointerRef = null;
-        final Thread_More.LoadMap originalMap = GameCanvas.loadmap;
+        // A fresh JVM has no native map. Preserve both reference and its original ID.
+        final LoadMap originalMap = GameCanvas.loadmap;
         final int oldMapId = originalMap == null ? -1 : originalMap.idMap;
+        final int fixtureMapId = 33;
         try {
             // Take a full private-state snapshot BEFORE resetting the observer.
             for (int i = 0; i < fieldNames.length; i++) {
@@ -913,6 +915,18 @@ public class BossHuntIntegrationTest {
             reset = Zeus.class.getDeclaredMethod("resetNativeInputCapture");
             reset.setAccessible(true);
             reset.invoke(null);
+
+            // Reuse the existing isolated LoadMap fixture helper. It bypasses
+            // the native constructor; allocation errors reach the FAIL handler.
+            if (GameCanvas.loadmap == null) {
+                GameCanvas.loadmap = allocateBossScheduleTestMap();
+            }
+            if (GameCanvas.loadmap == null) {
+                throw new IllegalStateException("LoadMap fixture could not be initialized");
+            }
+            GameCanvas.loadmap.idMap = fixtureMapId;
+            check("MAP-T01: isolated native map fixture initialized",
+                    GameCanvas.loadmap != null && GameCanvas.loadmap.idMap == fixtureMapId);
 
             if (GameScreen.player == null) {
                 GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
@@ -977,15 +991,30 @@ public class BossHuntIntegrationTest {
                     origin.getInt(null) == 0 && pendingState.getInt(null) == 0
                     && sessionGeneration.getInt(null) > 0);
 
-            if (originalMap != null) {
-                GameScreen.player.posTransRoad = bossPath;
-                Zeus.onNativePrePointerPortal();
-                originalMap.idMap = oldMapId + 1;
-                Zeus.onNativePointerMovement(manualPath);
-                check("PRECAP-T07: map transition invalidates correlation",
-                        origin.getInt(null) == 0 && pendingState.getInt(null) == 0);
-                originalMap.idMap = oldMapId;
-            }
+            // MAP-T02: a stable, known map must preserve the exact pre/post pair.
+            GameCanvas.loadmap.idMap = fixtureMapId;
+            GameScreen.player.posTransRoad = bossPath;
+            Zeus.onNativePrePointerPortal();
+            GameScreen.player.posTransRoad = manualPath;
+            Zeus.onNativePointerMovement(manualPath);
+            java.lang.reflect.Field lastMap = Zeus.class.getDeclaredField("nativePointerLastMap");
+            lastMap.setAccessible(true);
+            check("MAP-T02: unchanged map correlates old and new paths",
+                    origin.getInt(null) == 2 && oldRef.get(null) == bossPath
+                    && newRef.get(null) == manualPath && lastMap.getInt(null) == fixtureMapId
+                    && pendingState.getInt(null) == 0);
+
+            // MAP-T03: unconditional, red-capable mismatch on both fresh and
+            // existing world fixtures. Never skip this assertion for null originalMap.
+            GameScreen.player.posTransRoad = bossPath;
+            Zeus.onNativePrePointerPortal();
+            GameCanvas.loadmap.idMap = fixtureMapId + 1;
+            GameScreen.player.posTransRoad = manualPath;
+            Zeus.onNativePointerMovement(manualPath);
+            check("MAP-T03: changed map rejects correlation and clears pending",
+                    origin.getInt(null) == 0 && oldRef.get(null) == null
+                    && newRef.get(null) == null && pendingState.getInt(null) == 0);
+            GameCanvas.loadmap.idMap = fixtureMapId;
 
             GameScreen.player.posTransRoad = null;
             Zeus.onNativePrePointerTerrain();
@@ -999,7 +1028,9 @@ public class BossHuntIntegrationTest {
         } catch (Throwable error) {
             check("Prewrite callback fixture: " + error.getMessage(), false);
         } finally {
+            // Restore the object's original mutable ID BEFORE replacing the global.
             if (originalMap != null) originalMap.idMap = oldMapId;
+            GameCanvas.loadmap = originalMap;
             if (oldPlayer != null) oldPlayer.posTransRoad = oldPath;
             GameScreen.player = oldPlayer;
             Player.isLockKey = oldLock;
@@ -1012,6 +1043,9 @@ public class BossHuntIntegrationTest {
                 }
             }
         }
+        check("MAP-T04/T05: original LoadMap identity and ID restored",
+                GameCanvas.loadmap == originalMap
+                && (originalMap == null || originalMap.idMap == oldMapId));
     }
 
     private static void testAlisamaMsgDialogBridge() {
