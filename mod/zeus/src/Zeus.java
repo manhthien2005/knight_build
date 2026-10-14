@@ -155,9 +155,13 @@ public final class Zeus {
 
     /** Receives the exact path reference written by native pointer handling. */
     public static void onNativePointerMovement(short[] newPath) {
-        nativeLastPointerPath = newPath;
-        if (nativePointerCaptureCount < Integer.MAX_VALUE) nativePointerCaptureCount++;
-        advanceNativeInputGeneration();
+        try {
+            nativeLastPointerPath = newPath;
+            if (nativePointerCaptureCount < Integer.MAX_VALUE) nativePointerCaptureCount++;
+            advanceNativeInputGeneration();
+        } catch (Throwable ignored) {
+            // Observation failure must not interrupt native pointer movement.
+        }
     }
 
     /** Called at the end of GameCanvas.login() every tick. */

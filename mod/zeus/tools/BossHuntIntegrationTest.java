@@ -4,6 +4,7 @@ import GameObjects.MainObject;
 import GameObjects.Player;
 import InterfaceComponents.MsgDialog;
 import InterfaceComponents.MainDialog;
+import InterfaceComponents.ChatTextField;
 import InterfaceComponents.iCommand;
 import InterfaceComponents.IAction;
 import Model.Menu2;
@@ -635,8 +636,15 @@ public class BossHuntIntegrationTest {
         final short[] oldPath = oldPlayer != null ? oldPlayer.posTransRoad : null;
         final boolean oldLock = Player.isLockKey;
         final MainDialog oldDialog = GameCanvas.currentDialog;
+        final MainDialog oldSubDialog = GameCanvas.subDialog;
         final Menu2 oldMenu = GameCanvas.menu2;
+        final boolean oldChatVisible = ChatTextField.isShow;
+        final boolean[] keys = GameCanvas.keyMyHold;
+        final boolean[] oldKeys = keys != null ? (boolean[]) keys.clone() : null;
         final BossHuntState oldState = Zeus.bossHunt.getState();
+        java.lang.reflect.Field screenField = null;
+        Object oldScreen = null;
+        boolean screenSnapshotReady = false;
         java.lang.reflect.Field pointerCount = null;
         java.lang.reflect.Field keyboardCount = null;
         java.lang.reflect.Field pointerReference = null;
@@ -647,6 +655,7 @@ public class BossHuntIntegrationTest {
         Object oldPointerReference = null;
         boolean captureSnapshotReady = false;
         try {
+            // Snapshot before any mutation. The observer state is private by design.
             pointerCount = Zeus.class.getDeclaredField("nativePointerCaptureCount");
             keyboardCount = Zeus.class.getDeclaredField("nativeKeyboardCaptureCount");
             pointerReference = Zeus.class.getDeclaredField("nativeLastPointerPath");
@@ -660,6 +669,10 @@ public class BossHuntIntegrationTest {
             oldPointerReference = pointerReference.get(null);
             oldGeneration = generation.getInt(null);
             captureSnapshotReady = true;
+            screenField = GameCanvas.class.getField("currentScreen");
+            oldScreen = screenField.get(null);
+            screenSnapshotReady = true;
+
             if (GameScreen.player == null) {
                 GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
             }
@@ -667,40 +680,114 @@ public class BossHuntIntegrationTest {
             short[] reported = new short[] { 5, 6 };
             GameScreen.player.posTransRoad = existing;
             Player.isLockKey = true;
-            java.lang.reflect.Field count = pointerCount;
-            java.lang.reflect.Field reference = pointerReference;
-            java.lang.reflect.Field epoch = generation;
             java.lang.reflect.Method reset = Zeus.class.getDeclaredMethod("resetNativeInputCapture");
             reset.setAccessible(true);
             reset.invoke(null);
-            check("CAPTURE-T08: Zero initial observations", count.getInt(null) == 0
-                    && reference.get(null) == null && epoch.getInt(null) == 0);
+            check("CAPTURE-T08: Zero initial observations",
+                    pointerCount.getInt(null) == 0 && keyboardCount.getInt(null) == 0
+                    && pointerReference.get(null) == null && generation.getInt(null) == 0);
             Zeus.onNativePointerMovement(reported);
-            check("CAPTURE-T06: Exact native path observed", reference.get(null) == reported);
-            check("CAPTURE-T06: Pointer count advanced", count.getInt(null) == 1
-                    && epoch.getInt(null) == 1);
+            check("CAPTURE-T06: Exact native path observed", pointerReference.get(null) == reported);
+            check("CAPTURE-T06: Pointer count advanced",
+                    pointerCount.getInt(null) == 1 && generation.getInt(null) == 1);
             check("CAPTURE-T06: Existing movement path unchanged",
                     GameScreen.player.posTransRoad == existing);
             check("CAPTURE-T06: Lock unchanged", Player.isLockKey);
             checkEquals("CAPTURE-T06: Controller state unchanged", oldState, Zeus.bossHunt.getState());
+
+            // A null native write is still only an observation, never a movement command.
+            Zeus.onNativePointerMovement(null);
+            check("CAPTURE-R02: Null pointer path safely observed",
+                    pointerReference.get(null) == null && pointerCount.getInt(null) == 2
+                    && generation.getInt(null) == 2 && GameScreen.player.posTransRoad == existing
+                    && Player.isLockKey);
             reset.invoke(null);
-            check("CAPTURE-T08: Reset is inert", count.getInt(null) == 0
-                    && reference.get(null) == null && epoch.getInt(null) == 0);
+            check("CAPTURE-T08: Reset is inert",
+                    pointerCount.getInt(null) == 0 && keyboardCount.getInt(null) == 0
+                    && pointerReference.get(null) == null && generation.getInt(null) == 0);
+
+            // Drive the actual native keyMove() predicate. All modified keys are restored.
+            // Existing key mappings: direction 0/1/2/3 use D-pad and numeric pairs.
+            final int[] directionIndices = { 2, 8, 4, 6, 22, 28, 24, 26 };
+            boolean keyFixtureReady = keys != null && keys.length > 28 && GameCanvas.game != null;
+            check("CAPTURE-R03: Native key fixture available", keyFixtureReady);
+            if (keyFixtureReady) {
+                for (int i = 0; i < directionIndices.length; i++) {
+                    keys[directionIndices[i]] = false;
+                }
+                screenField.set(null, GameCanvas.game);
+                GameCanvas.currentDialog = null;
+                GameCanvas.subDialog = null;
+                GameCanvas.menu2 = null;
+                ChatTextField.isShow = false;
+
+                boolean noDirection = !GameCanvas.keyMove(0) && !GameCanvas.keyMove(1)
+                        && !GameCanvas.keyMove(2) && !GameCanvas.keyMove(3);
+                check("CAPTURE-R03: No native directional key held", noDirection);
+                Zeus.onNativeUpdateKey();
+                check("CAPTURE-R03: Idle keyboard does not advance observation",
+                        keyboardCount.getInt(null) == 0 && generation.getInt(null) == 0);
+
+                keys[4] = true;  // Native D-pad Left, tested through keyMove(2).
+                check("CAPTURE-R03: Native left key predicate becomes true", GameCanvas.keyMove(2));
+                Zeus.onNativeUpdateKey();
+                check("CAPTURE-R03: Directional keyboard observation increments",
+                        keyboardCount.getInt(null) == 1 && generation.getInt(null) == 1);
+
+                GameCanvas.currentDialog = new MsgDialog();
+                Zeus.onNativeUpdateKey();
+                check("CAPTURE-R03: Foreground MsgDialog suppresses keyboard capture",
+                        keyboardCount.getInt(null) == 1 && generation.getInt(null) == 1);
+
+                GameCanvas.currentDialog = null;
+                ChatTextField.isShow = true;
+                Zeus.onNativeUpdateKey();
+                check("CAPTURE-R03: Chat suppresses keyboard capture",
+                        keyboardCount.getInt(null) == 1 && generation.getInt(null) == 1);
+
+                ChatTextField.isShow = false;
+                GameCanvas.subDialog = new MsgDialog();
+                Zeus.onNativeUpdateKey();
+                check("CAPTURE-R03: Subdialog suppresses keyboard capture",
+                        keyboardCount.getInt(null) == 1 && generation.getInt(null) == 1);
+
+                check("CAPTURE-T06: Keyboard capture preserves native movement",
+                        GameScreen.player.posTransRoad == existing && Player.isLockKey);
+                checkEquals("CAPTURE-T06: Keyboard capture preserves controller state",
+                        oldState, Zeus.bossHunt.getState());
+            }
+            reset.invoke(null);
+            check("CAPTURE-T08: Observer reset clears both inputs",
+                    pointerCount.getInt(null) == 0 && keyboardCount.getInt(null) == 0
+                    && pointerReference.get(null) == null && generation.getInt(null) == 0);
         } catch (Throwable error) {
             check("Native input passive fixture: " + error.getMessage(), false);
         } finally {
+            // Restore every touched native fixture even if an assertion or callback fails.
+            if (keys != null && oldKeys != null && keys.length == oldKeys.length) {
+                System.arraycopy(oldKeys, 0, keys, 0, keys.length);
+            }
+            if (screenSnapshotReady) {
+                try {
+                    screenField.set(null, oldScreen);
+                } catch (Throwable error) {
+                    check("Native screen restore failed: " + error.getMessage(), false);
+                }
+            }
+            GameCanvas.currentDialog = oldDialog;
+            GameCanvas.subDialog = oldSubDialog;
+            GameCanvas.menu2 = oldMenu;
+            ChatTextField.isShow = oldChatVisible;
             if (oldPlayer != null) oldPlayer.posTransRoad = oldPath;
             GameScreen.player = oldPlayer;
             Player.isLockKey = oldLock;
-            GameCanvas.currentDialog = oldDialog;
-            GameCanvas.menu2 = oldMenu;
             if (captureSnapshotReady) {
                 try {
                     pointerCount.setInt(null, oldPointerCount);
                     keyboardCount.setInt(null, oldKeyboardCount);
                     pointerReference.set(null, oldPointerReference);
                     generation.setInt(null, oldGeneration);
-                } catch (Exception error) {
+                } catch (Throwable error) {
                     check("Native capture snapshot restoration failed: " + error.getMessage(), false);
                 }
             }
