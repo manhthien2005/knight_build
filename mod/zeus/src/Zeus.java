@@ -524,6 +524,9 @@ public final class Zeus {
     private static Player travelOwnerPlayer = null;
     private static int travelPointerBaseline = 0;
     private static int travelKeyboardBaseline = 0;
+    // Completed Travel ownership must be bound to its original scene/session.
+    private static int travelOwnerMap = -1;
+    private static int travelOwnerSession = -1;
 
     private static boolean bossOwnsCurrentPath() {
         return bossHuntHoldingPath && bossHuntOwnedPath != null
@@ -606,7 +609,19 @@ public final class Zeus {
     private static boolean travelOwnsCurrentPath() {
         return travelOwnedPath != null && GameScreen.player != null
                 && GameScreen.player == travelOwnerPlayer
-                && GameScreen.player.posTransRoad == travelOwnedPath;
+                && GameScreen.player.posTransRoad == travelOwnedPath
+                && GameCanvas.loadmap != null && GameCanvas.loadmap.idMap == travelOwnerMap
+                && nativePointerSessionGeneration == travelOwnerSession;
+    }
+
+    private static boolean travelCompletedOwnedPath() {
+        return travelOwnerKind == TRAVEL_OWNER_GENERIC && travelOwnedPath != null
+                && GameScreen.player != null && GameScreen.player == travelOwnerPlayer
+                && GameScreen.player.posTransRoad == null && Player.isLockKey
+                && GameCanvas.loadmap != null && GameCanvas.loadmap.idMap == travelOwnerMap
+                && nativePointerSessionGeneration == travelOwnerSession
+                && nativeKeyboardCaptureCount == travelKeyboardBaseline
+                && nativePointerCaptureCount == travelPointerBaseline;
     }
 
     private static void travelRememberPath(short[] path) {
@@ -616,6 +631,8 @@ public final class Zeus {
         travelOwnerKind = travelInTick ? TRAVEL_OWNER_GENERIC : TRAVEL_OWNER_SHARED;
         travelPointerBaseline = nativePointerCaptureCount;
         travelKeyboardBaseline = nativeKeyboardCaptureCount;
+        travelOwnerMap = GameCanvas.loadmap == null ? -1 : GameCanvas.loadmap.idMap;
+        travelOwnerSession = nativePointerSessionGeneration;
     }
 
     private static void travelReleaseMovement(boolean clearPath) {
@@ -623,6 +640,8 @@ public final class Zeus {
         boolean ownPath = travelOwnsCurrentPath();
         boolean completed = samePlayer && travelOwnedPath != null
                 && GameScreen.player.posTransRoad == null
+                && GameCanvas.loadmap != null && GameCanvas.loadmap.idMap == travelOwnerMap
+                && nativePointerSessionGeneration == travelOwnerSession
                 && nativePointerCaptureCount == travelPointerBaseline
                 && nativeKeyboardCaptureCount == travelKeyboardBaseline;
         if (clearPath && ownPath) GameScreen.player.posTransRoad = null;
@@ -630,6 +649,8 @@ public final class Zeus {
         travelOwnedPath = null;
         travelOwnerPlayer = null;
         travelOwnerKind = TRAVEL_OWNER_NONE;
+        travelOwnerMap = -1;
+        travelOwnerSession = -1;
     }
 
     private static boolean bossMaySeekSchedule() {
@@ -692,6 +713,25 @@ public final class Zeus {
     private static int bossNpcPathAttempts = 0;
     private static long bossNpcPathAttemptAt = 0L;
     private static int bossNpcPathMap = -1;
+    // Recorded Menu2 protocol idNPC; never confuse with MainObject.ID.
+    private static final int BOSS_RECORDED_MENU_NPC = -22;
+    private static final long BOSS_ACQUISITION_WINDOW_MS = 12000L;
+    private static final int BOSS_ACQUIRE_NONE = 0;
+    private static final int BOSS_ACQUIRE_ENTRY = 1;
+    private static final int BOSS_ACQUIRE_ROSTER = 2;
+    private static final int BOSS_ACQUIRE_SCHEDULE = 3;
+    private static int bossAcquireStage = BOSS_ACQUIRE_NONE;
+    private static int bossAcquireEpoch = 0;
+    private static Player bossAcquirePlayer = null;
+    private static MainObject bossAcquireNpc = null;
+    private static int bossAcquireNpcObjectId = Integer.MIN_VALUE;
+    private static int bossAcquireMap = -1;
+    private static int bossAcquireSession = -1;
+    private static int bossAcquireKeyboardBaseline = 0;
+    private static int bossAcquirePointerBaseline = 0;
+    private static long bossAcquireStarted = 0L;
+    private static int bossAcquireMenuNpc = Integer.MIN_VALUE;
+    private static int bossAcquireLastMenuId = Integer.MIN_VALUE;
     private static String lastAutoBossMenuReason = null;
     private static long lastAutoBossMenuStepTime = 0L;
     private static int bossDialogBridgeTries = 0;
@@ -708,14 +748,16 @@ public final class Zeus {
         public final String targetCaption;
         public final String stage;
         public final long timestamp;
+        public final int acquisitionEpoch;
 
-        public PendingBossMenuSelection(int npcId, int menuId, int targetRow, String targetCaption, String stage, long timestamp) {
+        public PendingBossMenuSelection(int npcId, int menuId, int targetRow, String targetCaption, String stage, long timestamp, int acquisitionEpoch) {
             this.npcId = npcId;
             this.menuId = menuId;
             this.targetRow = targetRow;
             this.targetCaption = targetCaption;
             this.stage = stage;
             this.timestamp = timestamp;
+            this.acquisitionEpoch = acquisitionEpoch;
         }
     }
 
@@ -784,8 +826,67 @@ public final class Zeus {
         }
     }
 
-    public static void resetBossMenuSelectionState() {
+    private static void clearBossMenuAcquisition() {
         pendingBossMenuSelection = null;
+        bossAcquireStage = BOSS_ACQUIRE_NONE;
+        bossAcquirePlayer = null;
+        bossAcquireNpc = null;
+        bossAcquireNpcObjectId = Integer.MIN_VALUE;
+        bossAcquireMap = -1;
+        bossAcquireSession = -1;
+        bossAcquireStarted = 0L;
+        bossAcquireMenuNpc = Integer.MIN_VALUE;
+        bossAcquireLastMenuId = Integer.MIN_VALUE;
+    }
+
+    /** Arm only after Boss Hunt itself successfully invokes native Doubar GiaoTiep(). */
+    private static void beginBossMenuAcquisition(MainObject npc, long now) {
+        clearBossMenuAcquisition();
+        if (npc == null || !isBossScheduleNpc(npc.name)
+                || GameCanvas.loadmap == null
+                || GameCanvas.loadmap.idMap != BOSS_SCHEDULE_SOURCE_MAP
+                || GameScreen.player == null || !dungeonNpcEligible(npc)
+                || bossHunt == null || !bossHunt.isEnabled()
+                || bossHunt.getState() != BossHuntState.NEED_SCHEDULE
+                || isHigherPriorityActive() || bossManualPaused
+                || GameCanvas.currentDialog != null
+                || (GameCanvas.menu2 != null && GameCanvas.menu2.isShowMenu)) return;
+        if (bossAcquireEpoch < Integer.MAX_VALUE) ++bossAcquireEpoch;
+        bossAcquireStage = BOSS_ACQUIRE_ENTRY;
+        bossAcquirePlayer = GameScreen.player;
+        bossAcquireNpc = npc;
+        bossAcquireNpcObjectId = npc.ID;
+        bossAcquireMap = GameCanvas.loadmap.idMap;
+        bossAcquireSession = nativePointerSessionGeneration;
+        bossAcquireKeyboardBaseline = nativeKeyboardCaptureCount;
+        bossAcquirePointerBaseline = nativePointerCaptureCount;
+        bossAcquireStarted = now;
+    }
+
+    private static boolean validBossMenuAcquisition(long now) {
+        boolean valid = bossAcquireStage != BOSS_ACQUIRE_NONE
+                && now >= bossAcquireStarted
+                && now - bossAcquireStarted <= BOSS_ACQUISITION_WINDOW_MS
+                && bossHunt != null && bossHunt.isEnabled()
+                && bossHunt.getState() == BossHuntState.NEED_SCHEDULE
+                && !bossManualPaused && !isHigherPriorityActive()
+                && atkMode == 0 && (navTarget < 0 || navDone)
+                && GameCanvas.loadmap != null && GameCanvas.loadmap.idMap == bossAcquireMap
+                && bossAcquireMap == BOSS_SCHEDULE_SOURCE_MAP
+                && GameScreen.player != null && GameScreen.player == bossAcquirePlayer
+                && bossAcquireNpc != null && bossAcquireNpc.ID == bossAcquireNpcObjectId
+                && findBossScheduleNpc() == bossAcquireNpc
+                && nativePointerSessionGeneration == bossAcquireSession
+                && nativeKeyboardCaptureCount == bossAcquireKeyboardBaseline
+                && nativePointerCaptureCount == bossAcquirePointerBaseline
+                && GameCanvas.currentDialog == null
+                && !bossDirectionHeld();
+        if (!valid) clearBossMenuAcquisition();
+        return valid;
+    }
+
+    public static void resetBossMenuSelectionState() {
+        clearBossMenuAcquisition();
         autoBossMenuStepCount = 0;
         lastAutoBossMenuReason = null;
         lastAutoBossMenuStepTime = 0L;
@@ -877,6 +978,17 @@ public final class Zeus {
         if (pendingBossMenuSelection == null) {
             return false;
         }
+        if (!validBossMenuAcquisition(now)
+                || pendingBossMenuSelection.acquisitionEpoch != bossAcquireEpoch
+                || pendingBossMenuSelection.npcId != bossAcquireMenuNpc
+                || (bossAcquireStage == BOSS_ACQUIRE_ENTRY
+                    && !"MATCH_BOSS_ENTRY".equals(pendingBossMenuSelection.stage))
+                || (bossAcquireStage == BOSS_ACQUIRE_ROSTER
+                    && !"MATCH_BOSS_ROSTER".equals(pendingBossMenuSelection.stage))
+                || bossAcquireStage == BOSS_ACQUIRE_SCHEDULE) {
+            clearBossMenuAcquisition();
+            return false;
+        }
 
         // Native UI priority: Menu2 cannot be dispatched if a foreground dialog is active
         if (GameCanvas.currentDialog != null) {
@@ -886,7 +998,7 @@ public final class Zeus {
 
         // 1. Timeout / Stale intent check (3000ms max)
         if (now - pending.timestamp > 3000L || now < pending.timestamp) {
-            pendingBossMenuSelection = null;
+            clearBossMenuAcquisition();
             return false;
         }
 
@@ -957,6 +1069,11 @@ public final class Zeus {
         try {
             menu.menuSelectedItem = pending.targetRow;
             nativeCmd.perform();
+            // Only the authentic native dispatch advances the acquisition stage.
+            bossAcquireLastMenuId = pending.menuId;
+            bossAcquireStage = bossAcquireStage == BOSS_ACQUIRE_ENTRY
+                    ? BOSS_ACQUIRE_ROSTER : BOSS_ACQUIRE_SCHEDULE;
+            bossAcquireStarted = now;
             return true;
         } catch (Throwable t) {
             return false;
@@ -1123,7 +1240,7 @@ public final class Zeus {
             bossHuntHoldingFocus = false;
             bossHuntOwnedFocus = null;
         }
-        pendingBossMenuSelection = null;
+        clearBossMenuAcquisition();
         bossDialogBridgeTries = 0;
         lastBossDialogBridgeTime = 0L;
     }
@@ -4688,6 +4805,7 @@ public final class Zeus {
      */
     public static void sessionReset() {
         resetNativeInputCapture();
+        clearBossMenuAcquisition();
         readySettleTicks = 0;
         dialogLastFingerprint = "";
         dialogStableTicks = 0;
@@ -5637,6 +5755,14 @@ public final class Zeus {
             // Observe real progress BEFORE returning for an active movement lock.
             // Never count a foreign manual/Enhancement/Dungeon path as our stall.
             if (travelState == TV_WALK) {
+                // Native walking can finish with a null path and our lock still set.
+                // Release only exact generic ownership with unchanged native inputs.
+                if (travelCompletedOwnedPath()) {
+                    travelReleaseMovement(false);
+                    travelStallTicks = 0;
+                    travelLastX = Integer.MIN_VALUE;
+                    travelLastY = Integer.MIN_VALUE;
+                }
                 boolean moving = !canMove();
                 boolean ownedRoute = (travelOwnerKind == TRAVEL_OWNER_GENERIC
                         && travelOwnsCurrentPath()) || bossOwnsCurrentPath();
@@ -5661,11 +5787,19 @@ public final class Zeus {
             // no stone and when its budget ran out, so the fallback needs no separate branch.
             boolean scheduleWalk = bossMaySeekSchedule()
                     && want == BOSS_SCHEDULE_SOURCE_MAP;
+            // Install target-map Travel movement as Boss-owned so its own lock
+            // is not mistaken for manual input in the subsequent bossHuntTick.
+            boolean bossTargetWalk = bossHunt.isEnabled() && !bossManualPaused
+                    && bossHunt.getState() == BossHuntState.TRAVEL
+                    && bossHunt.getActiveEntry() != null
+                    && want == bossHunt.getBossHuntTargetMapId()
+                    && !isHigherPriorityActive() && atkMode == 0
+                    && (navTarget < 0 || navDone) && !bossDirectionHeld();
             if (!scheduleWalk && travelStone(here)) {
                 return;
             }
             travelInTick = true;
-            bossScheduleTravelMode = scheduleWalk;
+            bossScheduleTravelMode = scheduleWalk || bossTargetWalk;
             try {
                 travelWalk(here);
             } finally {
@@ -11507,6 +11641,10 @@ public final class Zeus {
                     lastBossNpcInteractAttempt = 0L;
                     bossDialogBridgeTries = 0;
                     lastBossDialogBridgeTime = 0L;
+                    // Passive ingestion and authority to auto-dispatch are separate.
+                    if (validBossMenuAcquisition(now)
+                            && bossAcquireStage == BOSS_ACQUIRE_SCHEDULE
+                            && idNPC == bossAcquireMenuNpc) clearBossMenuAcquisition();
                 } catch (Throwable ignored) {
                 }
             }
@@ -11514,7 +11652,13 @@ public final class Zeus {
             // Slice B / BHX-04 / BHX-09: Bounded operator-enabled NPC schedule stepping
             if (origin != null && origin.equals("SERVER") && bossHunt != null && bossHunt.isEnabled()
                     && bossHunt.getState() == BossHuntState.NEED_SCHEDULE && items != null
-                    && !isHigherPriorityActive()) {
+                    && validBossMenuAcquisition(now)
+                    && idNPC == BOSS_RECORDED_MENU_NPC
+                    && (bossAcquireMenuNpc == Integer.MIN_VALUE || bossAcquireMenuNpc == idNPC)
+                    && ((bossAcquireStage == BOSS_ACQUIRE_ENTRY && "MATCH_BOSS_ENTRY".equals(reason))
+                        || (bossAcquireStage == BOSS_ACQUIRE_ROSTER && "MATCH_BOSS_ROSTER".equals(reason)
+                            && idMenu != bossAcquireLastMenuId))) {
+                bossAcquireMenuNpc = idNPC;
                 boolean isNewStage = (lastAutoBossMenuReason == null || !lastAutoBossMenuReason.equals(reason));
                 boolean debounceOk = isNewStage || (now - lastAutoBossMenuStepTime >= 1000L);
                 if (debounceOk && autoBossMenuStepCount < 5) {
@@ -11526,7 +11670,7 @@ public final class Zeus {
                                 if (c != null) {
                                     String norm = c.toLowerCase(java.util.Locale.ENGLISH).trim();
                                     if (norm.indexOf("thong tin boss") >= 0 || (norm.indexOf("th") >= 0 && norm.indexOf("ng tin boss") >= 0)) {
-                                        pendingBossMenuSelection = new PendingBossMenuSelection(idNPC, idMenu, i, c, reason, now);
+                                        pendingBossMenuSelection = new PendingBossMenuSelection(idNPC, idMenu, i, c, reason, now, bossAcquireEpoch);
                                         lastAutoBossMenuReason = reason;
                                         break;
                                     }
@@ -11548,7 +11692,7 @@ public final class Zeus {
                                 if (itemObj instanceof iCommand) {
                                     String c = ((iCommand) itemObj).caption;
                                     if (c != null && targetBossName != null && c.trim().equalsIgnoreCase(targetBossName.trim())) {
-                                        pendingBossMenuSelection = new PendingBossMenuSelection(idNPC, idMenu, i, c, reason, now);
+                                        pendingBossMenuSelection = new PendingBossMenuSelection(idNPC, idMenu, i, c, reason, now, bossAcquireEpoch);
                                         lastAutoBossMenuReason = reason;
                                         break;
                                     }
@@ -11647,11 +11791,13 @@ public final class Zeus {
         long now = mSystem.currentTimeMillis();
         bossHuntCheckConfig(now);
         if (!bossHunt.isEnabled()) {
+            clearBossMenuAcquisition();
             if (bossHuntHoldingLock || bossHuntHoldingPath || bossHuntHoldingAutoFire
                     || bossHuntHoldingFocus) releaseBossHuntControls();
             return;
         }
         if (bossManualPaused) {
+            clearBossMenuAcquisition();
             bossHunt.setState(BossHuntState.PAUSED);
             releaseBossHuntControls();
             recordBossHuntDiagReason("BOSS_MANUAL_PAUSE_LATCHED");
@@ -11673,6 +11819,7 @@ public final class Zeus {
 
             bossHunt.tick(now, curMap, curZone, pHp, pDead, manualMovement, higherPriority);
 
+            if (pDead || higherPriority || manualMovement) clearBossMenuAcquisition();
             if (pDead || higherPriority || manualMovement
                     || (!bossHunt.controlsMovement()
                         && bossHunt.getState() != BossHuntState.NEED_SCHEDULE)) {
@@ -11747,7 +11894,11 @@ public final class Zeus {
                                 if (now - lastBossNpcInteractAttempt >= 5000L && bossNpcInteractTries < 3) {
                                     lastBossNpcInteractAttempt = now;
                                     bossNpcInteractTries++;
-                                    nativeNpcInteract(scheduleNpc);
+                                    if (nativeNpcInteract(scheduleNpc)) {
+                                        beginBossMenuAcquisition(scheduleNpc, now);
+                                    } else {
+                                        clearBossMenuAcquisition();
+                                    }
                                 }
                             } else if (canMove() && !bossDirectionHeld()
                                     && bossNpcPathAttempts < 6

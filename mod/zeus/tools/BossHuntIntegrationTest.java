@@ -58,6 +58,7 @@ public class BossHuntIntegrationTest {
         // Functional ownership/route checks without running unrelated tests.
         if (args != null && args.length == 1 && "--boss-f01-only".equals(args[0])) {
             testBossRouteOwnershipRegression();
+            testServerMenuNativeSelectionDispatch();
             System.out.println("Boss F01 focused checks: " + (total - failures) + "/" + total);
             if (failures != 0) System.exit(1);
             return;
@@ -1101,9 +1102,10 @@ public class BossHuntIntegrationTest {
             "bossOwnerKeyboardBaseline", "bossOwnerPointerBaseline", "bossManualPaused",
             "bossScheduleTravelMode", "travelInTick", "travelOwnedPath",
             "travelOwnerPlayer", "travelOwnerKind", "travelPointerBaseline",
-            "travelKeyboardBaseline",
+            "travelKeyboardBaseline", "travelOwnerMap", "travelOwnerSession",
             "travelState", "travelWait", "travelMapSeen", "travelHops",
             "travelStallTicks", "travelLastX", "travelLastY", "travelWhy",
+            "travelStoneTried",
             "readySettleTicks", "stableMapId", "mapStableTicks",
             "atkMode", "navTarget", "navDone",
             "enhNavigating", "enhOwnsForgeScreen", "enhOwnsResultDialog",
@@ -1416,6 +1418,64 @@ public class BossHuntIntegrationTest {
                     && readyFields[0].getInt(null) == tvWalk.getInt(null)
                     && GameScreen.player.posTransRoad == bossPath && Player.isLockKey);
 
+            // R3: the client's completed generic walk cleared the array, not its lock.
+            // Exercise travel() itself; no mock completion helper.
+            short[] completed = new short[] { 41, 42 };
+            GameScreen.player.posTransRoad = completed;
+            Player.isLockKey = true;
+            java.lang.reflect.Field stoneRetries = Zeus.class.getDeclaredField("travelStoneTried");
+            stoneRetries.setAccessible(true);
+            stoneRetries.setInt(null, 3);
+            java.lang.reflect.Field travelTickOwner = Zeus.class.getDeclaredField("travelInTick");
+            travelTickOwner.setAccessible(true);
+            travelTickOwner.setBoolean(null, true);
+            travelOwn.invoke(null, new Object[] { completed });
+            travelTickOwner.setBoolean(null, false);
+            readyFields[0].setInt(null, tvWalk.getInt(null));
+            readyFields[1].setInt(null, 0);
+            GameScreen.player.posTransRoad = null;
+            mVector savedGates = LoadMap.vecPointChange;
+            LoadMap.vecPointChange = null; // avoid a new route before checking cleanup
+            try {
+                travelTick.invoke(null);
+                check("R3-F02: completed Generic Travel releases owned null-path lock",
+                        !Player.isLockKey && GameScreen.player.posTransRoad == null);
+            } finally {
+                LoadMap.vecPointChange = savedGates;
+            }
+
+            // A stale session must not grant completed-lock ownership.
+            GameScreen.player.posTransRoad = completed;
+            Player.isLockKey = true;
+            travelTickOwner.setBoolean(null, true);
+            travelOwn.invoke(null, new Object[] { completed });
+            travelTickOwner.setBoolean(null, false);
+            GameScreen.player.posTransRoad = null;
+            java.lang.reflect.Field nativeSession = Zeus.class.getDeclaredField("nativePointerSessionGeneration");
+            nativeSession.setAccessible(true);
+            int oldSession = nativeSession.getInt(null);
+            nativeSession.setInt(null, oldSession + 1);
+            readyFields[0].setInt(null, tvWalk.getInt(null));
+            travelTick.invoke(null);
+            check("R3-F02: stale session retains unproven lock", Player.isLockKey);
+            nativeSession.setInt(null, oldSession);
+            travelRelease.invoke(null, new Object[] { Boolean.FALSE });
+            Player.isLockKey = false;
+
+            // Intervening native movement input invalidates completed ownership.
+            GameScreen.player.posTransRoad = completed;
+            Player.isLockKey = true;
+            travelTickOwner.setBoolean(null, true);
+            travelOwn.invoke(null, new Object[] { completed });
+            travelTickOwner.setBoolean(null, false);
+            GameScreen.player.posTransRoad = null;
+            Zeus.onNativePointerMovement(new short[] { 5, 6 });
+            readyFields[0].setInt(null, tvWalk.getInt(null));
+            travelTick.invoke(null);
+            check("R3-F02: intervening pointer input cannot release lock", Player.isLockKey);
+            travelRelease.invoke(null, new Object[] { Boolean.FALSE });
+            Player.isLockKey = false;
+
             // Foreign locked path must never be timed out by our walker.
             release.invoke(null, new Object[] { Boolean.FALSE });
             GameScreen.player.posTransRoad = foreign;
@@ -1429,6 +1489,48 @@ public class BossHuntIntegrationTest {
                     readyFields[0].getInt(null) == tvWalk.getInt(null)
                     && readyFields[1].getInt(null) == 125
                     && GameScreen.player.posTransRoad == foreign && Player.isLockKey);
+
+            // R3-F01: exercise actual travel() -> bossHuntTick ordering with
+            // a target-map schedule and an attributable path. The pathfinder
+            // itself is not modeled by this fixture (requires native map data).
+            java.lang.reflect.Field resolverField = BossHuntController.class.getDeclaredField("mapResolver");
+            resolverField.setAccessible(true);
+            Object savedResolver = resolverField.get(Zeus.bossHunt);
+            java.lang.reflect.Field targetIdField = BossHuntController.class.getDeclaredField("targetMapId");
+            targetIdField.setAccessible(true);
+            int savedTargetId = targetIdField.getInt(Zeus.bossHunt);
+            BossHuntScheduler.ScheduleEntry formerEntry = Zeus.bossHunt.getActiveEntry();
+            BossHuntState formerState = Zeus.bossHunt.getState();
+            try {
+                Zeus.bossHunt.setMapResolver(new BossHuntController.MapResolver() {
+                    public int resolveMapId(String mapAlias) { return 2; }
+                });
+                Zeus.bossHunt.setActiveEntry(new BossHuntScheduler.ScheduleEntry(
+                        1, 1, "target", "R3 target fixture", 0L,
+                        BossScheduleParser.Status.SPAWNED_OR_PAST));
+                Zeus.bossHunt.setState(BossHuntState.TRAVEL);
+                GameScreen.player.posTransRoad = bossPath;
+                Player.isLockKey = true;
+                own.invoke(null, new Object[] { bossPath });
+                readyFields[0].setInt(null, tvWalk.getInt(null));
+                readyFields[1].setInt(null, 0);
+                readyFields[4].setInt(null, GameScreen.player.x);
+                readyFields[5].setInt(null, GameScreen.player.y);
+                checkEquals("R3-F01: scheduled target overrides ordinary destination",
+                        Integer.valueOf(2), goal.invoke(null));
+                travelTick.invoke(null);
+                Zeus.bossHuntTick();
+                check("R3-F01: internal Boss route not mistaken for manual input",
+                        Zeus.bossHunt.getState() == BossHuntState.TRAVEL
+                        && GameScreen.player.posTransRoad == bossPath
+                        && Player.isLockKey);
+                release.invoke(null, new Object[] { Boolean.TRUE });
+            } finally {
+                resolverField.set(Zeus.bossHunt, savedResolver);
+                targetIdField.setInt(Zeus.bossHunt, savedTargetId);
+                Zeus.bossHunt.setActiveEntry(formerEntry);
+                Zeus.bossHunt.setState(formerState);
+            }
         } catch (Throwable error) {
             check("F01 focused integration fixture failed: " + error.getMessage(), false);
         } finally {
@@ -1734,7 +1836,7 @@ public class BossHuntIntegrationTest {
         rawEntryItems.addElement(new InterfaceComponents.iCommand("\u0110\u00f3ng", (InterfaceComponents.IAction) null));
         long now = 5000000L;
         Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now);
-        check("Scenario C: Pending selection staged", Zeus.pendingBossMenuSelection != null);
+        check("Scenario C: Unowned entry cannot stage selection", Zeus.pendingBossMenuSelection == null);
 
         // Setup native Menu2
         if (GameCanvas.menu2 == null) {
@@ -1754,10 +1856,10 @@ public class BossHuntIntegrationTest {
 
         boolean dispatchBlocked = Zeus.dispatchPendingBossMenuSelection(now + 1500L);
         check("Scenario C: Menu dispatch blocked while foreground dialog is active", !dispatchBlocked);
-        check("Scenario C: Pending selection retained (not prematurely executed behind dialog)", Zeus.pendingBossMenuSelection != null);
+        check("Scenario C: No unowned selection dispatched behind dialog", Zeus.pendingBossMenuSelection == null);
 
         Zeus.bossHuntTick();
-        check("F01-SAFE-02: Foreground tick retains pending background Menu2", Zeus.pendingBossMenuSelection != null);
+        check("F01-SAFE-02: Foreground tick never arms unowned background Menu2", Zeus.pendingBossMenuSelection == null);
         checkEquals("F01-SAFE-02: No foreground buy on pending background menu", 0, buyCalls[0]);
 
         // Cleanup pending selection and menu2
@@ -1933,8 +2035,55 @@ public class BossHuntIntegrationTest {
         }
     }
 
+    private static void armBossMenuFixture(MainObject npc, long now) {
+        try {
+            java.lang.reflect.Method arm = Zeus.class.getDeclaredMethod(
+                    "beginBossMenuAcquisition", new Class[] { MainObject.class, long.class });
+            arm.setAccessible(true);
+            arm.invoke(null, new Object[] { npc, Long.valueOf(now) });
+        } catch (Throwable t) {
+            throw new IllegalStateException("Cannot arm Boss-owned Doubar fixture", t);
+        }
+    }
+
     private static void testServerMenuNativeSelectionDispatch() {
         System.out.println("\n--- testServerMenuNativeSelectionDispatch ---");
+
+        // Isolated map 33/NPC context. The private fixture armer simulates the
+        // post-GiaoTiep ownership boundary; it does NOT prove a live NPC callback.
+        final LoadMap savedMap = GameCanvas.loadmap;
+        final int savedMapId = savedMap == null ? -1 : savedMap.idMap;
+        final Player savedPlayer = GameScreen.player;
+        final mVector savedPlayers = GameScreen.Vecplayers;
+        final MainDialog savedDialog = GameCanvas.currentDialog;
+        final Menu2 savedMenu = GameCanvas.menu2;
+        final boolean savedLock = Player.isLockKey;
+        final String savedConfigPath = Zeus.bossHuntConfigPath;
+        final boolean savedEnabled = Zeus.bossHunt.isEnabled();
+        final BossHuntState savedBossState = Zeus.bossHunt.getState();
+        if (GameCanvas.loadmap == null) {
+            try {
+                GameCanvas.loadmap = allocateBossScheduleTestMap();
+            } catch (Exception error) {
+                throw new IllegalStateException("Cannot allocate Boss Menu2 test map", error);
+            }
+        }
+        GameCanvas.loadmap.idMap = 33;
+        GameScreen.player = new Player(100, (byte) 0, "boss_menu_fixture", 0, 0);
+        GameScreen.player.x = 100;
+        GameScreen.player.y = 100;
+        GameScreen.player.hp = 1000;
+        Player.isLockKey = false;
+        GameCanvas.currentDialog = null;
+        GameCanvas.menu2 = null;
+        GameScreen.Vecplayers = new mVector();
+        MainObject doubar = new MainObject();
+        doubar.name = "Doubar";
+        doubar.typeObject = 2;
+        doubar.x = 110;
+        doubar.y = 100;
+        GameScreen.Vecplayers.addElement(doubar);
+        Zeus.bossHuntConfigPath = null;
 
         // Setup offline Session_ME packet queue (no network socket)
         CLib.Session_ME session = CLib.Session_ME.gI();
@@ -1987,12 +2136,31 @@ public class BossHuntIntegrationTest {
 
         long now = 3000000L;
 
+        // Unowned/operator-opened menus must never stage an auto action.
+        mVector unownedItems = new mVector();
+        unownedItems.addElement(new InterfaceComponents.iCommand("Thông tin boss", (InterfaceComponents.IAction) null));
+        Zeus.observeBossMenu("SERVER", unownedItems, 0, -22, "MENU", now - 100L);
+        check("R3-F03: recognized unowned menu is passive only", Zeus.pendingBossMenuSelection == null);
+
         // 3. Incoming Server Entry Menu Hook (Stage intent without raw dispatch)
         mVector rawEntryItems = new mVector();
         rawEntryItems.addElement(new InterfaceComponents.iCommand("Nhiệm vụ", (InterfaceComponents.IAction) null));
         rawEntryItems.addElement(new InterfaceComponents.iCommand("Thông tin boss", (InterfaceComponents.IAction) null));
         rawEntryItems.addElement(new InterfaceComponents.iCommand("Đóng", (InterfaceComponents.IAction) null));
 
+        // Wrong map, mismatched protocol NPC and stale contexts are fail-closed.
+        armBossMenuFixture(doubar, now);
+        GameCanvas.loadmap.idMap = 1;
+        Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 50L);
+        check("R3-F03: changed map cannot stage", Zeus.pendingBossMenuSelection == null);
+        GameCanvas.loadmap.idMap = 33;
+        armBossMenuFixture(doubar, now);
+        Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -23, "MENU", now + 100L);
+        check("R3-F03: foreign idNPC cannot stage", Zeus.pendingBossMenuSelection == null);
+        armBossMenuFixture(doubar, now);
+        Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 12001L);
+        check("R3-F03: expired interaction cannot stage", Zeus.pendingBossMenuSelection == null);
+        armBossMenuFixture(doubar, now);
         Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now);
 
         check("Pending selection staged on MATCH_BOSS_ENTRY", Zeus.pendingBossMenuSelection != null);
@@ -2096,6 +2264,8 @@ public class BossHuntIntegrationTest {
         }
 
         // 8. Negative test: Mismatched / Stale IdMenu fails closed
+        GameCanvas.menu2 = null;
+        armBossMenuFixture(doubar, now + 5000L);
         Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 5000L);
         check("Entry staged for mismatch test", Zeus.pendingBossMenuSelection != null);
         GameCanvas.menu2 = new Menu2();
@@ -2112,6 +2282,8 @@ public class BossHuntIntegrationTest {
         }
 
         // 9. Negative test: Mismatched row caption fails closed
+        GameCanvas.menu2 = null;
+        armBossMenuFixture(doubar, now + 7000L);
         Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 7000L);
         GameCanvas.menu2 = new Menu2();
         Zeus.setMenu2IdMenu(GameCanvas.menu2, 0);
@@ -2128,6 +2300,8 @@ public class BossHuntIntegrationTest {
         check("Pending selection cancelled on caption mismatch", Zeus.pendingBossMenuSelection == null);
 
         // 10. Negative test: Timeout after 3000ms fails closed
+        GameCanvas.menu2 = null;
+        armBossMenuFixture(doubar, now + 9000L);
         Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 9000L);
         check("Staged before timeout", Zeus.pendingBossMenuSelection != null);
         boolean timeoutDispatch = Zeus.dispatchPendingBossMenuSelection(now + 9000L + 3500L);
@@ -2135,6 +2309,8 @@ public class BossHuntIntegrationTest {
         check("Pending selection cleared on timeout", Zeus.pendingBossMenuSelection == null);
 
         // 11. Negative test: Feature disabled fails closed
+        GameCanvas.menu2 = null;
+        armBossMenuFixture(doubar, now + 13000L);
         Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 13000L);
         Zeus.bossHunt.getConfig().setEnabled(false);
         boolean disabledDispatch = Zeus.dispatchPendingBossMenuSelection(now + 14500L);
@@ -2148,7 +2324,7 @@ public class BossHuntIntegrationTest {
         Zeus.observeBossMenu("SERVER", scheduleItems, 100, -22, "MENU", now + 15000L);
         check("Schedule menu 100 does not stage pending selection (read-only)", Zeus.pendingBossMenuSelection == null);
 
-        // Cleanup
+        // Cleanup: preserve original scene and configuration for the following tests.
         GameCanvas.menu2 = null;
         for (int b = 0; b < BossCatalog.BOSS_COUNT; b++) {
             Zeus.bossHunt.getConfig().setZoneMask(b, 31);
@@ -2159,5 +2335,15 @@ public class BossHuntIntegrationTest {
         if (queue != null) {
             queue.removeAllElements();
         }
+        GameCanvas.loadmap = savedMap;
+        if (savedMap != null) savedMap.idMap = savedMapId;
+        GameScreen.player = savedPlayer;
+        GameScreen.Vecplayers = savedPlayers;
+        GameCanvas.currentDialog = savedDialog;
+        GameCanvas.menu2 = savedMenu;
+        Player.isLockKey = savedLock;
+        Zeus.bossHuntConfigPath = savedConfigPath;
+        Zeus.bossHunt.getConfig().setEnabled(savedEnabled);
+        Zeus.bossHunt.setState(savedBossState);
     }
 }
