@@ -1098,7 +1098,7 @@ public class BossHuntIntegrationTest {
 
         final String[] names = {
             "bossHuntHoldingLock", "bossHuntHoldingPath", "bossHuntOwnedPath",
-            "bossOwnerPlayer", "bossOwnerMap", "bossOwnerSession", "bossOwnerEpoch",
+            "bossOwnerPlayer", "bossOwnerMap", "bossOwnerSession", "bossOwnerGoal", "bossOwnerEpoch",
             "bossOwnerKeyboardBaseline", "bossOwnerPointerBaseline", "bossManualPaused",
             "bossScheduleTravelMode", "travelInTick", "travelOwnedPath",
             "travelOwnerPlayer", "travelOwnerKind", "travelPointerBaseline",
@@ -1524,6 +1524,12 @@ public class BossHuntIntegrationTest {
                         Zeus.bossHunt.getState() == BossHuntState.TRAVEL
                         && GameScreen.player.posTransRoad == bossPath
                         && Player.isLockKey);
+                // Changing the authorized destination retires the stale Boss route.
+                targetIdField.setInt(Zeus.bossHunt, 3);
+                input.invoke(null);
+                check("R3-F01: destination change releases only old Boss-owned path",
+                        GameScreen.player.posTransRoad == null
+                        && !Player.isLockKey && !pause.getBoolean(null));
                 release.invoke(null, new Object[] { Boolean.TRUE });
             } finally {
                 resolverField.set(Zeus.bossHunt, savedResolver);

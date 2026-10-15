@@ -510,6 +510,7 @@ public final class Zeus {
     private static Player bossOwnerPlayer = null;
     private static int bossOwnerMap = -1;
     private static int bossOwnerSession = 0;
+    private static int bossOwnerGoal = -1;
     private static int bossOwnerEpoch = 0;
     private static int bossOwnerKeyboardBaseline = 0;
     private static int bossOwnerPointerBaseline = 0;
@@ -533,7 +534,8 @@ public final class Zeus {
                 && GameScreen.player != null && GameScreen.player == bossOwnerPlayer
                 && GameScreen.player.posTransRoad == bossHuntOwnedPath
                 && GameCanvas.loadmap != null && GameCanvas.loadmap.idMap == bossOwnerMap
-                && bossOwnerSession == nativePointerSessionGeneration;
+                && bossOwnerSession == nativePointerSessionGeneration
+                && bossOwnerGoal == goal();
     }
 
     private static boolean bossDirectionHeld() {
@@ -555,6 +557,7 @@ public final class Zeus {
         bossOwnerPlayer = GameScreen.player;
         bossOwnerMap = GameCanvas.loadmap.idMap;
         bossOwnerSession = nativePointerSessionGeneration;
+        bossOwnerGoal = goal();
         bossHuntOwnedPath = path;
         bossHuntHoldingPath = true;
         bossHuntHoldingLock = true;
@@ -604,6 +607,7 @@ public final class Zeus {
         bossOwnerPlayer = null;
         bossOwnerMap = -1;
         bossOwnerSession = -1;
+        bossOwnerGoal = -1;
     }
 
     private static boolean travelOwnsCurrentPath() {
