@@ -175,7 +175,8 @@ public class ReconnectTravelTest {
         System.out.println("--- Test 1: same_map_reconnect_reset ---");
         setupWorldState(1);
         Player.isLockKey = true;
-        GameScreen.player.posTransRoad = new short[] { 10, 20 };
+        short[] foreignReconnectPath = new short[] { 10, 20 };
+        GameScreen.player.posTransRoad = foreignReconnectPath;
         set("travelMapSeen", Integer.valueOf(1));
         set("travelHops", Integer.valueOf(5));
 
@@ -190,8 +191,23 @@ public class ReconnectTravelTest {
         GameCanvas.currentScreen = GameCanvas.game;
         call("sessionTick");
 
-        check("movement lock Player.isLockKey cleared", !Player.isLockKey);
-        check("path buffer GameScreen.player.posTransRoad cleared", GameScreen.player.posTransRoad == null);
+        check("foreign lock preserved when reset cannot prove owner", Player.isLockKey);
+        check("foreign path reference preserved on reset",
+                GameScreen.player.posTransRoad == foreignReconnectPath);
+        // Release the test-created foreign path explicitly before later fixtures.
+        GameScreen.player.posTransRoad = null;
+        Player.isLockKey = false;
+        // Opposite case: session reset MUST clean an exact route created by Zeus.
+        short[] ownedReconnectPath = new short[] { 30, 40 };
+        GameScreen.player.posTransRoad = ownedReconnectPath;
+        Player.isLockKey = true;
+        java.lang.reflect.Method ownRoute = Zeus.class.getDeclaredMethod(
+                "travelRememberPath", new Class[] { short[].class });
+        ownRoute.setAccessible(true);
+        ownRoute.invoke(null, new Object[] { ownedReconnectPath });
+        call("sessionReset");
+        check("owned travel path cleared on session reset",
+                GameScreen.player.posTransRoad == null && !Player.isLockKey);
         check("travelMapSeen reset to sentinel", ((Integer) get("travelMapSeen")).intValue() == Integer.MIN_VALUE);
         check("travelHops reset on new session", ((Integer) get("travelHops")).intValue() == 0);
 

@@ -1,5 +1,6 @@
 import Main.GameCanvas;
 import GameScreen.GameScreen;
+import GameScreen.MainScreen;
 import GameObjects.MainObject;
 import GameObjects.Player;
 import InterfaceComponents.MsgDialog;
@@ -53,6 +54,13 @@ public class BossHuntIntegrationTest {
     }
 
     public static void main(String[] args) {
+        // Functional ownership/route checks without running unrelated tests.
+        if (args != null && args.length == 1 && "--boss-f01-only".equals(args[0])) {
+            testBossRouteOwnershipRegression();
+            System.out.println("Boss F01 focused checks: " + (total - failures) + "/" + total);
+            if (failures != 0) System.exit(1);
+            return;
+        }
         // Scratch-only focused entry point; never run unrelated integration tests.
         if (args != null && args.length == 1 && "--prewrite-only".equals(args[0])) {
             testNativePointerPrewriteCorrelation();
@@ -72,6 +80,7 @@ public class BossHuntIntegrationTest {
         testOwnershipAwareAutofireAndLockCleanup();
         testSafeAtomicFileReplacement();
         testScheduleNpcAcquisitionBoundary();
+        testBossRouteOwnershipRegression();
         testNativeInputCapturePassive();
         testNativePointerPrewriteCorrelation();
         testAlisamaMsgDialogBridge();
@@ -579,8 +588,8 @@ public class BossHuntIntegrationTest {
                 return; // finally restores all test-owned fields, without a native tick.
             }
             Zeus.bossHuntTick();
-            checkEquals("F01-ACQ-SAFE-01: Cross-map requires separately owned route",
-                    "SCHEDULE_ROUTE_MANUAL_REQUIRED", Zeus.getLastBossHuntDiagReason());
+            checkEquals("F01-ACQ-SAFE-01: Cross-map routing requested before Travel tick",
+                    "SCHEDULE_WALK_TO_SOURCE", Zeus.getLastBossHuntDiagReason());
             check("F01-ACQ-SAFE-01: No automatic movement lock acquired", !Player.isLockKey);
             check("F01-ACQ-SAFE-01: No route path written", GameScreen.player.posTransRoad == null);
 
@@ -1046,6 +1055,272 @@ public class BossHuntIntegrationTest {
         check("MAP-T04/T05: original LoadMap identity and ID restored",
                 GameCanvas.loadmap == originalMap
                 && (originalMap == null || originalMap.idMap == oldMapId));
+    }
+
+    /**
+     * F01 focused owner/route regression: source callbacks and private engine
+     * gates, not native bytecode or live-route acceptance evidence.
+     */
+    private static void testBossRouteOwnershipRegression() {
+        System.out.println("\n--- testBossRouteOwnershipRegression ---");
+        final Player savedPlayer = GameScreen.player;
+        final short[] savedPath = savedPlayer == null ? null : savedPlayer.posTransRoad;
+        final int savedHp = savedPlayer == null ? 0 : savedPlayer.hp;
+        final boolean savedLock = Player.isLockKey;
+        final LoadMap savedMap = GameCanvas.loadmap;
+        final int savedMapId = savedMap == null ? -1 : savedMap.idMap;
+        final GameScreen savedGame = GameCanvas.game;
+        final MainScreen savedScreen = GameCanvas.currentScreen;
+        final MainDialog savedDialog = GameCanvas.currentDialog;
+        final MainDialog savedSubDialog = GameCanvas.subDialog;
+        final Menu2 savedMenu = GameCanvas.menu2;
+        final boolean savedChat = ChatTextField.isShow;
+        final boolean oldEnabled = Zeus.bossHunt.isEnabled();
+        final BossHuntState oldBossState = Zeus.bossHunt.getState();
+        final String oldBossStatus = Zeus.bossHunt.getStatusText();
+        final BossHuntScheduler.ScheduleEntry oldBossEntry = Zeus.bossHunt.getActiveEntry();
+        final String oldConfigPath = Zeus.bossHuntConfigPath;
+        final boolean[] keys = GameCanvas.keyMyHold;
+        final boolean[] oldKeys = keys == null ? null : (boolean[]) keys.clone();
+
+        final String[] names = {
+            "bossHuntHoldingLock", "bossHuntHoldingPath", "bossHuntOwnedPath",
+            "bossOwnerPlayer", "bossOwnerMap", "bossOwnerSession", "bossOwnerEpoch",
+            "bossOwnerKeyboardBaseline", "bossOwnerPointerBaseline", "bossManualPaused",
+            "bossScheduleTravelMode", "travelInTick", "travelOwnedPath",
+            "travelOwnerPlayer", "travelOwnerKind", "travelPointerBaseline",
+            "travelKeyboardBaseline",
+            "atkMode", "navTarget", "navDone",
+            "enhNavigating", "enhOwnsForgeScreen", "enhOwnsResultDialog",
+            "dungeonEnabled", "dungeonNavigating",
+            "nativeKeyboardCaptureCount", "nativePointerCaptureCount",
+            "nativeInputGeneration", "nativeLastPointerPath",
+            "nativePointerPendingState", "nativePointerPendingOrigin",
+            "nativePointerPendingOldPath", "nativePointerPendingPlayer",
+            "nativePointerPendingLock", "nativePointerPendingMap",
+            "nativePointerPendingSession", "nativePointerPendingTick",
+            "nativePointerPendingSequence", "nativePointerSessionGeneration",
+            "nativePointerTickGeneration", "nativePointerSequence",
+            "nativePointerLastOrigin", "nativePointerLastOldPath",
+            "nativePointerLastNewPath", "nativePointerLastPreLock",
+            "nativePointerLastMap", "nativePointerLastSession",
+            "nativePointerLastSequence"
+        };
+        final java.lang.reflect.Field[] fields = new java.lang.reflect.Field[names.length];
+        final Object[] oldValues = new Object[names.length];
+        int snapCount = 0;
+        try {
+            for (int i = 0; i < names.length; i++) {
+                fields[i] = Zeus.class.getDeclaredField(names[i]);
+                fields[i].setAccessible(true);
+                oldValues[i] = fields[i].get(null);
+                snapCount++;
+            }
+            if (keys == null || keys.length <= 28) {
+                throw new IllegalStateException("Native directional key array unavailable");
+            }
+            if (GameCanvas.loadmap == null) GameCanvas.loadmap = allocateBossScheduleTestMap();
+            if (GameCanvas.loadmap == null) throw new IllegalStateException("LoadMap missing");
+            GameCanvas.loadmap.idMap = 1;
+            if (GameCanvas.game == null) GameCanvas.game = new GameScreen();
+            GameCanvas.currentScreen = GameCanvas.game;
+            GameCanvas.currentDialog = null;
+            GameCanvas.subDialog = null;
+            GameCanvas.menu2 = null;
+            ChatTextField.isShow = false;
+            if (GameScreen.player == null) GameScreen.player = new Player(100, (byte) 0, "hero", 0, 0);
+            GameScreen.player.hp = 1000;
+            GameScreen.player.posTransRoad = null;
+            Player.isLockKey = false;
+            for (int i = 0; i < keys.length; i++) keys[i] = false;
+
+            String[] zeroBools = { "enhNavigating", "enhOwnsForgeScreen",
+                    "enhOwnsResultDialog", "dungeonEnabled", "dungeonNavigating",
+                    "bossManualPaused", "navDone" };
+            for (int i = 0; i < zeroBools.length; i++) {
+                java.lang.reflect.Field f = Zeus.class.getDeclaredField(zeroBools[i]);
+                f.setAccessible(true);
+                f.setBoolean(null, false);
+            }
+            java.lang.reflect.Field atk = Zeus.class.getDeclaredField("atkMode");
+            java.lang.reflect.Field nav = Zeus.class.getDeclaredField("navTarget");
+            atk.setAccessible(true);
+            nav.setAccessible(true);
+            atk.setInt(null, 0);
+            nav.setInt(null, -1);
+            // Disable persistence for the entire fixture; no operator files touched.
+            Zeus.bossHuntConfigPath = null;
+            Zeus.bossHunt.getConfig().setEnabled(true);
+            Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
+
+            java.lang.reflect.Method goal = Zeus.class.getDeclaredMethod("goal");
+            java.lang.reflect.Method nextHop = Zeus.class.getDeclaredMethod(
+                    "mapNextHop", new Class[] { int.class, int.class });
+            java.lang.reflect.Method own = Zeus.class.getDeclaredMethod(
+                    "bossRememberPath", new Class[] { short[].class });
+            java.lang.reflect.Method input = Zeus.class.getDeclaredMethod("bossInputArbitration");
+            java.lang.reflect.Method release = Zeus.class.getDeclaredMethod(
+                    "bossReleaseMovement", new Class[] { boolean.class });
+            java.lang.reflect.Method travelOwn = Zeus.class.getDeclaredMethod(
+                    "travelRememberPath", new Class[] { short[].class });
+            java.lang.reflect.Method travelRelease = Zeus.class.getDeclaredMethod(
+                    "travelReleaseMovement", new Class[] { boolean.class });
+            goal.setAccessible(true);
+            nextHop.setAccessible(true);
+            own.setAccessible(true);
+            input.setAccessible(true);
+            release.setAccessible(true);
+            travelOwn.setAccessible(true);
+            travelRelease.setAccessible(true);
+            java.lang.reflect.Field pause = Zeus.class.getDeclaredField("bossManualPaused");
+            pause.setAccessible(true);
+            java.lang.reflect.Field ownedPath = Zeus.class.getDeclaredField("bossHuntOwnedPath");
+            ownedPath.setAccessible(true);
+
+            checkEquals("F01-E2E-01: schedule needs walking goal map 33",
+                    Integer.valueOf(33), goal.invoke(null));
+            int hop = ((Integer) nextHop.invoke(null, new Object[] {
+                    Integer.valueOf(1), Integer.valueOf(33) })).intValue();
+            check("F01-E2E-02: verified map graph has a first hop", hop >= 0 && hop != 1);
+
+            short[] bossPath = new short[] { 1, 2, 3 };
+            GameScreen.player.posTransRoad = bossPath;
+            Player.isLockKey = true;
+            own.invoke(null, new Object[] { bossPath });
+            check("F01-OWNER: initial route uses exact path identity", ownedPath.get(null) == bossPath);
+
+            short[] foreign = new short[] { 7, 8 };
+            GameScreen.player.posTransRoad = foreign;
+            release.invoke(null, new Object[] { Boolean.TRUE });
+            check("F01-E2E-05: owner cleanup preserves foreign path and lock",
+                    GameScreen.player.posTransRoad == foreign && Player.isLockKey);
+
+            GameScreen.player.posTransRoad = bossPath;
+            own.invoke(null, new Object[] { bossPath });
+            keys[4] = true;
+            check("F01-E2E-03: native left key is physically observed", GameCanvas.keyMove(2));
+            Zeus.onNativeUpdateKey();
+            input.invoke(null);
+            check("F01-E2E-03: key takeover pauses without reacquisition",
+                    pause.getBoolean(null) && !Player.isLockKey
+                    && GameScreen.player.posTransRoad == null);
+            checkEquals("F01-E2E-12: latched takeover disables route goal",
+                    Integer.valueOf(-1), goal.invoke(null));
+            Zeus.bossHuntTick();
+            checkEquals("F01-E2E-03: repeated tick retains pause",
+                    BossHuntState.PAUSED, Zeus.bossHunt.getState());
+            keys[4] = false;
+            Zeus.setBossHuntEnabled(false);
+            Zeus.setBossHuntEnabled(true);
+            Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
+            checkEquals("F01-E2E-03: explicit rearm allows goal",
+                    Integer.valueOf(33), goal.invoke(null));
+
+            GameScreen.player.posTransRoad = bossPath;
+            Player.isLockKey = true;
+            own.invoke(null, new Object[] { bossPath });
+            Zeus.onNativePrePointerTerrain();
+            GameScreen.player.posTransRoad = foreign;
+            Zeus.onNativePointerMovement(foreign);
+            input.invoke(null);
+            check("F01-E2E-04: pointer takeover preserves native replacement",
+                    pause.getBoolean(null) && GameScreen.player.posTransRoad == foreign);
+            // The lock is not speculatively cleared after native pointer writes.
+            check("F01-E2E-04: foreign pointer lock is never released",
+                    Player.isLockKey);
+
+            Zeus.setBossHuntEnabled(false);
+            Zeus.setBossHuntEnabled(true);
+            Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
+            GameScreen.player.posTransRoad = bossPath;
+            Player.isLockKey = true;
+            own.invoke(null, new Object[] { bossPath });
+            GameScreen.player.posTransRoad = foreign;
+            // Deliberately orphaned post: safe pause, no ownership claim.
+            Zeus.onNativePointerMovement(foreign);
+            input.invoke(null);
+            check("F01-E2E-04: UNKNOWN pointer pauses without foreign cleanup",
+                    pause.getBoolean(null) && GameScreen.player.posTransRoad == foreign
+                    && Player.isLockKey);
+
+            Zeus.setBossHuntEnabled(false);
+            Zeus.setBossHuntEnabled(true);
+            Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
+            GameScreen.player.posTransRoad = bossPath;
+            Player.isLockKey = true;
+            own.invoke(null, new Object[] { bossPath });
+            GameScreen.player.posTransRoad = null;
+            input.invoke(null);
+            check("F01-OWNER: natural completion retires ownership, not manual pause",
+                    !pause.getBoolean(null) && !Player.isLockKey
+                    && ownedPath.get(null) == null);
+
+            // Explicit operator navigation outranks a tracked Boss path.
+            GameScreen.player.posTransRoad = bossPath;
+            Player.isLockKey = true;
+            own.invoke(null, new Object[] { bossPath });
+            nav.setInt(null, 2);
+            input.invoke(null);
+            check("F01-E2E-05: explicit navigation releases only owned Boss movement",
+                    GameScreen.player.posTransRoad == null && !Player.isLockKey
+                    && !pause.getBoolean(null));
+            checkEquals("F01-E2E-11: operator navigation goal remains authoritative",
+                    Integer.valueOf(2), goal.invoke(null));
+            nav.setInt(null, -1);
+
+            short[] travelPath = new short[] { 9, 10 };
+            GameScreen.player.posTransRoad = travelPath;
+            Player.isLockKey = true;
+            travelOwn.invoke(null, new Object[] { travelPath });
+            travelRelease.invoke(null, new Object[] { Boolean.TRUE });
+            check("F01-E2E-11: Travel releases its exact path and lock",
+                    GameScreen.player.posTransRoad == null && !Player.isLockKey);
+            GameScreen.player.posTransRoad = travelPath;
+            Player.isLockKey = true;
+            travelOwn.invoke(null, new Object[] { travelPath });
+            GameScreen.player.posTransRoad = foreign;
+            travelRelease.invoke(null, new Object[] { Boolean.TRUE });
+            check("F01-E2E-11: Travel cleanup preserves foreign path and lock",
+                    GameScreen.player.posTransRoad == foreign && Player.isLockKey);
+        } catch (Throwable error) {
+            check("F01 focused integration fixture failed: " + error.getMessage(), false);
+        } finally {
+            if (oldKeys != null && keys != null && keys.length == oldKeys.length) {
+                System.arraycopy(oldKeys, 0, keys, 0, keys.length);
+            }
+            if (savedMap != null) savedMap.idMap = savedMapId;
+            GameCanvas.loadmap = savedMap;
+            GameCanvas.game = savedGame;
+            GameCanvas.currentScreen = savedScreen;
+            GameCanvas.currentDialog = savedDialog;
+            GameCanvas.subDialog = savedSubDialog;
+            GameCanvas.menu2 = savedMenu;
+            ChatTextField.isShow = savedChat;
+            if (savedPlayer != null) {
+                savedPlayer.posTransRoad = savedPath;
+                savedPlayer.hp = savedHp;
+            }
+            GameScreen.player = savedPlayer;
+            Player.isLockKey = savedLock;
+            Zeus.bossHunt.getConfig().setEnabled(oldEnabled);
+            Zeus.bossHunt.setActiveEntry(oldBossEntry);
+            Zeus.bossHunt.setState(oldBossState);
+            try {
+                java.lang.reflect.Field statusField = BossHuntController.class.getDeclaredField("lastStatus");
+                statusField.setAccessible(true);
+                statusField.set(Zeus.bossHunt, oldBossStatus);
+            } catch (Throwable error) {
+                check("F01 boss status restore failed: " + error.getMessage(), false);
+            }
+            Zeus.bossHuntConfigPath = oldConfigPath;
+            for (int i = snapCount - 1; i >= 0; i--) {
+                try {
+                    fields[i].set(null, oldValues[i]);
+                } catch (Throwable error) {
+                    check("F01 focused state restore failed: " + names[i], false);
+                }
+            }
+        }
     }
 
     private static void testAlisamaMsgDialogBridge() {

@@ -291,6 +291,7 @@ public final class Zeus {
         reconnectSupervisorTick();
         auth();
         control();
+        bossInputArbitration();
         dialogRecovery();
         travel();
         // ---- ENHANCE ----------------------------------------------------------
@@ -488,6 +489,157 @@ public final class Zeus {
     private static boolean bossHuntHoldingLock = false;
     private static boolean bossHuntHoldingPath = false;
     private static short[] bossHuntOwnedPath = null;
+    // Independent Boss Hunt movement epoch; neither pointer generation nor lock
+    // alone proves ownership. Never adopt a foreign short[] path.
+    private static Player bossOwnerPlayer = null;
+    private static int bossOwnerMap = -1;
+    private static int bossOwnerSession = 0;
+    private static int bossOwnerEpoch = 0;
+    private static int bossOwnerKeyboardBaseline = 0;
+    private static int bossOwnerPointerBaseline = 0;
+    private static boolean bossManualPaused = false;
+    private static boolean bossScheduleTravelMode = false;
+    private static boolean travelInTick = false;
+    private static short[] travelOwnedPath = null;
+    private static final int TRAVEL_OWNER_NONE = 0;
+    private static final int TRAVEL_OWNER_GENERIC = 1;
+    private static final int TRAVEL_OWNER_SHARED = 2;
+    private static int travelOwnerKind = TRAVEL_OWNER_NONE;
+    private static Player travelOwnerPlayer = null;
+    private static int travelPointerBaseline = 0;
+    private static int travelKeyboardBaseline = 0;
+
+    private static boolean bossOwnsCurrentPath() {
+        return bossHuntHoldingPath && bossHuntOwnedPath != null
+                && GameScreen.player != null && GameScreen.player == bossOwnerPlayer
+                && GameScreen.player.posTransRoad == bossHuntOwnedPath
+                && GameCanvas.loadmap != null && GameCanvas.loadmap.idMap == bossOwnerMap
+                && bossOwnerSession == nativePointerSessionGeneration;
+    }
+
+    private static boolean bossDirectionHeld() {
+        try {
+            return GameCanvas.currentScreen == GameCanvas.game
+                    && GameCanvas.currentDialog == null && GameCanvas.subDialog == null
+                    && (GameCanvas.menu2 == null || !GameCanvas.menu2.isShowMenu)
+                    && !ChatTextField.isShow
+                    && (GameCanvas.keyMove(0) || GameCanvas.keyMove(1)
+                    || GameCanvas.keyMove(2) || GameCanvas.keyMove(3));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static void bossRememberPath(short[] path) {
+        if (path == null || GameScreen.player == null || GameCanvas.loadmap == null) return;
+        if (bossOwnerEpoch < Integer.MAX_VALUE) bossOwnerEpoch++;
+        bossOwnerPlayer = GameScreen.player;
+        bossOwnerMap = GameCanvas.loadmap.idMap;
+        bossOwnerSession = nativePointerSessionGeneration;
+        bossHuntOwnedPath = path;
+        bossHuntHoldingPath = true;
+        bossHuntHoldingLock = true;
+        bossOwnerKeyboardBaseline = nativeKeyboardCaptureCount;
+        bossOwnerPointerBaseline = nativePointerCaptureCount;
+    }
+
+    /** Clean owned path/lock only if player and path identity remain attributable. */
+    private static void bossReleaseMovement(boolean clearPath) {
+        boolean samePlayer = GameScreen.player != null && GameScreen.player == bossOwnerPlayer;
+        boolean ownPath = samePlayer && bossHuntOwnedPath != null
+                && GameScreen.player.posTransRoad == bossHuntOwnedPath;
+        boolean nativeCompleted = samePlayer && GameScreen.player.posTransRoad == null
+                && nativePointerCaptureCount == bossOwnerPointerBaseline
+                && nativeKeyboardCaptureCount == bossOwnerKeyboardBaseline
+                && bossHuntOwnedPath != null;
+        if (clearPath && ownPath) GameScreen.player.posTransRoad = null;
+        if ((ownPath || nativeCompleted) && bossHuntHoldingLock && Player.isLockKey) {
+            Player.isLockKey = false;
+        }
+        bossHuntHoldingLock = false;
+        bossHuntHoldingPath = false;
+        bossHuntOwnedPath = null;
+        bossOwnerPlayer = null;
+        bossOwnerMap = -1;
+        bossOwnerSession = -1;
+    }
+
+    private static boolean travelOwnsCurrentPath() {
+        return travelOwnedPath != null && GameScreen.player != null
+                && GameScreen.player == travelOwnerPlayer
+                && GameScreen.player.posTransRoad == travelOwnedPath;
+    }
+
+    private static void travelRememberPath(short[] path) {
+        if (path == null || GameScreen.player == null) return;
+        travelOwnedPath = path;
+        travelOwnerPlayer = GameScreen.player;
+        travelOwnerKind = travelInTick ? TRAVEL_OWNER_GENERIC : TRAVEL_OWNER_SHARED;
+        travelPointerBaseline = nativePointerCaptureCount;
+        travelKeyboardBaseline = nativeKeyboardCaptureCount;
+    }
+
+    private static void travelReleaseMovement(boolean clearPath) {
+        boolean samePlayer = GameScreen.player != null && GameScreen.player == travelOwnerPlayer;
+        boolean ownPath = travelOwnsCurrentPath();
+        boolean completed = samePlayer && travelOwnedPath != null
+                && GameScreen.player.posTransRoad == null
+                && nativePointerCaptureCount == travelPointerBaseline
+                && nativeKeyboardCaptureCount == travelKeyboardBaseline;
+        if (clearPath && ownPath) GameScreen.player.posTransRoad = null;
+        if ((ownPath || completed) && Player.isLockKey) Player.isLockKey = false;
+        travelOwnedPath = null;
+        travelOwnerPlayer = null;
+        travelOwnerKind = TRAVEL_OWNER_NONE;
+    }
+
+    private static boolean bossMaySeekSchedule() {
+        return bossHunt.isEnabled() && !bossManualPaused
+                && bossHunt.getState() == BossHuntState.NEED_SCHEDULE
+                && atkMode == 0 && (navTarget < 0 || navDone)
+                && !enhNavigating && !dungeonNavigating && !isHigherPriorityActive()
+                && !bossDirectionHeld();
+    }
+
+    /** Consumes observable manual input once; never treats UNKNOWN pointer as ownership. */
+    private static void bossInputArbitration() {
+        if (!bossHunt.isEnabled()) return;
+        if (bossHuntHoldingPath && (atkMode != 0 || (navTarget >= 0 && !navDone)
+                || isHigherPriorityActive())) {
+            bossReleaseMovement(true);
+            recordBossHuntDiagReason("BOSS_YIELD_PRIORITY");
+            return;
+        }
+        boolean owned = bossOwnsCurrentPath();
+        boolean keyboard = bossHuntHoldingPath && GameScreen.player == bossOwnerPlayer
+                && (nativeKeyboardCaptureCount != bossOwnerKeyboardBaseline
+                    || bossDirectionHeld());
+        boolean pointer = bossHuntHoldingPath && bossHuntOwnedPath != null
+                && bossOwnerEpoch > 0
+                && nativePointerCaptureCount != bossOwnerPointerBaseline
+                && nativePointerLastOrigin != POINTER_ORIGIN_UNKNOWN
+                && nativePointerLastOldPath == bossHuntOwnedPath
+                && nativePointerLastPreLock
+                && nativePointerLastSession == nativePointerSessionGeneration
+                && nativePointerLastMap == bossOwnerMap
+                && bossOwnerSession == nativePointerSessionGeneration
+                && GameScreen.player != null && GameScreen.player == bossOwnerPlayer
+                && GameScreen.player.posTransRoad == nativePointerLastNewPath;
+        boolean unknownPointer = bossHuntHoldingPath && !pointer
+                && nativePointerCaptureCount != bossOwnerPointerBaseline;
+        if (keyboard || pointer || unknownPointer) {
+            // UNKNOWN pointer provenance can pause automation, but NEVER proves
+            // ownership of a replacement native path or its movement lock.
+            bossManualPaused = true;
+            bossReleaseMovement(keyboard);
+            recordBossHuntDiagReason(keyboard ? "BOSS_MANUAL_KEY"
+                    : (pointer ? "BOSS_MANUAL_POINTER" : "BOSS_POINTER_UNKNOWN_PAUSED"));
+        } else if (bossHuntHoldingPath && !owned) {
+            // Completion or map change: exact old path can be retired safely.
+            bossReleaseMovement(true);
+        }
+        if (bossManualPaused) bossHunt.setState(BossHuntState.PAUSED);
+    }
     private static boolean bossHuntHoldingAutoFire = false;
     private static boolean bossHuntHoldingFocus = false;
     private static MainObject bossHuntOwnedFocus = null;
@@ -495,6 +647,9 @@ public final class Zeus {
     private static boolean bossHuntSavedAutoHPMP = false;
     private static long lastBossNpcInteractAttempt = 0L;
     private static int bossNpcInteractTries = 0;
+    private static int bossNpcPathAttempts = 0;
+    private static long bossNpcPathAttemptAt = 0L;
+    private static int bossNpcPathMap = -1;
     private static String lastAutoBossMenuReason = null;
     private static long lastAutoBossMenuStepTime = 0L;
     private static int bossDialogBridgeTries = 0;
@@ -903,17 +1058,7 @@ public final class Zeus {
     }
 
     private static void releaseBossHuntControls() {
-        if (bossHuntHoldingLock) {
-            Player.isLockKey = false;
-            bossHuntHoldingLock = false;
-        }
-        if (bossHuntHoldingPath) {
-            if (GameScreen.player != null && bossHuntOwnedPath != null && GameScreen.player.posTransRoad == bossHuntOwnedPath) {
-                GameScreen.player.posTransRoad = null;
-            }
-            bossHuntHoldingPath = false;
-            bossHuntOwnedPath = null;
-        }
+        bossReleaseMovement(true);
         if (bossHuntHoldingAutoFire) {
             Player.isAutoFire = (byte) -1;
             Player.isCurAutoFire = false;
@@ -960,6 +1105,10 @@ public final class Zeus {
     }
 
     public static void setBossHuntEnabled(boolean enabled) {
+        if (enabled && !bossHunt.isEnabled()) {
+            bossManualPaused = false;
+            bossNpcPathAttempts = 0;
+        }
         bossHunt.setEnabled(enabled);
         try {
             if (bossHuntConfigPath != null) {
@@ -968,6 +1117,8 @@ public final class Zeus {
         } catch (Throwable ignored) {
         }
         if (!enabled) {
+            bossManualPaused = false;
+            bossNpcPathAttempts = 0;
             releaseBossHuntControls();
         }
     }
@@ -4503,6 +4654,10 @@ public final class Zeus {
         authReset();
         mapStableReset();
         navSessionReset();
+        bossReleaseMovement(false);
+        bossNpcPathAttempts = 0;
+        bossNpcPathAttemptAt = 0L;
+        bossNpcPathMap = -1;
         cleanEnhancementRouting();
         recoverEnhancementSession();
         dungeonSessionReset();
@@ -5281,7 +5436,11 @@ public final class Zeus {
         if (dungeonNavigating) {
             return DUNGEON_NPC_MAP;
         }
-        if (bossHunt.isEnabled() && bossHunt.getState() == BossHuntState.TRAVEL) {
+        if (bossMaySeekSchedule()) {
+            return BOSS_SCHEDULE_SOURCE_MAP;
+        }
+        if (bossHunt.isEnabled() && !bossManualPaused
+                && bossHunt.getState() == BossHuntState.TRAVEL) {
             int bossMap = bossHunt.getBossHuntTargetMapId();
             if (bossMap >= 0) {
                 return bossMap;
@@ -5310,10 +5469,8 @@ public final class Zeus {
         travelWait = 0;
         travelWhy = 0;
         travelState = (goal() >= 0) ? TV_IDLE : TV_OFF;
-        Player.isLockKey = false;
-        if (GameScreen.player != null) {
-            GameScreen.player.posTransRoad = null;
-        }
+        travelReleaseMovement(true);
+        bossReleaseMovement(true);
     }
 
     private static void travelReset() {
@@ -5347,6 +5504,7 @@ public final class Zeus {
             // No attack mode needed: walking somewhere the operator named is the whole request, and
             // whether to fight on arrival is a separate decision.
             if (want < 0) {
+                if (travelOwnerKind == TRAVEL_OWNER_GENERIC) travelReleaseMovement(true);
                 travelState = TV_OFF;
                 return;
             }
@@ -5378,10 +5536,10 @@ public final class Zeus {
                 travelLastY = Integer.MIN_VALUE;
                 // Any route from the previous map is void, and the movement lock outlives it. Left
                 // set, canMove() stays false forever and both travel and attack silently stop.
-                Player.isLockKey = false;
-                if (GameScreen.player != null) {
-                    GameScreen.player.posTransRoad = null;
+                if (travelOwnerKind == TRAVEL_OWNER_GENERIC) {
+                    travelReleaseMovement(true);
                 }
+                bossReleaseMovement(true);
                 if (!isInitialSessionMap && travelState != TV_OFF && travelState != TV_ARRIVED) {
                     ++travelHops;
                 }
@@ -5421,8 +5579,14 @@ public final class Zeus {
             // Waiting on a stone is polled before the settle timer, not after it: the menu can land
             // on any tick and the timer is that wait's deadline, not a delay before looking.
             if (travelState == TV_STONE_WAIT) {
-                travelStoneMenu();
-                return;
+                if (bossMaySeekSchedule() && want == BOSS_SCHEDULE_SOURCE_MAP) {
+                    // Initial schedule route is walking-only, never a stone menu.
+                    travelState = TV_IDLE;
+                    travelMenu = null;
+                } else {
+                    travelStoneMenu();
+                    return;
+                }
             }
             if (travelWait > 0) {
                 --travelWait;
@@ -5450,10 +5614,19 @@ public final class Zeus {
             travelState = TV_IDLE;
             // Stone first, walk when it declines. travelStone() returns false both when this map has
             // no stone and when its budget ran out, so the fallback needs no separate branch.
-            if (travelStone(here)) {
+            boolean scheduleWalk = bossMaySeekSchedule()
+                    && want == BOSS_SCHEDULE_SOURCE_MAP;
+            if (!scheduleWalk && travelStone(here)) {
                 return;
             }
-            travelWalk(here);
+            travelInTick = true;
+            bossScheduleTravelMode = scheduleWalk;
+            try {
+                travelWalk(here);
+            } finally {
+                travelInTick = false;
+                bossScheduleTravelMode = false;
+            }
         } catch (Throwable t) {
             travelStop(5, "travel threw");
         }
@@ -5462,6 +5635,12 @@ public final class Zeus {
     private static void travelStop(int why, String reason) {
         travelState = TV_BLOCKED;
         travelWhy = why;
+        if (bossMaySeekSchedule()) {
+            bossReleaseMovement(true);
+            recordBossHuntDiagReason("SCHEDULE_WALK_BLOCKED");
+        } else if (travelOwnerKind == TRAVEL_OWNER_GENERIC) {
+            travelReleaseMovement(true);
+        }
         trace("TRAVEL blocked: " + reason);
     }
 
@@ -5746,8 +5925,15 @@ public final class Zeus {
             GameScreen.player.toX = GameScreen.player.x;
             GameScreen.player.toY = GameScreen.player.y;
             Player.isLockKey = true;
+            if (travelInTick && bossScheduleTravelMode) {
+                bossRememberPath(path);
+            } else {
+                // travelMove serves Travel, Enhancement and Dungeon: track only
+                // the exact array installed here, never adopt a foreign route.
+                travelRememberPath(path);
+            }
         } catch (Throwable t) {
-            Player.isLockKey = false;
+            // Never release a lock that this invocation cannot attribute.
             travelStallTicks += 4;
         }
     }
@@ -5771,8 +5957,15 @@ public final class Zeus {
         if (abs(GameScreen.player.x - x) + abs(GameScreen.player.y - y) > tolerance) {
             return false;
         }
-        Player.isLockKey = false;
-        GameScreen.player.posTransRoad = null;
+        // A Generic Travel arrival cannot release an Enhancement/Dungeon path.
+        if (travelInTick && travelOwnerKind == TRAVEL_OWNER_SHARED) return false;
+        // Arrival cannot cancel an unrelated native route.
+        if (GameScreen.player.posTransRoad != null
+                && !travelOwnsCurrentPath() && !bossOwnsCurrentPath()) return false;
+        if (Player.isLockKey && GameScreen.player.posTransRoad == null
+                && travelOwnedPath == null && !bossHuntHoldingPath) return false;
+        travelReleaseMovement(true);
+        bossReleaseMovement(true);
         GameScreen.player.toX = GameScreen.player.x;
         GameScreen.player.toY = GameScreen.player.y;
         GameScreen.player.vx = 0;
@@ -11409,32 +11602,39 @@ public final class Zeus {
         long now = mSystem.currentTimeMillis();
         bossHuntCheckConfig(now);
         if (!bossHunt.isEnabled()) {
-            if (bossHuntHoldingLock || bossHuntHoldingAutoFire || bossHuntHoldingFocus) {
-                releaseBossHuntControls();
-            }
+            if (bossHuntHoldingLock || bossHuntHoldingPath || bossHuntHoldingAutoFire
+                    || bossHuntHoldingFocus) releaseBossHuntControls();
+            return;
+        }
+        if (bossManualPaused) {
+            bossHunt.setState(BossHuntState.PAUSED);
+            releaseBossHuntControls();
+            recordBossHuntDiagReason("BOSS_MANUAL_PAUSE_LATCHED");
             return;
         }
         try {
             int curMap = (GameCanvas.loadmap != null) ? GameCanvas.loadmap.idMap : -1;
+            if (bossNpcPathMap != curMap) {
+                bossNpcPathMap = curMap;
+                bossNpcPathAttempts = 0;
+                bossNpcPathAttemptAt = 0L;
+            }
             int curZone = (LoadMap.Area >= 0) ? LoadMap.Area : 0;
             int pHp = (GameScreen.player != null) ? GameScreen.player.hp : 0;
             boolean pDead = (!alive() || pHp <= 0 || (GameScreen.player != null && GameScreen.player.Action == 4));
-            boolean manualMovement = (Player.isLockKey && !bossHuntHoldingLock);
-            boolean higherPriority = isHigherPriorityActive();
+            boolean manualMovement = Player.isLockKey && !bossOwnsCurrentPath();
+            boolean higherPriority = isHigherPriorityActive() || atkMode != 0
+                    || (navTarget >= 0 && !navDone);
 
             bossHunt.tick(now, curMap, curZone, pHp, pDead, manualMovement, higherPriority);
 
-            if (pDead || higherPriority || manualMovement || !bossHunt.controlsMovement()) {
-                if (higherPriority) {
-                    recordBossHuntDiagReason("HIGHER_PRIORITY");
-                } else if (manualMovement) {
-                    recordBossHuntDiagReason("MANUAL_CONTROL");
-                }
-                if (bossHuntHoldingLock) {
-                    Player.isLockKey = false;
-                    bossHuntHoldingLock = false;
-                }
-                if (pDead || higherPriority) {
+            if (pDead || higherPriority || manualMovement
+                    || (!bossHunt.controlsMovement()
+                        && bossHunt.getState() != BossHuntState.NEED_SCHEDULE)) {
+                if (higherPriority) recordBossHuntDiagReason("HIGHER_PRIORITY");
+                else if (manualMovement) recordBossHuntDiagReason("MANUAL_CONTROL");
+                bossReleaseMovement(true);
+                if (pDead || higherPriority || manualMovement) {
                     releaseBossHuntControls();
                     return;
                 }
@@ -11487,8 +11687,10 @@ public final class Zeus {
                         if (curMap < 0) {
                             recordBossHuntDiagReason("SCHEDULE_MAP_UNKNOWN");
                         } else if (curMap != BOSS_SCHEDULE_SOURCE_MAP) {
-                            recordBossHuntDiagReason(mapNextHop(curMap, BOSS_SCHEDULE_SOURCE_MAP) < 0
-                                    ? "SCHEDULE_ROUTE_UNAVAILABLE" : "SCHEDULE_ROUTE_MANUAL_REQUIRED");
+                            recordBossHuntDiagReason(bossMaySeekSchedule()
+                                    ? (mapNextHop(curMap, BOSS_SCHEDULE_SOURCE_MAP) < 0
+                                        ? "SCHEDULE_ROUTE_UNAVAILABLE" : "SCHEDULE_WALK_TO_SOURCE")
+                                    : "SCHEDULE_WAITING_PRIORITY_OR_INPUT");
                         } else {
                             recordBossHuntDiagReason("SCHEDULE_NPC_NOT_VISIBLE");
                         }
@@ -11502,23 +11704,28 @@ public final class Zeus {
                                     bossNpcInteractTries++;
                                     nativeNpcInteract(scheduleNpc);
                                 }
-                            } else if (canMove() || bossHuntHoldingLock) {
+                            } else if (canMove() && !bossDirectionHeld()
+                                    && bossNpcPathAttempts < 6
+                                    && (bossNpcPathAttemptAt == 0L
+                                        || now - bossNpcPathAttemptAt >= 2000L)) {
+                                bossNpcPathAttemptAt = now;
+                                bossNpcPathAttempts++;
                                 try {
                                     short[] path = GameCanvas.game.updateFindRoad(scheduleNpc.x / 24, scheduleNpc.y / 24, GameScreen.player.x / 24, GameScreen.player.y / 24, 500);
-                                    if (path != null && path.length <= 500) {
+                                    if (path != null && path.length > 0 && path.length <= 500) {
                                         GameScreen.player.posTransRoad = path;
                                         GameScreen.player.countAutoMove = 0;
                                         GameScreen.player.xStopMove = 0;
                                         GameScreen.player.yStopMove = 0;
                                         GameScreen.player.toX = GameScreen.player.x;
                                         GameScreen.player.toY = GameScreen.player.y;
-                                        bossHuntHoldingLock = true;
-                                        bossHuntHoldingPath = true;
-                                        bossHuntOwnedPath = path;
                                         Player.isLockKey = true;
+                                        bossRememberPath(path);
                                     }
                                 } catch (Throwable ignored) {
                                 }
+                            } else if (bossNpcPathAttempts >= 6 && canMove()) {
+                                recordBossHuntDiagReason("SCHEDULE_NPC_APPROACH_EXHAUSTED");
                             }
                         }
                     }
@@ -11604,7 +11811,7 @@ public final class Zeus {
                                     Player.isCurAutoFire = false;
                                     bossHuntHoldingAutoFire = false;
                                 }
-                                if (canMove() || bossHuntHoldingLock) {
+                                if (canMove() && !bossDirectionHeld()) {
                                     try {
                                         short[] path = GameCanvas.game.updateFindRoad(bossObj.x / 24, bossObj.y / 24, GameScreen.player.x / 24, GameScreen.player.y / 24, 500);
                                         if (path != null && path.length <= 500) {
@@ -11614,26 +11821,14 @@ public final class Zeus {
                                             GameScreen.player.yStopMove = 0;
                                             GameScreen.player.toX = GameScreen.player.x;
                                             GameScreen.player.toY = GameScreen.player.y;
-                                            bossHuntHoldingLock = true;
-                                            bossHuntHoldingPath = true;
-                                            bossHuntOwnedPath = path;
                                             Player.isLockKey = true;
+                                            bossRememberPath(path);
                                         }
                                     } catch (Throwable ignored) {
                                     }
                                 }
                             } else {
-                                if (bossHuntHoldingLock) {
-                                    Player.isLockKey = false;
-                                    bossHuntHoldingLock = false;
-                                }
-                                if (bossHuntHoldingPath) {
-                                    if (GameScreen.player != null && bossHuntOwnedPath != null && GameScreen.player.posTransRoad == bossHuntOwnedPath) {
-                                        GameScreen.player.posTransRoad = null;
-                                    }
-                                    bossHuntHoldingPath = false;
-                                    bossHuntOwnedPath = null;
-                                }
+                                bossReleaseMovement(true);
                                 Player.xBeginAutoFire = bossObj.x;
                                 Player.yBeginAutofire = bossObj.y;
                                 Player.isAutoFire = (byte) 1;
@@ -11651,10 +11846,7 @@ public final class Zeus {
                             }
                         } else {
                             // Boss not present alive and not confirmed dead (e.g. vanished/despawned or still searching)
-                            if (bossHuntHoldingLock) {
-                                Player.isLockKey = false;
-                                bossHuntHoldingLock = false;
-                            }
+                            bossReleaseMovement(true);
                             if (bossHuntHoldingAutoFire) {
                                 Player.isAutoFire = (byte) -1;
                                 Player.isCurAutoFire = false;
