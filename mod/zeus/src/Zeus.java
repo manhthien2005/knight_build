@@ -140,6 +140,9 @@ public final class Zeus {
     private static int nativePointerPendingSession = 0;
     private static int nativePointerPendingTick = 0;
     private static int nativePointerPendingSequence = 0;
+    // Ownership epoch observed BEFORE native path replacement, never guessed
+    // from the post-write path or a retained boolean lock flag.
+    private static int nativePointerPendingBossEpoch = -1;
     private static int nativePointerSessionGeneration = 0;
     private static int nativePointerTickGeneration = 0;
     private static int nativePointerSequence = 0;
@@ -150,6 +153,7 @@ public final class Zeus {
     private static int nativePointerLastMap = -1;
     private static int nativePointerLastSession = 0;
     private static int nativePointerLastSequence = 0;
+    private static int nativePointerLastBossEpoch = -1;
 
     private static int nativePointerMap() {
         return GameCanvas.loadmap != null ? GameCanvas.loadmap.idMap : -1;
@@ -165,6 +169,7 @@ public final class Zeus {
         nativePointerPendingSession = 0;
         nativePointerPendingTick = 0;
         nativePointerPendingSequence = 0;
+        nativePointerPendingBossEpoch = -1;
     }
 
     private static void clearNativePointerLastCorrelation() {
@@ -175,6 +180,7 @@ public final class Zeus {
         nativePointerLastMap = -1;
         nativePointerLastSession = 0;
         nativePointerLastSequence = 0;
+        nativePointerLastBossEpoch = -1;
     }
 
     private static void captureNativePointerPre(int origin) {
@@ -192,6 +198,15 @@ public final class Zeus {
         nativePointerPendingMap = nativePointerMap();
         nativePointerPendingSession = nativePointerSessionGeneration;
         nativePointerPendingTick = nativePointerTickGeneration;
+        nativePointerPendingBossEpoch = -1;
+        if (nativePointerPendingPlayer != null && bossHuntHoldingPath
+                && bossHuntHoldingLock && Player.isLockKey && bossOwnerEpoch > 0
+                && nativePointerPendingPlayer == bossOwnerPlayer
+                && nativePointerPendingOldPath == bossHuntOwnedPath
+                && nativePointerPendingMap == bossOwnerMap
+                && nativePointerPendingSession == bossOwnerSession) {
+            nativePointerPendingBossEpoch = bossOwnerEpoch;
+        }
         if (nativePointerSequence < Integer.MAX_VALUE) nativePointerSequence++;
         nativePointerPendingSequence = nativePointerSequence;
     }
@@ -266,6 +281,7 @@ public final class Zeus {
                 nativePointerLastMap = nativePointerPendingMap;
                 nativePointerLastSession = nativePointerPendingSession;
                 nativePointerLastSequence = nativePointerPendingSequence;
+                nativePointerLastBossEpoch = nativePointerPendingBossEpoch;
             }
             // One post-event consumes or rejects exactly one pending pre-event.
             clearNativePointerPending();
@@ -545,6 +561,14 @@ public final class Zeus {
 
     /** Clean owned path/lock only if player and path identity remain attributable. */
     private static void bossReleaseMovement(boolean clearPath) {
+        bossReleaseMovement(clearPath, false);
+    }
+
+    /**
+     * A post-write manual path is NOT Boss-owned. Proven native handoff allows
+     * releasing only the old Boss-acquired lock while preserving that new path.
+     */
+    private static void bossReleaseMovement(boolean clearPath, boolean verifiedPointerHandoff) {
         boolean samePlayer = GameScreen.player != null && GameScreen.player == bossOwnerPlayer;
         boolean ownPath = samePlayer && bossHuntOwnedPath != null
                 && GameScreen.player.posTransRoad == bossHuntOwnedPath;
@@ -552,8 +576,23 @@ public final class Zeus {
                 && nativePointerCaptureCount == bossOwnerPointerBaseline
                 && nativeKeyboardCaptureCount == bossOwnerKeyboardBaseline
                 && bossHuntOwnedPath != null;
+        boolean pointerHandoff = verifiedPointerHandoff && samePlayer
+                && bossHuntHoldingPath && bossHuntHoldingLock && Player.isLockKey
+                && bossHuntOwnedPath != null && bossOwnerEpoch > 0
+                && nativePointerLastBossEpoch == bossOwnerEpoch
+                && nativePointerLastOldPath == bossHuntOwnedPath
+                && nativePointerLastNewPath == GameScreen.player.posTransRoad
+                && !travelOwnsCurrentPath()
+                && nativePointerLastOrigin != POINTER_ORIGIN_UNKNOWN
+                && nativePointerLastPreLock
+                && nativePointerLastMap == bossOwnerMap
+                && nativePointerLastSession == bossOwnerSession
+                && bossOwnerSession == nativePointerSessionGeneration
+                && bossOwnerPointerBaseline < Integer.MAX_VALUE
+                && nativePointerCaptureCount == bossOwnerPointerBaseline + 1;
         if (clearPath && ownPath) GameScreen.player.posTransRoad = null;
-        if ((ownPath || nativeCompleted) && bossHuntHoldingLock && Player.isLockKey) {
+        if ((ownPath || nativeCompleted || pointerHandoff)
+                && bossHuntHoldingLock && Player.isLockKey) {
             Player.isLockKey = false;
         }
         bossHuntHoldingLock = false;
@@ -619,19 +658,22 @@ public final class Zeus {
                 && nativePointerCaptureCount != bossOwnerPointerBaseline
                 && nativePointerLastOrigin != POINTER_ORIGIN_UNKNOWN
                 && nativePointerLastOldPath == bossHuntOwnedPath
+                && nativePointerLastBossEpoch == bossOwnerEpoch
                 && nativePointerLastPreLock
                 && nativePointerLastSession == nativePointerSessionGeneration
                 && nativePointerLastMap == bossOwnerMap
                 && bossOwnerSession == nativePointerSessionGeneration
                 && GameScreen.player != null && GameScreen.player == bossOwnerPlayer
-                && GameScreen.player.posTransRoad == nativePointerLastNewPath;
+                && GameScreen.player.posTransRoad == nativePointerLastNewPath
+                && bossOwnerPointerBaseline < Integer.MAX_VALUE
+                && nativePointerCaptureCount == bossOwnerPointerBaseline + 1;
         boolean unknownPointer = bossHuntHoldingPath && !pointer
                 && nativePointerCaptureCount != bossOwnerPointerBaseline;
         if (keyboard || pointer || unknownPointer) {
-            // UNKNOWN pointer provenance can pause automation, but NEVER proves
-            // ownership of a replacement native path or its movement lock.
+            // UNKNOWN pointer provenance pauses automation but cannot transfer
+            // lock authority; confirmed pointer provenance releases only our lock.
             bossManualPaused = true;
-            bossReleaseMovement(keyboard);
+            bossReleaseMovement(keyboard, pointer);
             recordBossHuntDiagReason(keyboard ? "BOSS_MANUAL_KEY"
                     : (pointer ? "BOSS_MANUAL_POINTER" : "BOSS_POINTER_UNKNOWN_PAUSED"));
         } else if (bossHuntHoldingPath && !owned) {
@@ -5592,15 +5634,17 @@ public final class Zeus {
                 --travelWait;
                 return;
             }
-            if (travelState == TV_WALK && !canMove()) {
-                return;             // a route is running; let the client finish it
-            }
-            // A character that stops making progress is a stall, not a route. Without this the mod
-            // would sit in TV_WALK forever on a map whose exit the pathfinder cannot reach, and the
-            // tool would show "travelling" with nothing happening.
+            // Observe real progress BEFORE returning for an active movement lock.
+            // Never count a foreign manual/Enhancement/Dungeon path as our stall.
             if (travelState == TV_WALK) {
+                boolean moving = !canMove();
+                boolean ownedRoute = (travelOwnerKind == TRAVEL_OWNER_GENERIC
+                        && travelOwnsCurrentPath()) || bossOwnsCurrentPath();
+                if (moving && !ownedRoute) {
+                    return; // foreign owner: no stall timeout or cleanup
+                }
                 if (GameScreen.player.x == travelLastX && GameScreen.player.y == travelLastY) {
-                    ++travelStallTicks;
+                    if (travelStallTicks < Integer.MAX_VALUE) ++travelStallTicks;
                 } else {
                     travelStallTicks = 0;
                     travelLastX = GameScreen.player.x;
@@ -5610,6 +5654,7 @@ public final class Zeus {
                     travelStop(2, "stalled walking on map " + here);
                     return;
                 }
+                if (moving) return; // own route is active, continue watching
             }
             travelState = TV_IDLE;
             // Stone first, walk when it declines. travelStone() returns false both when this map has

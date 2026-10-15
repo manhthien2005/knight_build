@@ -1,6 +1,7 @@
 import Main.GameCanvas;
 import GameScreen.GameScreen;
 import GameScreen.MainScreen;
+import GameScreen.LoadMapScreen;
 import GameObjects.MainObject;
 import GameObjects.Player;
 import InterfaceComponents.MsgDialog;
@@ -669,11 +670,13 @@ public class BossHuntIntegrationTest {
             "nativePointerPendingOldPath", "nativePointerPendingPlayer", "nativePointerPendingLock",
             "nativePointerPendingMap", "nativePointerPendingSession",
             "nativePointerPendingTick", "nativePointerPendingSequence",
+            "nativePointerPendingBossEpoch",
             "nativePointerSessionGeneration", "nativePointerTickGeneration",
             "nativePointerSequence", "nativePointerLastOrigin",
             "nativePointerLastOldPath", "nativePointerLastNewPath",
             "nativePointerLastPreLock", "nativePointerLastMap",
-            "nativePointerLastSession", "nativePointerLastSequence"
+            "nativePointerLastSession", "nativePointerLastSequence",
+            "nativePointerLastBossEpoch"
         };
         final java.lang.reflect.Field[] extraCaptureFields =
                 new java.lang.reflect.Field[extraCaptureNames.length];
@@ -869,11 +872,13 @@ public class BossHuntIntegrationTest {
             "nativePointerPendingOldPath", "nativePointerPendingPlayer", "nativePointerPendingLock",
             "nativePointerPendingMap", "nativePointerPendingSession",
             "nativePointerPendingTick", "nativePointerPendingSequence",
+            "nativePointerPendingBossEpoch",
             "nativePointerSessionGeneration", "nativePointerTickGeneration",
             "nativePointerSequence", "nativePointerLastOrigin",
             "nativePointerLastOldPath", "nativePointerLastNewPath",
             "nativePointerLastPreLock", "nativePointerLastMap",
-            "nativePointerLastSession", "nativePointerLastSequence"
+            "nativePointerLastSession", "nativePointerLastSequence",
+            "nativePointerLastBossEpoch"
         };
         final java.lang.reflect.Field[] fields = new java.lang.reflect.Field[fieldNames.length];
         final Object[] saved = new Object[fieldNames.length];
@@ -1066,6 +1071,13 @@ public class BossHuntIntegrationTest {
         final Player savedPlayer = GameScreen.player;
         final short[] savedPath = savedPlayer == null ? null : savedPlayer.posTransRoad;
         final int savedHp = savedPlayer == null ? 0 : savedPlayer.hp;
+        final int savedX = savedPlayer == null ? 0 : savedPlayer.x;
+        final int savedY = savedPlayer == null ? 0 : savedPlayer.y;
+        final byte savedAction = savedPlayer == null ? (byte) 0 : (byte) savedPlayer.Action;
+        final MainObject savedFocus = GameScreen.ObjFocus;
+        final boolean savedMapReady = LoadMapScreen.isNextMap;
+        java.lang.reflect.Field mapEffectField = null;
+        Object savedMapEffect = null;
         final boolean savedLock = Player.isLockKey;
         final LoadMap savedMap = GameCanvas.loadmap;
         final int savedMapId = savedMap == null ? -1 : savedMap.idMap;
@@ -1090,6 +1102,9 @@ public class BossHuntIntegrationTest {
             "bossScheduleTravelMode", "travelInTick", "travelOwnedPath",
             "travelOwnerPlayer", "travelOwnerKind", "travelPointerBaseline",
             "travelKeyboardBaseline",
+            "travelState", "travelWait", "travelMapSeen", "travelHops",
+            "travelStallTicks", "travelLastX", "travelLastY", "travelWhy",
+            "readySettleTicks", "stableMapId", "mapStableTicks",
             "atkMode", "navTarget", "navDone",
             "enhNavigating", "enhOwnsForgeScreen", "enhOwnsResultDialog",
             "dungeonEnabled", "dungeonNavigating",
@@ -1099,17 +1114,21 @@ public class BossHuntIntegrationTest {
             "nativePointerPendingOldPath", "nativePointerPendingPlayer",
             "nativePointerPendingLock", "nativePointerPendingMap",
             "nativePointerPendingSession", "nativePointerPendingTick",
-            "nativePointerPendingSequence", "nativePointerSessionGeneration",
+            "nativePointerPendingSequence", "nativePointerPendingBossEpoch",
+            "nativePointerSessionGeneration",
             "nativePointerTickGeneration", "nativePointerSequence",
             "nativePointerLastOrigin", "nativePointerLastOldPath",
             "nativePointerLastNewPath", "nativePointerLastPreLock",
             "nativePointerLastMap", "nativePointerLastSession",
-            "nativePointerLastSequence"
+            "nativePointerLastSequence", "nativePointerLastBossEpoch"
         };
         final java.lang.reflect.Field[] fields = new java.lang.reflect.Field[names.length];
         final Object[] oldValues = new Object[names.length];
         int snapCount = 0;
         try {
+            mapEffectField = LoadMap.class.getDeclaredField("isShowEffAuto");
+            mapEffectField.setAccessible(true);
+            savedMapEffect = mapEffectField.get(null);
             for (int i = 0; i < names.length; i++) {
                 fields[i] = Zeus.class.getDeclaredField(names[i]);
                 fields[i].setAccessible(true);
@@ -1225,9 +1244,59 @@ public class BossHuntIntegrationTest {
             input.invoke(null);
             check("F01-E2E-04: pointer takeover preserves native replacement",
                     pause.getBoolean(null) && GameScreen.player.posTransRoad == foreign);
-            // The lock is not speculatively cleared after native pointer writes.
-            check("F01-E2E-04: foreign pointer lock is never released",
-                    Player.isLockKey);
+            // Exact pre/post native provenance transfers the Boss-acquired lock
+            // without deleting the new manual path.
+            check("R2-SAFE-01: verified terrain unlocks Boss lock, retains path",
+                    pause.getBoolean(null) && GameScreen.player.posTransRoad == foreign
+                    && !Player.isLockKey);
+            Zeus.bossHuntTick();
+            check("R2-SAFE-01: manual pause persists after handoff",
+                    pause.getBoolean(null) && Zeus.bossHunt.getState() == BossHuntState.PAUSED);
+
+            Zeus.setBossHuntEnabled(false);
+            Zeus.setBossHuntEnabled(true);
+            Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
+            GameScreen.player.posTransRoad = bossPath;
+            Player.isLockKey = true;
+            own.invoke(null, new Object[] { bossPath });
+            Zeus.onNativePrePointerPortal();
+            GameScreen.player.posTransRoad = foreign;
+            Zeus.onNativePointerMovement(foreign);
+            input.invoke(null);
+            check("R2-SAFE-02: confirmed portal unlocks Boss, retains native path",
+                    pause.getBoolean(null) && GameScreen.player.posTransRoad == foreign
+                    && !Player.isLockKey);
+
+            Zeus.setBossHuntEnabled(false);
+            Zeus.setBossHuntEnabled(true);
+            Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
+            GameScreen.player.posTransRoad = bossPath;
+            Player.isLockKey = true;
+            own.invoke(null, new Object[] { bossPath });
+            Zeus.onNativePrePointerTerrain();
+            own.invoke(null, new Object[] { bossPath }); // stale original owner epoch
+            GameScreen.player.posTransRoad = foreign;
+            Zeus.onNativePointerMovement(foreign);
+            input.invoke(null);
+            check("R2-SAFE-03: stale ownership epoch cannot unlock",
+                    pause.getBoolean(null) && GameScreen.player.posTransRoad == foreign
+                    && Player.isLockKey);
+
+            Zeus.setBossHuntEnabled(false);
+            Zeus.setBossHuntEnabled(true);
+            Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
+            GameScreen.player.posTransRoad = bossPath;
+            Player.isLockKey = true;
+            own.invoke(null, new Object[] { bossPath });
+            Zeus.onNativePrePointerPortal();
+            GameScreen.player.posTransRoad = foreign;
+            Zeus.onNativePointerMovement(foreign);
+            travelOwn.invoke(null, new Object[] { foreign });
+            input.invoke(null);
+            check("R2-SAFE-04: subsequent Travel ownership retains lock and path",
+                    pause.getBoolean(null) && GameScreen.player.posTransRoad == foreign
+                    && Player.isLockKey);
+            travelRelease.invoke(null, new Object[] { Boolean.FALSE });
 
             Zeus.setBossHuntEnabled(false);
             Zeus.setBossHuntEnabled(true);
@@ -1282,6 +1351,84 @@ public class BossHuntIntegrationTest {
             travelRelease.invoke(null, new Object[] { Boolean.TRUE });
             check("F01-E2E-11: Travel cleanup preserves foreign path and lock",
                     GameScreen.player.posTransRoad == foreign && Player.isLockKey);
+
+            // Execute the actual Travel tick, not a mocked progress helper.
+            // A live path must be observed for >150 stationary ticks to block.
+            GameScreen.player.Action = (byte) 0;
+            GameScreen.ObjFocus = null;
+            GameScreen.player.x = 100;
+            GameScreen.player.y = 100;
+            LoadMapScreen.isNextMap = true;
+            LoadMap.isShowEffAuto = 10;
+            java.lang.reflect.Method travelTick = Zeus.class.getDeclaredMethod("travel");
+            travelTick.setAccessible(true);
+            String[] fieldsToPrepare = {
+                "travelState", "travelStallTicks", "travelMapSeen",
+                "travelWait", "travelLastX", "travelLastY",
+                "travelWhy", "readySettleTicks", "stableMapId", "mapStableTicks"
+            };
+            java.lang.reflect.Field[] readyFields = new java.lang.reflect.Field[fieldsToPrepare.length];
+            for (int i = 0; i < readyFields.length; i++) {
+                readyFields[i] = Zeus.class.getDeclaredField(fieldsToPrepare[i]);
+                readyFields[i].setAccessible(true);
+            }
+            java.lang.reflect.Field tvWalk = Zeus.class.getDeclaredField("TV_WALK");
+            java.lang.reflect.Field tvBlocked = Zeus.class.getDeclaredField("TV_BLOCKED");
+            tvWalk.setAccessible(true);
+            tvBlocked.setAccessible(true);
+            // travelState=TV_WALK; travelMapSeen=1; full map/scene readiness.
+            readyFields[0].setInt(null, tvWalk.getInt(null));
+            readyFields[1].setInt(null, 0);
+            readyFields[2].setInt(null, 1);
+            readyFields[3].setInt(null, 0);
+            readyFields[4].setInt(null, Integer.MIN_VALUE);
+            readyFields[5].setInt(null, Integer.MIN_VALUE);
+            readyFields[6].setInt(null, 0);
+            readyFields[7].setInt(null, 12);
+            readyFields[8].setInt(null, 1);
+            readyFields[9].setInt(null, 12);
+            check("R2-SAFE-05: focused route fixture is ready",
+                    Zeus.gameReady() && Zeus.mapStable());
+            GameScreen.player.posTransRoad = bossPath;
+            Player.isLockKey = true;
+            own.invoke(null, new Object[] { bossPath });
+            for (int i = 0; i < 200
+                    && readyFields[0].getInt(null) != tvBlocked.getInt(null); i++) {
+                travelTick.invoke(null);
+            }
+            check("R2-SAFE-05: stationary owned path BLOCKED after bounded ticks",
+                    readyFields[0].getInt(null) == tvBlocked.getInt(null)
+                    && readyFields[6].getInt(null) == 2
+                    && GameScreen.player.posTransRoad == null && !Player.isLockKey);
+
+            // Genuine position progress resets the previously accumulated stall.
+            readyFields[0].setInt(null, tvWalk.getInt(null));
+            readyFields[1].setInt(null, 125);
+            readyFields[4].setInt(null, 100);
+            readyFields[5].setInt(null, 100);
+            GameScreen.player.x = 124;
+            GameScreen.player.posTransRoad = bossPath;
+            Player.isLockKey = true;
+            own.invoke(null, new Object[] { bossPath });
+            travelTick.invoke(null);
+            check("R2-SAFE-06: moving owned route resets stall, remains active",
+                    readyFields[1].getInt(null) == 0
+                    && readyFields[0].getInt(null) == tvWalk.getInt(null)
+                    && GameScreen.player.posTransRoad == bossPath && Player.isLockKey);
+
+            // Foreign locked path must never be timed out by our walker.
+            release.invoke(null, new Object[] { Boolean.FALSE });
+            GameScreen.player.posTransRoad = foreign;
+            Player.isLockKey = true;
+            readyFields[0].setInt(null, tvWalk.getInt(null));
+            readyFields[1].setInt(null, 125);
+            readyFields[4].setInt(null, GameScreen.player.x);
+            readyFields[5].setInt(null, GameScreen.player.y);
+            for (int i = 0; i < 200; i++) travelTick.invoke(null);
+            check("R2-SAFE-04: foreign stalled route never timed out or cleared",
+                    readyFields[0].getInt(null) == tvWalk.getInt(null)
+                    && readyFields[1].getInt(null) == 125
+                    && GameScreen.player.posTransRoad == foreign && Player.isLockKey);
         } catch (Throwable error) {
             check("F01 focused integration fixture failed: " + error.getMessage(), false);
         } finally {
@@ -1299,6 +1446,19 @@ public class BossHuntIntegrationTest {
             if (savedPlayer != null) {
                 savedPlayer.posTransRoad = savedPath;
                 savedPlayer.hp = savedHp;
+                savedPlayer.x = savedX;
+                savedPlayer.y = savedY;
+                savedPlayer.Action = savedAction;
+            }
+            GameScreen.ObjFocus = savedFocus;
+            LoadMapScreen.isNextMap = savedMapReady;
+            if (mapEffectField != null) {
+                try {
+                    mapEffectField.set(null, savedMapEffect);
+                } catch (Throwable restoreError) {
+                    check("R2-SAFE fixture map effect restore failed: "
+                            + restoreError.getMessage(), false);
+                }
             }
             GameScreen.player = savedPlayer;
             Player.isLockKey = savedLock;
