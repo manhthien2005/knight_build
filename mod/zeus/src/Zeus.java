@@ -5836,6 +5836,19 @@ public final class Zeus {
             recordBossHuntDiagReason("SCHEDULE_WALK_BLOCKED");
         } else if (travelOwnerKind == TRAVEL_OWNER_GENERIC) {
             travelReleaseMovement(true);
+        } else if (bossHunt.isEnabled() && !bossManualPaused
+                && bossHunt.getState() == BossHuntState.TRAVEL
+                && bossHunt.getActiveEntry() != null
+                && goal() == bossHunt.getBossHuntTargetMapId()
+                && bossOwnsCurrentPath() && bossHuntHoldingLock
+                && nativeKeyboardCaptureCount == bossOwnerKeyboardBaseline
+                && nativePointerCaptureCount == bossOwnerPointerBaseline
+                && !bossDirectionHeld() && !isHigherPriorityActive()
+                && atkMode == 0 && (navTarget < 0 || navDone)) {
+            // Verified current Boss target-route owner: retire exactly our path
+            // and lock on timeout; never clear replaced/native movement.
+            bossReleaseMovement(true);
+            recordBossHuntDiagReason("BOSS_TARGET_WALK_BLOCKED");
         }
         trace("TRAVEL blocked: " + reason);
     }

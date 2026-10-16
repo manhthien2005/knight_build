@@ -1406,6 +1406,8 @@ public class BossHuntIntegrationTest {
                     readyFields[0].getInt(null) == tvBlocked.getInt(null)
                     && readyFields[6].getInt(null) == 2
                     && GameScreen.player.posTransRoad == null && !Player.isLockKey);
+            check("R5-05: schedule walk retains blocked diagnostic",
+                    "SCHEDULE_WALK_BLOCKED".equals(Zeus.getLastBossHuntDiagReason()));
 
             // Genuine position progress resets the previously accumulated stall.
             readyFields[0].setInt(null, tvWalk.getInt(null));
@@ -1480,6 +1482,33 @@ public class BossHuntIntegrationTest {
             travelRelease.invoke(null, new Object[] { Boolean.FALSE });
             Player.isLockKey = false;
 
+            // R5-04: actual Generic Travel stall retains its historical
+            // owned-path release, independently from Boss target cleanup.
+            short[] genericStall = new short[] { 61, 62 };
+            nav.setInt(null, 2);
+            GameScreen.player.posTransRoad = genericStall;
+            Player.isLockKey = true;
+            travelTickOwner.setBoolean(null, true);
+            travelOwn.invoke(null, new Object[] { genericStall });
+            travelTickOwner.setBoolean(null, false);
+            readyFields[0].setInt(null, tvWalk.getInt(null));
+            readyFields[1].setInt(null, 0);
+            readyFields[3].setInt(null, 0);
+            readyFields[4].setInt(null, Integer.MIN_VALUE);
+            readyFields[5].setInt(null, Integer.MIN_VALUE);
+            for (int i = 0; i < 200
+                    && readyFields[0].getInt(null) != tvBlocked.getInt(null); i++) {
+                travelTick.invoke(null);
+            }
+            java.lang.reflect.Field genericOwnerKind = Zeus.class.getDeclaredField("travelOwnerKind");
+            genericOwnerKind.setAccessible(true);
+            check("R5-04: Generic Travel stalls and releases exact owned path",
+                    readyFields[0].getInt(null) == tvBlocked.getInt(null)
+                    && readyFields[6].getInt(null) == 2
+                    && GameScreen.player.posTransRoad == null && !Player.isLockKey
+                    && genericOwnerKind.getInt(null) == 0);
+            nav.setInt(null, -1);
+
             // Foreign locked path must never be timed out by our walker.
             release.invoke(null, new Object[] { Boolean.FALSE });
             GameScreen.player.posTransRoad = foreign;
@@ -1502,9 +1531,22 @@ public class BossHuntIntegrationTest {
             Object savedResolver = resolverField.get(Zeus.bossHunt);
             java.lang.reflect.Field targetIdField = BossHuntController.class.getDeclaredField("targetMapId");
             targetIdField.setAccessible(true);
-            int savedTargetId = targetIdField.getInt(Zeus.bossHunt);
             BossHuntScheduler.ScheduleEntry formerEntry = Zeus.bossHunt.getActiveEntry();
             BossHuntState formerState = Zeus.bossHunt.getState();
+            // Snapshot every controller field affected by tick(), independent
+            // of which earlier regression ran before this fixture.
+            String[] controllerNames = {
+                "targetMapId", "targetZoneNumber", "targetZoneSubIndex",
+                "arrivedAt", "absentSince", "lastStatus"
+            };
+            java.lang.reflect.Field[] controllerFields =
+                    new java.lang.reflect.Field[controllerNames.length];
+            Object[] controllerValues = new Object[controllerNames.length];
+            for (int i = 0; i < controllerNames.length; i++) {
+                controllerFields[i] = BossHuntController.class.getDeclaredField(controllerNames[i]);
+                controllerFields[i].setAccessible(true);
+                controllerValues[i] = controllerFields[i].get(Zeus.bossHunt);
+            }
             try {
                 Zeus.bossHunt.setMapResolver(new BossHuntController.MapResolver() {
                     public int resolveMapId(String mapAlias) { return 2; }
@@ -1513,6 +1555,9 @@ public class BossHuntIntegrationTest {
                         1, 1, "target", "R3 target fixture", 0L,
                         BossScheduleParser.Status.SPAWNED_OR_PAST));
                 Zeus.bossHunt.setState(BossHuntState.TRAVEL);
+                // goal() and bossRememberPath() must agree from the moment
+                // ownership is captured, without an earlier controller tick.
+                targetIdField.setInt(Zeus.bossHunt, 2);
                 GameScreen.player.posTransRoad = bossPath;
                 Player.isLockKey = true;
                 own.invoke(null, new Object[] { bossPath });
@@ -1535,11 +1580,135 @@ public class BossHuntIntegrationTest {
                         GameScreen.player.posTransRoad == null
                         && !Player.isLockKey && !pause.getBoolean(null));
                 release.invoke(null, new Object[] { Boolean.TRUE });
+
+                // R5-01: a real travel() loop must BLOCK and release the
+                // current Boss-owned target path; no direct travelStop call.
+                targetIdField.setInt(Zeus.bossHunt, 2);
+                Zeus.bossHunt.setState(BossHuntState.TRAVEL);
+                short[] stalledBoss = new short[] { 51, 52 };
+                GameScreen.player.posTransRoad = stalledBoss;
+                Player.isLockKey = true;
+                own.invoke(null, new Object[] { stalledBoss });
+                check("R5-01: correct target registered before stall",
+                        ((Integer) goal.invoke(null)).intValue() == 2);
+                readyFields[0].setInt(null, tvWalk.getInt(null));
+                readyFields[1].setInt(null, 0);
+                readyFields[3].setInt(null, 0);
+                readyFields[4].setInt(null, Integer.MIN_VALUE);
+                readyFields[5].setInt(null, Integer.MIN_VALUE);
+                for (int i = 0; i < 200
+                        && readyFields[0].getInt(null) != tvBlocked.getInt(null); i++) {
+                    travelTick.invoke(null);
+                }
+                java.lang.reflect.Field held = Zeus.class.getDeclaredField("bossHuntHoldingPath");
+                java.lang.reflect.Field heldLock = Zeus.class.getDeclaredField("bossHuntHoldingLock");
+                java.lang.reflect.Field owned = Zeus.class.getDeclaredField("bossHuntOwnedPath");
+                held.setAccessible(true);
+                heldLock.setAccessible(true);
+                owned.setAccessible(true);
+                check("R5-01: Boss target stall reaches TV_BLOCKED",
+                        readyFields[0].getInt(null) == tvBlocked.getInt(null)
+                        && readyFields[6].getInt(null) == 2);
+                check("R5-01: exact Boss path and lock released after timeout",
+                        GameScreen.player.posTransRoad == null && !Player.isLockKey);
+                check("R5-01: blocked Boss ownership metadata retired",
+                        !held.getBoolean(null) && !heldLock.getBoolean(null)
+                        && owned.get(null) == null);
+
+                // R5-06: real position progress resets the stall, leaving
+                // the attributable active route and lock intact.
+                short[] movingBoss = new short[] { 53, 54 };
+                GameScreen.player.posTransRoad = movingBoss;
+                Player.isLockKey = true;
+                own.invoke(null, new Object[] { movingBoss });
+                readyFields[0].setInt(null, tvWalk.getInt(null));
+                readyFields[1].setInt(null, 125);
+                readyFields[4].setInt(null, GameScreen.player.x);
+                readyFields[5].setInt(null, GameScreen.player.y);
+                GameScreen.player.x += 24;
+                travelTick.invoke(null);
+                check("R5-06: progressing Boss route not blocked or released",
+                        readyFields[0].getInt(null) == tvWalk.getInt(null)
+                        && readyFields[1].getInt(null) == 0
+                        && GameScreen.player.posTransRoad == movingBoss
+                        && Player.isLockKey);
+                release.invoke(null, new Object[] { Boolean.TRUE });
+
+                // R5-02: a native pointer has replaced the Boss-owned route.
+                // Travel must not time out or release this foreign replacement.
+                GameScreen.player.posTransRoad = stalledBoss;
+                Player.isLockKey = true;
+                own.invoke(null, new Object[] { stalledBoss });
+                Zeus.onNativePrePointerTerrain();
+                GameScreen.player.posTransRoad = foreign;
+                Zeus.onNativePointerMovement(foreign);
+                readyFields[0].setInt(null, tvWalk.getInt(null));
+                readyFields[1].setInt(null, 151);
+                travelTick.invoke(null);
+                check("R5-02: pointer replacement remains under native control",
+                        readyFields[0].getInt(null) == tvWalk.getInt(null)
+                        && GameScreen.player.posTransRoad == foreign && Player.isLockKey);
+                release.invoke(null, new Object[] { Boolean.FALSE });
+                GameScreen.player.posTransRoad = null;
+                Player.isLockKey = false;
+
+                // R5-03: destination change makes the old owner proof stale.
+                GameScreen.player.posTransRoad = stalledBoss;
+                Player.isLockKey = true;
+                own.invoke(null, new Object[] { stalledBoss });
+                targetIdField.setInt(Zeus.bossHunt, 3);
+                readyFields[0].setInt(null, tvWalk.getInt(null));
+                readyFields[1].setInt(null, 151);
+                travelTick.invoke(null);
+                check("R5-03: changed target does not release unproven path",
+                        GameScreen.player.posTransRoad == stalledBoss
+                        && Player.isLockKey
+                        && readyFields[0].getInt(null) == tvWalk.getInt(null));
+                targetIdField.setInt(Zeus.bossHunt, 2);
+                release.invoke(null, new Object[] { Boolean.TRUE });
+
+                // R5-03: a stale session must never authorize Boss timeout cleanup.
+                GameScreen.player.posTransRoad = stalledBoss;
+                Player.isLockKey = true;
+                own.invoke(null, new Object[] { stalledBoss });
+                int savedGeneration = nativeSession.getInt(null);
+                nativeSession.setInt(null, savedGeneration + 1);
+                readyFields[0].setInt(null, tvWalk.getInt(null));
+                readyFields[1].setInt(null, 151);
+                travelTick.invoke(null);
+                check("R5-03: stale session preserves unknown movement",
+                        GameScreen.player.posTransRoad == stalledBoss
+                        && Player.isLockKey
+                        && readyFields[0].getInt(null) == tvWalk.getInt(null));
+                nativeSession.setInt(null, savedGeneration);
+                release.invoke(null, new Object[] { Boolean.TRUE });
+
+                // R5-03: a stale map owner cannot authorize stall cleanup.
+                // Model the already-reconciled map before invoking travel().
+                GameScreen.player.posTransRoad = stalledBoss;
+                Player.isLockKey = true;
+                own.invoke(null, new Object[] { stalledBoss });
+                GameCanvas.loadmap.idMap = 3;
+                readyFields[2].setInt(null, 3);  // travelMapSeen
+                readyFields[8].setInt(null, 3);  // stableMapId
+                readyFields[0].setInt(null, tvWalk.getInt(null));
+                readyFields[1].setInt(null, 151);
+                travelTick.invoke(null);
+                check("R5-03: stale map does not release unproven movement",
+                        GameScreen.player.posTransRoad == stalledBoss
+                        && Player.isLockKey
+                        && readyFields[0].getInt(null) == tvWalk.getInt(null));
+                GameCanvas.loadmap.idMap = 1;
+                readyFields[2].setInt(null, 1);
+                readyFields[8].setInt(null, 1);
+                release.invoke(null, new Object[] { Boolean.TRUE });
             } finally {
                 resolverField.set(Zeus.bossHunt, savedResolver);
-                targetIdField.setInt(Zeus.bossHunt, savedTargetId);
                 Zeus.bossHunt.setActiveEntry(formerEntry);
                 Zeus.bossHunt.setState(formerState);
+                for (int i = controllerFields.length - 1; i >= 0; i--) {
+                    controllerFields[i].set(Zeus.bossHunt, controllerValues[i]);
+                }
             }
         } catch (Throwable error) {
             check("F01 focused integration fixture failed: " + error.getMessage(), false);
@@ -2222,11 +2391,17 @@ public class BossHuntIntegrationTest {
                     && "SERVER".equals(observed.origin) && observed.rowCount() > 0);
             check("R4-PASSIVE-14: passive schedule never arms a native menu action",
                     Zeus.pendingBossMenuSelection == null && commandCalls[0] == 0);
-            // The operator's native command remains callable by an explicit action.
-            // This is a local mock IAction, NOT a live client packet.
+            // Rebind the fixture's original foreground Menu2 before an
+            // explicit operator mock command. No Boss dispatch occurs here.
+            GameCanvas.menu2 = operatorMenu;
+            check("R5-10: original operator menu is visible before manual perform",
+                    GameCanvas.menu2 == operatorMenu && operatorMenu.isShowMenu);
+            // The IAction implementation is local test code, not live native packet proof.
             ((iCommand) nativeItems.elementAt(0)).perform();
-            check("R4-PASSIVE-15: explicit operator action remains available",
-                    commandCalls[0] == 1);
+            check("R4-PASSIVE-15: explicit operator mock action remains available",
+                    commandCalls[0] == 1 && GameCanvas.menu2 == operatorMenu
+                    && operatorMenu.isShowMenu);
+            GameCanvas.menu2 = null;
         } catch (Throwable error) {
             check("R4 passive Menu2 fixture failed: " + error.getMessage(), false);
         } finally {
