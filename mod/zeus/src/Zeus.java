@@ -717,6 +717,9 @@ public final class Zeus {
     private static int bossNpcPathAttempts = 0;
     private static long bossNpcPathAttemptAt = 0L;
     private static int bossNpcPathMap = -1;
+    // Unproven GiaoTiep -> Dynamic_Menu causality: observe operator menus only.
+    // Compile-time private policy; no runtime configuration or override enables dispatch.
+    private static final boolean BOSS_SCHEDULE_PASSIVE_ONLY = true;
     // Recorded Menu2 protocol idNPC; never confuse with MainObject.ID.
     private static final int BOSS_RECORDED_MENU_NPC = -22;
     private static final long BOSS_ACQUISITION_WINDOW_MS = 12000L;
@@ -846,6 +849,7 @@ public final class Zeus {
     /** Arm only after Boss Hunt itself successfully invokes native Doubar GiaoTiep(). */
     private static void beginBossMenuAcquisition(MainObject npc, long now) {
         clearBossMenuAcquisition();
+        if (BOSS_SCHEDULE_PASSIVE_ONLY) return;
         if (npc == null || !isBossScheduleNpc(npc.name)
                 || GameCanvas.loadmap == null
                 || GameCanvas.loadmap.idMap != BOSS_SCHEDULE_SOURCE_MAP
@@ -979,6 +983,12 @@ public final class Zeus {
     }
 
     public static boolean dispatchPendingBossMenuSelection(long now) {
+        // Even a stale/injected intent cannot invoke iCommand.perform in passive mode.
+        if (BOSS_SCHEDULE_PASSIVE_ONLY) {
+            clearBossMenuAcquisition();
+            recordBossHuntDiagReason("SCHEDULE_MANUAL_NPC_REQUIRED");
+            return false;
+        }
         if (pendingBossMenuSelection == null) {
             return false;
         }
@@ -4808,6 +4818,10 @@ public final class Zeus {
      * Called on character-select / world entry transitions.
      */
     public static void sessionReset() {
+        // Retire old-session movement BEFORE incrementing native session generation.
+        // navSessionReset() uses exact player/path/map/session identity to release
+        // only our own Travel/Boss locks and preserves unrelated native movement.
+        navSessionReset();
         resetNativeInputCapture();
         clearBossMenuAcquisition();
         readySettleTicks = 0;
@@ -4817,7 +4831,6 @@ public final class Zeus {
         dialogLastTracedFingerprint = "";
         authReset();
         mapStableReset();
-        navSessionReset();
         bossReleaseMovement(false);
         bossNpcPathAttempts = 0;
         bossNpcPathAttemptAt = 0L;
@@ -11615,6 +11628,10 @@ public final class Zeus {
 
     public static void observeBossMenu(String origin, mVector items, int idMenu, int idNPC, String title, long now) {
         try {
+            if (BOSS_SCHEDULE_PASSIVE_ONLY && (pendingBossMenuSelection != null
+                    || bossAcquireStage != BOSS_ACQUIRE_NONE)) {
+                clearBossMenuAcquisition();
+            }
             String reason = classifyBossMenu(title, items);
             if (reason == null) {
                 return;
@@ -11654,7 +11671,9 @@ public final class Zeus {
             }
 
             // Slice B / BHX-04 / BHX-09: Bounded operator-enabled NPC schedule stepping
-            if (origin != null && origin.equals("SERVER") && bossHunt != null && bossHunt.isEnabled()
+            if (!BOSS_SCHEDULE_PASSIVE_ONLY
+                    && origin != null && origin.equals("SERVER")
+                    && bossHunt != null && bossHunt.isEnabled()
                     && bossHunt.getState() == BossHuntState.NEED_SCHEDULE && items != null
                     && validBossMenuAcquisition(now)
                     && idNPC == BOSS_RECORDED_MENU_NPC
@@ -11844,7 +11863,12 @@ public final class Zeus {
 
             // 0. Initial schedule acquisition via NPC when in NEED_SCHEDULE (BHX-09 & R4.3.9 Foreground Gate)
             if (bossHunt.getState() == BossHuntState.NEED_SCHEDULE) {
-                if (pDead) {
+                if (BOSS_SCHEDULE_PASSIVE_ONLY) {
+                    // Travel may still walk toward map 33, but never approach,
+                    // click Doubar, close a menu, or select an operator-owned row.
+                    clearBossMenuAcquisition();
+                    recordBossHuntDiagReason("SCHEDULE_MANUAL_NPC_REQUIRED");
+                } else if (pDead) {
                     // Character dead
                 } else if (higherPriority) {
                     recordBossHuntDiagReason("HIGHER_PRIORITY");

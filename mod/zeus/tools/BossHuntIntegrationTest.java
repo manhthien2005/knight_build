@@ -590,8 +590,12 @@ public class BossHuntIntegrationTest {
                 return; // finally restores all test-owned fields, without a native tick.
             }
             Zeus.bossHuntTick();
-            checkEquals("F01-ACQ-SAFE-01: Cross-map routing requested before Travel tick",
-                    "SCHEDULE_WALK_TO_SOURCE", Zeus.getLastBossHuntDiagReason());
+            checkEquals("R4-PASSIVE: Cross-map still requires manual NPC interaction",
+                    "SCHEDULE_MANUAL_NPC_REQUIRED", Zeus.getLastBossHuntDiagReason());
+            java.lang.reflect.Method goalForSchedule = Zeus.class.getDeclaredMethod("goal");
+            goalForSchedule.setAccessible(true);
+            check("R4-PASSIVE: walking-only map 33 Travel goal remains active",
+                    ((Integer) goalForSchedule.invoke(null)).intValue() == 33);
             check("F01-ACQ-SAFE-01: No automatic movement lock acquired", !Player.isLockKey);
             check("F01-ACQ-SAFE-01: No route path written", GameScreen.player.posTransRoad == null);
 
@@ -1804,7 +1808,7 @@ public class BossHuntIntegrationTest {
 
         checkEquals("F01-SAFE-01: Historical attempt cannot dispatch foreground command", 0, buyCalls[0]);
         checkEquals("Scenario A: Close action not invoked", 0, closeCalls[0]);
-        checkEquals("Scenario A: Reason is unverified provenance", "DIALOG_PROVENANCE_UNVERIFIED", Zeus.getLastBossHuntDiagReason());
+        checkEquals("Scenario A: passive policy explains manual NPC requirement", "SCHEDULE_MANUAL_NPC_REQUIRED", Zeus.getLastBossHuntDiagReason());
 
         // F01-SAFE-01: repeated ticks cannot turn a stale attempt into ownership.
         Zeus.bossHuntTick();
@@ -1824,7 +1828,7 @@ public class BossHuntIntegrationTest {
 
         Zeus.bossHuntTick();
         checkEquals("Scenario B: Unproven dialog rejected without background menu", 0, buyCalls[0]);
-        checkEquals("Scenario B: Reason is unverified provenance", "DIALOG_PROVENANCE_UNVERIFIED", Zeus.getLastBossHuntDiagReason());
+        checkEquals("Scenario B: passive policy explains manual NPC requirement", "SCHEDULE_MANUAL_NPC_REQUIRED", Zeus.getLastBossHuntDiagReason());
 
         // 3. SCENARIO C: Pending native menu selection BLOCKED when foreground dialog is active
         Zeus.resetBossDialogBridgeState();
@@ -1894,7 +1898,7 @@ public class BossHuntIntegrationTest {
 
         Zeus.bossHuntTick();
         checkEquals("Scenario D: Unrelated purchase dialog not advanced through bossHuntTick", 0, buyCalls[0]);
-        checkEquals("Scenario D: Diagnostic recorded DIALOG_TEXT_UNRECOGNIZED", "DIALOG_TEXT_UNRECOGNIZED", Zeus.getLastBossHuntDiagReason());
+        checkEquals("Scenario D: passive policy does not inspect operator dialog", "SCHEDULE_MANUAL_NPC_REQUIRED", Zeus.getLastBossHuntDiagReason());
         check("Scenario D: Background Menu2 was not dismissed", GameCanvas.menu2.isShowMenu);
         check("Scenario D: Unrelated foreground was not dismissed", GameCanvas.currentDialog == unrelatedDialog);
         GameCanvas.menu2.isShowMenu = false;
@@ -1916,7 +1920,7 @@ public class BossHuntIntegrationTest {
 
         Zeus.bossHuntTick();
         checkEquals("Scenario E: Wrong NPC not advanced through bossHuntTick", 0, buyCalls[0]);
-        checkEquals("Scenario E: Diagnostic recorded NPC_NOT_FOUND", "NPC_NOT_FOUND", Zeus.getLastBossHuntDiagReason());
+        checkEquals("Scenario E: passive policy never adopts foreign NPC", "SCHEDULE_MANUAL_NPC_REQUIRED", Zeus.getLastBossHuntDiagReason());
 
         // Restore Alisama
         GameScreen.Vecplayers.removeAllElements();
@@ -1933,7 +1937,7 @@ public class BossHuntIntegrationTest {
 
         Zeus.bossHuntTick();
         checkEquals("Scenario F: Far NPC not advanced through bossHuntTick", 0, buyCalls[0]);
-        checkEquals("Scenario F: Diagnostic recorded NPC_OUT_OF_RANGE", "NPC_OUT_OF_RANGE", Zeus.getLastBossHuntDiagReason());
+        checkEquals("Scenario F: passive policy does not approach distant NPC", "SCHEDULE_MANUAL_NPC_REQUIRED", Zeus.getLastBossHuntDiagReason());
 
         // Restore Alisama position
         alisama.x = 110;
@@ -1948,7 +1952,7 @@ public class BossHuntIntegrationTest {
 
         Zeus.bossHuntTick();
         checkEquals("Scenario G: No interaction attempt not advanced through bossHuntTick", 0, buyCalls[0]);
-        checkEquals("Scenario G: Diagnostic recorded NO_OWN_INTERACT_ATTEMPT", "NO_OWN_INTERACT_ATTEMPT", Zeus.getLastBossHuntDiagReason());
+        checkEquals("Scenario G: passive policy never initiates NPC dialog", "SCHEDULE_MANUAL_NPC_REQUIRED", Zeus.getLastBossHuntDiagReason());
 
         // 8. SCENARIO H: Ambiguous buttons (3 buttons) fails closed
         MsgDialog ambiguousDialog = new MsgDialog();
@@ -1970,7 +1974,7 @@ public class BossHuntIntegrationTest {
 
         Zeus.bossHuntTick();
         checkEquals("Scenario H: Ambiguous 3-button dialog not advanced", 0, buyCalls[0]);
-        checkEquals("Scenario H: Diagnostic recorded DIALOG_BUTTON_MISMATCH", "DIALOG_BUTTON_MISMATCH", Zeus.getLastBossHuntDiagReason());
+        checkEquals("Scenario H: passive policy ignores ambiguous dialogs", "SCHEDULE_MANUAL_NPC_REQUIRED", Zeus.getLastBossHuntDiagReason());
 
         // 9. SCENARIO I: Retry limit reached (bridge tries >= 3) fails closed
         Zeus.resetBossDialogBridgeState();
@@ -1985,7 +1989,7 @@ public class BossHuntIntegrationTest {
 
         Zeus.bossHuntTick();
         checkEquals("Scenario I: Repeated attempts cannot bypass provenance", 0, buyCalls[0]);
-        checkEquals("Scenario I: Repeated dialogs remain unverified", "DIALOG_PROVENANCE_UNVERIFIED", Zeus.getLastBossHuntDiagReason());
+        checkEquals("Scenario I: repeated dialogs require manual interaction", "SCHEDULE_MANUAL_NPC_REQUIRED", Zeus.getLastBossHuntDiagReason());
 
         // 10. SCENARIO J: Higher priority yields and records HIGHER_PRIORITY
         Zeus.resetBossDialogBridgeState();
@@ -2053,303 +2057,206 @@ public class BossHuntIntegrationTest {
     }
 
     private static void testServerMenuNativeSelectionDispatch() {
-        System.out.println("\n--- testServerMenuNativeSelectionDispatch ---");
-
-        // Isolated map 33/NPC context. The private fixture armer simulates the
-        // post-GiaoTiep ownership boundary; it does NOT prove a live NPC callback.
+        System.out.println("\n--- testServerMenuNativeSelectionDispatch (PASSIVE_ONLY) ---");
         final LoadMap savedMap = GameCanvas.loadmap;
         final int savedMapId = savedMap == null ? -1 : savedMap.idMap;
+        final GameScreen savedGame = GameCanvas.game;
+        final MainScreen savedScreen = GameCanvas.currentScreen;
         final Player savedPlayer = GameScreen.player;
         final mVector savedPlayers = GameScreen.Vecplayers;
+        final MainObject savedFocus = GameScreen.ObjFocus;
         final MainDialog savedDialog = GameCanvas.currentDialog;
         final Menu2 savedMenu = GameCanvas.menu2;
         final boolean savedLock = Player.isLockKey;
+        final boolean savedChat = ChatTextField.isShow;
         final String savedConfigPath = Zeus.bossHuntConfigPath;
+        final String savedStatusPath = Zeus.bossHuntStatusPath;
         final boolean savedEnabled = Zeus.bossHunt.isEnabled();
-        final BossHuntState savedBossState = Zeus.bossHunt.getState();
-        if (GameCanvas.loadmap == null) {
+        final BossHuntState savedState = Zeus.bossHunt.getState();
+        final BossHuntScheduler.ScheduleEntry savedEntry = Zeus.bossHunt.getActiveEntry();
+        final String savedReason = Zeus.getLastBossHuntDiagReason();
+        java.lang.reflect.Field npcAttemptsField = null;
+        java.lang.reflect.Field npcAttemptTimeField = null;
+        java.lang.reflect.Field schedulePathField = null;
+        java.lang.reflect.Field latestReportField = null;
+        Object savedSchedulePath = null;
+        Object savedLatestReport = null;
+        int savedNpcAttempts = 0;
+        long savedNpcAttemptTime = 0L;
+        try {
+            npcAttemptsField = Zeus.class.getDeclaredField("bossNpcInteractTries");
+            npcAttemptsField.setAccessible(true);
+            savedNpcAttempts = npcAttemptsField.getInt(null);
+            npcAttemptTimeField = Zeus.class.getDeclaredField("lastBossNpcInteractAttempt");
+            npcAttemptTimeField.setAccessible(true);
+            savedNpcAttemptTime = npcAttemptTimeField.getLong(null);
+            schedulePathField = Zeus.class.getDeclaredField("bossSchedulePath");
+            schedulePathField.setAccessible(true);
+            savedSchedulePath = schedulePathField.get(null);
+            schedulePathField.set(null, null); // observation cannot write operator sidecars
+            latestReportField = BossScheduleReader.class.getDeclaredField("latestReport");
+            latestReportField.setAccessible(true);
+            savedLatestReport = latestReportField.get(null);
+
+            if (GameCanvas.game == null) GameCanvas.game = new GameScreen();
+            GameCanvas.currentScreen = GameCanvas.game;
+            if (GameCanvas.loadmap == null) GameCanvas.loadmap = allocateBossScheduleTestMap();
+            GameCanvas.loadmap.idMap = 33;
+            GameScreen.player = new Player(100, (byte) 0, "r4_passive_fixture", 0, 0);
+            GameScreen.player.x = 100;
+            GameScreen.player.y = 100;
+            GameScreen.player.hp = 1000;
+            GameScreen.player.Action = (byte) 0;
+            GameScreen.player.posTransRoad = null;
+            Player.isLockKey = false;
+            ChatTextField.isShow = false;
+            GameScreen.ObjFocus = null;
+            GameCanvas.currentDialog = null;
+            GameCanvas.menu2 = null;
+            GameScreen.Vecplayers = new mVector();
+            MainObject doubar = new MainObject();
+            doubar.name = "Doubar";
+            doubar.typeObject = 2;
+            doubar.x = 110;
+            doubar.y = 100;
+            GameScreen.Vecplayers.addElement(doubar);
+            Zeus.bossHuntConfigPath = null;
+            Zeus.bossHuntStatusPath = null;
+            Zeus.bossHunt.getConfig().setEnabled(true);
+            Zeus.bossHunt.setActiveEntry(null);
+            Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
+            Zeus.resetBossMenuSelectionState();
+            npcAttemptsField.setInt(null, 0);
+            npcAttemptTimeField.setLong(null, 0L);
+            Zeus.clearBossHuntDiagReason();
+
+            // The actual production Boss tick must NOT initiate NPC GiaoTiep.
+            Zeus.bossHuntTick();
+            check("R4-PASSIVE-01: nearby Doubar never auto-clicked",
+                    npcAttemptsField.getInt(null) == 0
+                    && npcAttemptTimeField.getLong(null) == 0L);
+            checkEquals("R4-PASSIVE-02: operator action is explicitly required",
+                    "SCHEDULE_MANUAL_NPC_REQUIRED", Zeus.getLastBossHuntDiagReason());
+            check("R4-PASSIVE-03: no automatic NPC approach path or movement lock",
+                    GameScreen.player.posTransRoad == null && !Player.isLockKey);
+
+            long now = System.currentTimeMillis();
+            mVector entry = new mVector();
+            entry.addElement(new iCommand("Nhiệm vụ", (IAction) null));
+            entry.addElement(new iCommand("Thông tin boss", (IAction) null));
+            entry.addElement(new iCommand("Đóng", (IAction) null));
+
+            // Even the former private fixture arm hook is permanently disabled.
+            Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
+            armBossMenuFixture(doubar, now);
+            Zeus.observeBossMenu("SERVER", entry, 0, -22, "MENU", now);
+            check("R4-PASSIVE-04: valid Boss menu stays observation-only",
+                    Zeus.pendingBossMenuSelection == null);
+            Zeus.observeBossMenu("SERVER", entry, 0, -90, "MENU", now + 10L);
+            check("R4-PASSIVE-05: foreign server menu cannot stage", Zeus.pendingBossMenuSelection == null);
+
+            final int[] commandCalls = new int[1];
+            Menu2 operatorMenu = new Menu2();
+            Zeus.setMenu2IdMenu(operatorMenu, 0);
+            Zeus.setMenu2IdNpc(operatorMenu, -22);
+            operatorMenu.isShowMenu = true;
+            operatorMenu.menuSelectedItem = 0;
+            mVector nativeItems = new mVector();
+            nativeItems.addElement(new iCommand("Thông tin boss", new IAction() {
+                public void perform() { commandCalls[0]++; }
+            }));
+            operatorMenu.menuItems = nativeItems;
+            GameCanvas.menu2 = operatorMenu;
+
+            // Deliberately inject a stale selection to exercise the dispatch guard.
+            Zeus.pendingBossMenuSelection = new Zeus.PendingBossMenuSelection(
+                    -22, 0, 0, "Thông tin boss", "MATCH_BOSS_ENTRY", now, 1);
+            boolean autoSelected = Zeus.dispatchPendingBossMenuSelection(now + 100L);
+            check("R4-PASSIVE-06: injected selection can never invoke native command",
+                    !autoSelected && commandCalls[0] == 0
+                    && Zeus.pendingBossMenuSelection == null);
+            check("R4-PASSIVE-07: operator menu identity and selection untouched",
+                    GameCanvas.menu2 == operatorMenu && operatorMenu.isShowMenu
+                    && operatorMenu.menuSelectedItem == 0);
+
+            Zeus.bossHuntTick();
+            check("R4-PASSIVE-08: Boss tick cannot dismiss operator Menu2",
+                    GameCanvas.menu2 == operatorMenu && operatorMenu.isShowMenu
+                    && commandCalls[0] == 0);
+
+            // Foreground dialog outranks even a visible background Menu2.
+            MsgDialog foreground = new MsgDialog();
+            GameCanvas.currentDialog = foreground;
+            Zeus.bossHuntTick();
+            check("R4-PASSIVE-09: foreground dialog is never auto-confirmed",
+                    GameCanvas.currentDialog == foreground
+                    && GameCanvas.menu2 == operatorMenu && operatorMenu.isShowMenu
+                    && commandCalls[0] == 0);
+            GameCanvas.currentDialog = null;
+            GameCanvas.menu2 = null;
+
+            GameCanvas.loadmap.idMap = 1;
+            Zeus.observeBossMenu("SERVER", entry, 0, -22, "MENU", now + 200L);
+            check("R4-PASSIVE-10: changed map cannot produce pending selection",
+                    Zeus.pendingBossMenuSelection == null);
+            GameCanvas.loadmap.idMap = 33;
+            Player.isLockKey = true;
+            Zeus.observeBossMenu("SERVER", entry, 0, -22, "MENU", now + 300L);
+            check("R4-PASSIVE-11: manual takeover cannot stage menu actions",
+                    Zeus.pendingBossMenuSelection == null);
+            Player.isLockKey = false;
+            Zeus.bossHunt.getConfig().setEnabled(false);
+            Zeus.observeBossMenu("SERVER", entry, 0, -22, "MENU", now + 400L);
+            check("R4-PASSIVE-12: disabled Boss Hunt cannot stage menu actions",
+                    Zeus.pendingBossMenuSelection == null);
+
+            // Passive SERVER schedule observation remains enabled independently.
+            mVector schedule = new mVector();
+            schedule.addElement(new iCommand(
+                    "Dê Vàng: 10:14:00. Rừng cao nguyên K 2", (IAction) null));
+            BossScheduleReader.ScheduleReport previous = BossScheduleReader.getLatestReport();
+            Zeus.observeBossMenu("SERVER", schedule, 137, -22, "MENU", now + 500L);
+            BossScheduleReader.ScheduleReport observed = BossScheduleReader.getLatestReport();
+            check("R4-PASSIVE-13: operator schedule still reaches parser",
+                    observed != null && observed != previous
+                    && "SERVER".equals(observed.origin) && observed.rowCount() > 0);
+            check("R4-PASSIVE-14: passive schedule never arms a native menu action",
+                    Zeus.pendingBossMenuSelection == null && commandCalls[0] == 0);
+            // The operator's native command remains callable by an explicit action.
+            // This is a local mock IAction, NOT a live client packet.
+            ((iCommand) nativeItems.elementAt(0)).perform();
+            check("R4-PASSIVE-15: explicit operator action remains available",
+                    commandCalls[0] == 1);
+        } catch (Throwable error) {
+            check("R4 passive Menu2 fixture failed: " + error.getMessage(), false);
+        } finally {
+            Zeus.resetBossMenuSelectionState();
             try {
-                GameCanvas.loadmap = allocateBossScheduleTestMap();
-            } catch (Exception error) {
-                throw new IllegalStateException("Cannot allocate Boss Menu2 test map", error);
+                if (npcAttemptsField != null) npcAttemptsField.setInt(null, savedNpcAttempts);
+                if (npcAttemptTimeField != null) npcAttemptTimeField.setLong(null, savedNpcAttemptTime);
+                if (schedulePathField != null) schedulePathField.set(null, savedSchedulePath);
+                if (latestReportField != null) latestReportField.set(null, savedLatestReport);
+            } catch (Throwable error) {
+                check("R4 passive fixture failed to restore captured static state", false);
             }
+            GameCanvas.loadmap = savedMap;
+            if (savedMap != null) savedMap.idMap = savedMapId;
+            GameCanvas.game = savedGame;
+            GameCanvas.currentScreen = savedScreen;
+            GameScreen.player = savedPlayer;
+            GameScreen.Vecplayers = savedPlayers;
+            GameScreen.ObjFocus = savedFocus;
+            GameCanvas.currentDialog = savedDialog;
+            GameCanvas.menu2 = savedMenu;
+            Player.isLockKey = savedLock;
+            ChatTextField.isShow = savedChat;
+            Zeus.bossHuntConfigPath = savedConfigPath;
+            Zeus.bossHuntStatusPath = savedStatusPath;
+            Zeus.bossHunt.getConfig().setEnabled(savedEnabled);
+            Zeus.bossHunt.setActiveEntry(savedEntry);
+            Zeus.bossHunt.setState(savedState);
+            Zeus.clearBossHuntDiagReason();
+            if (savedReason != null) Zeus.recordBossHuntDiagReason(savedReason);
         }
-        GameCanvas.loadmap.idMap = 33;
-        GameScreen.player = new Player(100, (byte) 0, "boss_menu_fixture", 0, 0);
-        GameScreen.player.x = 100;
-        GameScreen.player.y = 100;
-        GameScreen.player.hp = 1000;
-        Player.isLockKey = false;
-        GameCanvas.currentDialog = null;
-        GameCanvas.menu2 = null;
-        GameScreen.Vecplayers = new mVector();
-        MainObject doubar = new MainObject();
-        doubar.name = "Doubar";
-        doubar.typeObject = 2;
-        doubar.x = 110;
-        doubar.y = 100;
-        GameScreen.Vecplayers.addElement(doubar);
-        Zeus.bossHuntConfigPath = null;
-
-        // Setup offline Session_ME packet queue (no network socket)
-        CLib.Session_ME session = CLib.Session_ME.gI();
-        if (session == null) {
-            new CLib.Session_ME();
-            session = CLib.Session_ME.gI();
-        }
-        java.util.Vector queue = null;
-        try {
-            java.lang.reflect.Field fNet = netcommand.Cmd_Message.class.getDeclaredField("session");
-            fNet.setAccessible(true);
-            fNet.set(netcommand.global.GlobalService.gI(), session);
-
-            java.lang.reflect.Field fSender = CLib.Session_ME.class.getDeclaredField("sender");
-            fSender.setAccessible(true);
-            Object sender = fSender.get(session);
-
-            java.lang.reflect.Field fQueue = sender.getClass().getDeclaredField("sendingMessage");
-            fQueue.setAccessible(true);
-            queue = (java.util.Vector) fQueue.get(sender);
-            queue.removeAllElements();
-        } catch (Throwable t) {
-            System.err.println("Warning: could not initialize Session_ME queue: " + t.getMessage());
-        }
-
-        // 1. Raw Server Command Inefficacy Verification (BHX-14 Reproduction)
-        InterfaceComponents.iCommand rawServerCmd = new InterfaceComponents.iCommand("Thông tin boss", (InterfaceComponents.IAction) null);
-        check("Raw server iCommand has null action", rawServerCmd.action == null);
-        check("Raw server iCommand has null Pointer", rawServerCmd.Pointer == null);
-        check("Raw server iCommand has indexMenu 0", rawServerCmd.indexMenu == 0);
-        boolean rawExceptionOccurred = false;
-        try {
-            rawServerCmd.perform();
-        } catch (Throwable t) {
-            rawExceptionOccurred = true;
-        }
-        check("Raw server iCommand cannot dispatch Menu2 case-2 (fails or no-op)", rawExceptionOccurred || (queue != null && queue.size() == 0));
-        if (queue != null) {
-            checkEquals("Raw server iCommand perform() sends 0 packets", 0, queue.size());
-        }
-
-        // 2. Setup Boss Hunt State
-        Zeus.resetBossMenuSelectionState();
-        Zeus.bossHunt.getConfig().setEnabled(true);
-        for (int b = 0; b < BossCatalog.BOSS_COUNT; b++) {
-            Zeus.bossHunt.getConfig().setZoneMask(b, 0);
-        }
-        Zeus.bossHunt.getConfig().setZoneMask(1, 1); // Dê Vàng (bossId 1) in Zone 1
-        Zeus.bossHunt.setState(BossHuntState.NEED_SCHEDULE);
-
-        long now = 3000000L;
-
-        // Unowned/operator-opened menus must never stage an auto action.
-        mVector unownedItems = new mVector();
-        unownedItems.addElement(new InterfaceComponents.iCommand("Thông tin boss", (InterfaceComponents.IAction) null));
-        Zeus.observeBossMenu("SERVER", unownedItems, 0, -22, "MENU", now - 100L);
-        check("R3-F03: recognized unowned menu is passive only", Zeus.pendingBossMenuSelection == null);
-
-        // 3. Incoming Server Entry Menu Hook (Stage intent without raw dispatch)
-        mVector rawEntryItems = new mVector();
-        rawEntryItems.addElement(new InterfaceComponents.iCommand("Nhiệm vụ", (InterfaceComponents.IAction) null));
-        rawEntryItems.addElement(new InterfaceComponents.iCommand("Thông tin boss", (InterfaceComponents.IAction) null));
-        rawEntryItems.addElement(new InterfaceComponents.iCommand("Đóng", (InterfaceComponents.IAction) null));
-
-        // Wrong map, mismatched protocol NPC and stale contexts are fail-closed.
-        armBossMenuFixture(doubar, now);
-        GameCanvas.loadmap.idMap = 1;
-        Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 50L);
-        check("R3-F03: changed map cannot stage", Zeus.pendingBossMenuSelection == null);
-        GameCanvas.loadmap.idMap = 33;
-        armBossMenuFixture(doubar, now);
-        Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -23, "MENU", now + 100L);
-        check("R3-F03: foreign idNPC cannot stage", Zeus.pendingBossMenuSelection == null);
-        armBossMenuFixture(doubar, now);
-        Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 12001L);
-        check("R3-F03: expired interaction cannot stage", Zeus.pendingBossMenuSelection == null);
-        armBossMenuFixture(doubar, now);
-        Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now);
-
-        check("Pending selection staged on MATCH_BOSS_ENTRY", Zeus.pendingBossMenuSelection != null);
-        if (Zeus.pendingBossMenuSelection != null) {
-            checkEquals("Staged menuId is 0", 0, Zeus.pendingBossMenuSelection.menuId);
-            checkEquals("Staged npcId is -22", -22, Zeus.pendingBossMenuSelection.npcId);
-            checkEquals("Staged targetRow is 1", 1, Zeus.pendingBossMenuSelection.targetRow);
-            checkEquals("Staged stage is MATCH_BOSS_ENTRY", "MATCH_BOSS_ENTRY", Zeus.pendingBossMenuSelection.stage);
-        }
-        if (queue != null) {
-            checkEquals("No packets sent before menu initialization", 0, queue.size());
-        }
-
-        // 4. Menu Not Ready / Not Shown -> Fail to dispatch, keep pending
-        GameCanvas.menu2 = new Menu2();
-        GameCanvas.menu2.isShowMenu = false;
-        boolean dispatchEarly = Zeus.dispatchPendingBossMenuSelection(now + 100L);
-        check("Dispatch blocked while Menu2 isShowMenu is false", !dispatchEarly);
-        check("Pending selection retained while waiting for menu", Zeus.pendingBossMenuSelection != null);
-        if (queue != null) {
-            checkEquals("No packets sent while Menu2 is uninitialized", 0, queue.size());
-        }
-
-        // 5. Native Menu2 Ready -> Dispatch row 1 with authentic Menu2 ABI
-        Zeus.setMenu2IdMenu(GameCanvas.menu2, 0);
-        Zeus.setMenu2IdNpc(GameCanvas.menu2, -22);
-        GameCanvas.menu2.isShowMenu = true;
-        GameCanvas.menu2.menuSelectedItem = 0; // default 0
-
-        mVector nativeEntryItems = new mVector();
-        nativeEntryItems.addElement(new InterfaceComponents.iCommand("Nhiệm vụ", 2, GameCanvas.menu2));
-        nativeEntryItems.addElement(new InterfaceComponents.iCommand("Thông tin boss", 2, GameCanvas.menu2));
-        nativeEntryItems.addElement(new InterfaceComponents.iCommand("Đóng", 2, GameCanvas.menu2));
-        GameCanvas.menu2.menuItems = nativeEntryItems;
-
-        boolean dispatchSuccess = Zeus.dispatchPendingBossMenuSelection(now + 1500L);
-        check("Dispatch succeeds when native Menu2 is verified and ready", dispatchSuccess);
-        check("Pending selection cleared after dispatch", Zeus.pendingBossMenuSelection == null);
-        checkEquals("Native Menu2 menuSelectedItem synchronized to 1", 1, GameCanvas.menu2.menuSelectedItem);
-        check("Native Menu2 closed by commandPointer case 2", !GameCanvas.menu2.isShowMenu);
-
-        if (queue != null && queue.size() > 0) {
-            net.Message msg = (net.Message) queue.elementAt(0);
-            checkEquals("Dispatched packet command is -30 (Dynamic_Menu)", (byte) -30, msg.command);
-            byte[] data = msg.getData();
-            checkEquals("Packet data length is 4 bytes", 4, data.length);
-            short sentNpc = (short) (((data[0] & 0xFF) << 8) | (data[1] & 0xFF));
-            byte sentMenuId = data[2];
-            byte sentRow = data[3];
-            checkEquals("Packet payload npcId is -22", -22, (int) sentNpc);
-            checkEquals("Packet payload menuId is 0", 0, (int) sentMenuId);
-            checkEquals("Packet payload selectedRow is 1", 1, (int) sentRow);
-        }
-
-        // 6. No Duplicate Packets on Repeated Ticks
-        boolean dispatchDuplicate = Zeus.dispatchPendingBossMenuSelection(now + 1600L);
-        check("Duplicate tick dispatch rejected (fail-closed / no duplicate)", !dispatchDuplicate);
-        if (queue != null) {
-            checkEquals("Queue count unchanged on duplicate tick", 1, queue.size());
-            queue.removeAllElements();
-        }
-
-        // 7. Repeat for MATCH_BOSS_ROSTER: Select target boss 'Dê Vàng' at index 1
-        mVector rawRosterItems = new mVector();
-        rawRosterItems.addElement(new InterfaceComponents.iCommand("Dê Bạc", (InterfaceComponents.IAction) null));
-        rawRosterItems.addElement(new InterfaceComponents.iCommand("Dê Vàng", (InterfaceComponents.IAction) null));
-        rawRosterItems.addElement(new InterfaceComponents.iCommand("Đóng", (InterfaceComponents.IAction) null));
-
-        Zeus.observeBossMenu("SERVER", rawRosterItems, 1, -22, "MENU", now + 2500L);
-        check("Pending selection staged on MATCH_BOSS_ROSTER", Zeus.pendingBossMenuSelection != null);
-        if (Zeus.pendingBossMenuSelection != null) {
-            checkEquals("Roster staged menuId is 1", 1, Zeus.pendingBossMenuSelection.menuId);
-            checkEquals("Roster staged targetRow is 1 (Dê Vàng)", 1, Zeus.pendingBossMenuSelection.targetRow);
-        }
-
-        // Setup native Menu2 for roster
-        GameCanvas.menu2 = new Menu2();
-        Zeus.setMenu2IdMenu(GameCanvas.menu2, 1);
-        Zeus.setMenu2IdNpc(GameCanvas.menu2, -22);
-        GameCanvas.menu2.isShowMenu = true;
-
-        mVector nativeRosterItems = new mVector();
-        nativeRosterItems.addElement(new InterfaceComponents.iCommand("Dê Bạc", 2, GameCanvas.menu2));
-        nativeRosterItems.addElement(new InterfaceComponents.iCommand("Dê Vàng", 2, GameCanvas.menu2));
-        nativeRosterItems.addElement(new InterfaceComponents.iCommand("Đóng", 2, GameCanvas.menu2));
-        GameCanvas.menu2.menuItems = nativeRosterItems;
-
-        boolean rosterDispatch = Zeus.dispatchPendingBossMenuSelection(now + 4000L);
-        check("Roster dispatch succeeds for target boss Dê Vàng", rosterDispatch);
-        checkEquals("Roster Menu2 menuSelectedItem synchronized to 1", 1, GameCanvas.menu2.menuSelectedItem);
-        if (queue != null && queue.size() > 0) {
-            net.Message msg = (net.Message) queue.elementAt(0);
-            byte[] data = msg.getData();
-            short sentNpc = (short) (((data[0] & 0xFF) << 8) | (data[1] & 0xFF));
-            byte sentMenuId = data[2];
-            byte sentRow = data[3];
-            checkEquals("Roster packet payload npcId is -22", -22, (int) sentNpc);
-            checkEquals("Roster packet payload menuId is 1", 1, (int) sentMenuId);
-            checkEquals("Roster packet payload selectedRow is 1", 1, (int) sentRow);
-            queue.removeAllElements();
-        }
-
-        // 8. Negative test: Mismatched / Stale IdMenu fails closed
-        GameCanvas.menu2 = null;
-        armBossMenuFixture(doubar, now + 5000L);
-        Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 5000L);
-        check("Entry staged for mismatch test", Zeus.pendingBossMenuSelection != null);
-        GameCanvas.menu2 = new Menu2();
-        Zeus.setMenu2IdMenu(GameCanvas.menu2, 99); // wrong menuId 99
-        Zeus.setMenu2IdNpc(GameCanvas.menu2, -22);
-        GameCanvas.menu2.isShowMenu = true;
-        GameCanvas.menu2.menuItems = nativeEntryItems;
-
-        boolean mismatchDispatch = Zeus.dispatchPendingBossMenuSelection(now + 6500L);
-        check("Dispatch rejected on mismatched menuId (fails closed)", !mismatchDispatch);
-        check("Pending selection cancelled on menu mismatch", Zeus.pendingBossMenuSelection == null);
-        if (queue != null) {
-            checkEquals("0 packets sent on menu mismatch", 0, queue.size());
-        }
-
-        // 9. Negative test: Mismatched row caption fails closed
-        GameCanvas.menu2 = null;
-        armBossMenuFixture(doubar, now + 7000L);
-        Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 7000L);
-        GameCanvas.menu2 = new Menu2();
-        Zeus.setMenu2IdMenu(GameCanvas.menu2, 0);
-        Zeus.setMenu2IdNpc(GameCanvas.menu2, -22);
-        GameCanvas.menu2.isShowMenu = true;
-        mVector corruptItems = new mVector();
-        corruptItems.addElement(new InterfaceComponents.iCommand("Nhiệm vụ", 2, GameCanvas.menu2));
-        corruptItems.addElement(new InterfaceComponents.iCommand("Cửa hàng giả mạo", 2, GameCanvas.menu2)); // wrong caption
-        corruptItems.addElement(new InterfaceComponents.iCommand("Đóng", 2, GameCanvas.menu2));
-        GameCanvas.menu2.menuItems = corruptItems;
-
-        boolean corruptDispatch = Zeus.dispatchPendingBossMenuSelection(now + 8500L);
-        check("Dispatch rejected on caption mismatch (fails closed)", !corruptDispatch);
-        check("Pending selection cancelled on caption mismatch", Zeus.pendingBossMenuSelection == null);
-
-        // 10. Negative test: Timeout after 3000ms fails closed
-        GameCanvas.menu2 = null;
-        armBossMenuFixture(doubar, now + 9000L);
-        Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 9000L);
-        check("Staged before timeout", Zeus.pendingBossMenuSelection != null);
-        boolean timeoutDispatch = Zeus.dispatchPendingBossMenuSelection(now + 9000L + 3500L);
-        check("Dispatch rejected after 3500ms timeout", !timeoutDispatch);
-        check("Pending selection cleared on timeout", Zeus.pendingBossMenuSelection == null);
-
-        // 11. Negative test: Feature disabled fails closed
-        GameCanvas.menu2 = null;
-        armBossMenuFixture(doubar, now + 13000L);
-        Zeus.observeBossMenu("SERVER", rawEntryItems, 0, -22, "MENU", now + 13000L);
-        Zeus.bossHunt.getConfig().setEnabled(false);
-        boolean disabledDispatch = Zeus.dispatchPendingBossMenuSelection(now + 14500L);
-        check("Dispatch rejected when boss hunt disabled", !disabledDispatch);
-        check("Pending selection cleared when disabled", Zeus.pendingBossMenuSelection == null);
-
-        // 12. Negative test: Schedule menu 100 is read-only (never stages dispatch)
-        Zeus.bossHunt.getConfig().setEnabled(true);
-        mVector scheduleItems = new mVector();
-        scheduleItems.addElement(new InterfaceComponents.iCommand("Dê Vàng: 10:00:00. Rừng cao nguyên K 2", (InterfaceComponents.IAction) null));
-        Zeus.observeBossMenu("SERVER", scheduleItems, 100, -22, "MENU", now + 15000L);
-        check("Schedule menu 100 does not stage pending selection (read-only)", Zeus.pendingBossMenuSelection == null);
-
-        // Cleanup: preserve original scene and configuration for the following tests.
-        GameCanvas.menu2 = null;
-        for (int b = 0; b < BossCatalog.BOSS_COUNT; b++) {
-            Zeus.bossHunt.getConfig().setZoneMask(b, 31);
-        }
-        Zeus.bossHunt.getConfig().setEnabled(false);
-        Zeus.bossHunt.setState(BossHuntState.IDLE);
-        Zeus.resetBossMenuSelectionState();
-        if (queue != null) {
-            queue.removeAllElements();
-        }
-        GameCanvas.loadmap = savedMap;
-        if (savedMap != null) savedMap.idMap = savedMapId;
-        GameScreen.player = savedPlayer;
-        GameScreen.Vecplayers = savedPlayers;
-        GameCanvas.currentDialog = savedDialog;
-        GameCanvas.menu2 = savedMenu;
-        Player.isLockKey = savedLock;
-        Zeus.bossHuntConfigPath = savedConfigPath;
-        Zeus.bossHunt.getConfig().setEnabled(savedEnabled);
-        Zeus.bossHunt.setState(savedBossState);
     }
 }

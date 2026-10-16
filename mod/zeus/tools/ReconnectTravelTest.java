@@ -205,9 +205,52 @@ public class ReconnectTravelTest {
                 "travelRememberPath", new Class[] { short[].class });
         ownRoute.setAccessible(true);
         ownRoute.invoke(null, new Object[] { ownedReconnectPath });
+        int originalSession = ((Integer) get("nativePointerSessionGeneration")).intValue();
         call("sessionReset");
         check("owned travel path cleared on session reset",
                 GameScreen.player.posTransRoad == null && !Player.isLockKey);
+        check("R4-F01: session generation invalidated after attributable cleanup",
+                ((Integer) get("nativePointerSessionGeneration")).intValue() == originalSession + 1);
+        check("R4-F01: Travel ownership retired exactly once",
+                get("travelOwnedPath") == null && get("travelOwnerPlayer") == null
+                && ((Integer) get("travelOwnerKind")).intValue() == 0
+                && ((Integer) get("travelOwnerSession")).intValue() == -1);
+        call("sessionReset");
+        check("R4-F01: repeated reset cannot reacquire or double-clean movement",
+                GameScreen.player.posTransRoad == null && !Player.isLockKey
+                && get("travelOwnedPath") == null);
+
+        // A replacement manual path must survive, even if an old owner record exists.
+        setupWorldState(1);
+        short[] abandonedOwnedPath = new short[] { 50, 60 };
+        short[] manualReplacementPath = new short[] { 70, 80 };
+        GameScreen.player.posTransRoad = abandonedOwnedPath;
+        Player.isLockKey = true;
+        ownRoute.invoke(null, new Object[] { abandonedOwnedPath });
+        GameScreen.player.posTransRoad = manualReplacementPath;
+        call("sessionReset");
+        check("R4-F01: foreign replacement path and lock preserved",
+                GameScreen.player.posTransRoad == manualReplacementPath && Player.isLockKey);
+        check("R4-F01: foreign handoff retires stale owner metadata",
+                get("travelOwnedPath") == null && get("travelOwnerPlayer") == null);
+        GameScreen.player.posTransRoad = null;
+        Player.isLockKey = false;
+
+        // Session evidence invalidated elsewhere must NOT authorize cleanup.
+        short[] staleGenerationPath = new short[] { 90, 100 };
+        GameScreen.player.posTransRoad = staleGenerationPath;
+        Player.isLockKey = true;
+        ownRoute.invoke(null, new Object[] { staleGenerationPath });
+        int beforeMismatch = ((Integer) get("nativePointerSessionGeneration")).intValue();
+        set("nativePointerSessionGeneration", Integer.valueOf(beforeMismatch + 1));
+        call("sessionReset");
+        check("R4-F01: old-session ownership cannot clear a stale-generation path",
+                GameScreen.player.posTransRoad == staleGenerationPath && Player.isLockKey);
+        check("R4-F01: stale owner metadata retired without adopting path",
+                get("travelOwnedPath") == null && get("travelOwnerPlayer") == null);
+        GameScreen.player.posTransRoad = null;
+        Player.isLockKey = false;
+
         check("travelMapSeen reset to sentinel", ((Integer) get("travelMapSeen")).intValue() == Integer.MIN_VALUE);
         check("travelHops reset on new session", ((Integer) get("travelHops")).intValue() == 0);
 
