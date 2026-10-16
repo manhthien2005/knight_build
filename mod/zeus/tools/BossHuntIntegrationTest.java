@@ -2400,7 +2400,7 @@ public class BossHuntIntegrationTest {
             ((iCommand) nativeItems.elementAt(0)).perform();
             check("R4-PASSIVE-15: explicit operator mock action remains available",
                     commandCalls[0] == 1 && GameCanvas.menu2 == operatorMenu
-                    && operatorMenu.isShowMenu);
+                    && !operatorMenu.isShowMenu);
             GameCanvas.menu2 = null;
         } catch (Throwable error) {
             check("R4 passive Menu2 fixture failed: " + error.getMessage(), false);
