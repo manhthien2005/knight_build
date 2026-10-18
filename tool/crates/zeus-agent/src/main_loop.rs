@@ -679,7 +679,7 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
                     && !watchdog_recovered_ids.contains(&acc.id)
                     && !acc.game_loop_watchdog.replacement_pending()
                     && acc.desired_state == "running"
-                    && acc.process.as_ref().map(|p| !p.alive()).unwrap_or(true)
+                    && ordinary_replacement_is_safe(acc.process.as_ref())
                 {
                     eprintln!("[reconcile] account={} crash detected, restarting", acc.id);
                     acc.restarts += 1;
@@ -1497,6 +1497,35 @@ fn recover_logical_reconnect_watchdog(
 
 // ── reconcile desired state (B7.3) ────────────────────────────────────────────
 
+/// Restart admission shared by the ordinary 2s crash tick and central
+/// reconciliation. A dead JVM leader is NOT evidence that its process group
+/// (and any descendants using the same account home) has terminated.
+///
+/// pgid_alive() is conservative: uncertain /proc evidence returns true.
+/// Never attempt destructive cleanup here: when the leader has exited we
+/// cannot establish that a reused PGID is still owned by this account.
+/// Explicit Stop/retirement retain their existing group-stop semantics.
+#[cfg(unix)]
+fn ordinary_replacement_is_safe(process: Option<&crate::process_unix::Child>) -> bool {
+    let Some(child) = process else {
+        return true;
+    };
+    if child.alive() {
+        return false;
+    }
+    ordinary_replacement_liveness_allows_spawn(false, child.pgid_alive())
+}
+
+/// Pure admission policy used by the production Child probe and unit regressions.
+/// group_alive_or_uncertain must be false ONLY for a confirmed-dead group.
+#[cfg(unix)]
+fn ordinary_replacement_liveness_allows_spawn(
+    root_alive: bool,
+    group_alive_or_uncertain: bool,
+) -> bool {
+    !root_alive && !group_alive_or_uncertain
+}
+
 /// Reconcile trigger cause distinguishing ordinary reconciliation from watchdog replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileCause {
@@ -1527,6 +1556,16 @@ fn reconcile_desired_state_with_cause(
     let running = acc.process.as_ref().map(|p| p.alive()).unwrap_or(false);
     match acc.desired_state.as_str() {
         "running" if !running => {
+            // Revalidate the whole old process group before discarding its handle,
+            // touching account home/sidecars, or seeding credentials. A stale
+            // root PID cannot authorize a second JVM while descendants survive.
+            if !ordinary_replacement_is_safe(acc.process.as_ref()) {
+                eprintln!(
+                    "[reconcile] account={} old process group remains alive or indeterminate; retaining ownership and blocking replacement",
+                    acc.id
+                );
+                return;
+            }
             // Guard: ordinary callers cannot spawn while watchdog replacement is pending
             if acc.game_loop_watchdog.replacement_pending() && cause != ReconcileCause::WatchdogReplacement {
                 eprintln!(
@@ -3260,6 +3299,37 @@ fn read_meminfo_total_mb() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn risk02_red_01_old_leader_dead_group_alive_blocks_admission() {
+        assert!(!ordinary_replacement_liveness_allows_spawn(false, true));
+    }
+
+    #[test]
+    fn risk02_red_02_indeterminate_group_liveness_fails_closed() {
+        // pgid_alive() deliberately maps incomplete /proc evidence to true.
+        // No destructive cleanup and no restart are authorized by this gate.
+        assert!(!ordinary_replacement_liveness_allows_spawn(false, true));
+        assert!(!ordinary_replacement_liveness_allows_spawn(true, true));
+    }
+
+    #[test]
+    fn risk02_red_03_confirmed_dead_group_preserves_restart() {
+        assert!(ordinary_replacement_liveness_allows_spawn(false, false));
+        assert!(!ordinary_replacement_liveness_allows_spawn(true, false));
+    }
+
+    #[test]
+    fn risk02_red_04_account_local_admission_does_not_change_other_accounts() {
+        // Each account's decision uses only its own Child; there is no global
+        // kill/reap or shared process-group mutation in ordinary admission.
+        let account_a = (false, true);
+        let account_b = (false, false);
+        let a_allowed = ordinary_replacement_liveness_allows_spawn(account_a.0, account_a.1);
+        let b_allowed = ordinary_replacement_liveness_allows_spawn(account_b.0, account_b.1);
+        assert!(!a_allowed);
+        assert!(b_allowed);
+    }
 
     fn sample_v15_control_json() -> serde_json::Value {
         serde_json::json!({

@@ -1502,3 +1502,55 @@ fn test_shared_backoff_epoch_lifecycle() {
     wd.on_explicit_user_stop_or_retirement();
     assert_eq!(wd.long_backoff_epoch(), 0);
 }
+
+#[test]
+fn risk02_red_01_02_03_04_ordinary_crash_group_ownership_guard_is_wired() {
+    // Companion to the executable policy tests in main_loop::tests and the
+    // existing process_unix group-lifecycle fixture. Verify the decision
+    // is used at BOTH real spawn entry points, not merely defined in isolation.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let main_loop = std::fs::read_to_string(root.join("src/main_loop.rs"))
+        .expect("main_loop.rs must be available");
+
+    let crash_start = main_loop
+        .find("// Auto-restart crashed JVMs")
+        .expect("ordinary crashed JVM tick must exist");
+    let crash_end = main_loop[crash_start..]
+        .find("// ── tick 2 s: enhancement queue")
+        .expect("crash tick boundary must exist")
+        + crash_start;
+    let crash_tick = &main_loop[crash_start..crash_end];
+    assert!(
+        crash_tick.contains("ordinary_replacement_is_safe(acc.process.as_ref())"),
+        "ordinary crash tick must not count or restart a blocked old process group",
+    );
+
+    let reconcile_start = main_loop
+        .find("fn reconcile_desired_state_with_cause(")
+        .expect("central reconcile must exist");
+    let reconcile_end = main_loop[reconcile_start..]
+        .find("// ── command dispatch")
+        .expect("reconcile end must exist")
+        + reconcile_start;
+    let reconcile = &main_loop[reconcile_start..reconcile_end];
+    let guard = reconcile
+        .find("ordinary_replacement_is_safe(acc.process.as_ref())")
+        .expect("central reconcile must revalidate old process-group ownership");
+    let discard = reconcile
+        .find("acc.process = None;")
+        .expect("reconcile must contain old handle discard");
+    let sidecar_clear = reconcile
+        .find("clear_snapshot(&paths.home)")
+        .expect("reconcile must clear sidecars only on admitted start");
+    let credential_seed = reconcile
+        .find("seed_account_credentials(acc, identity)")
+        .expect("reconcile must seed credentials only after admission");
+    assert!(guard < discard && discard < sidecar_clear && guard < credential_seed);
+
+    // The ordinary crash path must not issue kill(-pgid) itself. Group
+    // termination requires separately verified process ownership.
+    assert!(
+        !crash_tick.contains("process_unix::stop("),
+        "ordinary tick must remain non-destructive"
+    );
+}
