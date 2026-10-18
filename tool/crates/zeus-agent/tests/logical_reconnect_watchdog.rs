@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use zeus_core::wire::{ReconnectState, ReconnectStatusSnapshot};
+use zeus_core::wire::{HealthScreen, ReconnectState, ReconnectStatusSnapshot};
 
 #[path = "../src/health_observer.rs"]
 #[allow(dead_code)]
@@ -57,6 +57,237 @@ fn make_healthy_health_event(seq: u64) -> HealthObservationEvent {
     }
 }
 
+
+fn evaluate_recent_progress_at_screen(
+    wd: &mut LogicalReconnectWatchdog,
+    state: ReconnectState,
+    health_screen: Option<HealthScreen>,
+    state_duration: Duration,
+    now: Instant,
+) -> LogicalWatchdogEvaluation {
+    let snap = make_valid_reconnect_snapshot(40, 4, state, true, true);
+    // Both publishers have recently advanced, so transport freshness alone
+    // must NOT be allowed to substitute for current native screen evidence.
+    let health_event = HealthObservationEvent::Progress {
+        sequence: 80,
+        screen_changed: None,
+        disconnect_changed: None,
+        dialog_changed: None,
+        condition_changed: false,
+    };
+    let reconnect_event = ReconnectObservationEvent::Progress {
+        sequence: 40,
+        episode_changed: None,
+        active_changed: None,
+        state_changed: None,
+        transitions_changed: None,
+        condition_changed: false,
+    };
+    wd.evaluate(
+        false,
+        false,
+        "running",
+        false,
+        true,
+        true,
+        1,
+        Some(1),
+        Some(1),
+        true,
+        HealthReadCondition::Healthy,
+        Some(Duration::from_millis(500)),
+        &health_event,
+        health_screen,
+        true,
+        ReconnectReadCondition::Healthy,
+        Some(Duration::from_millis(500)),
+        &reconnect_event,
+        Some(&snap),
+        Some(4),
+        Some(state_duration),
+        0,
+        now,
+    )
+}
+
+#[test]
+fn ar4_f01_red_01_loading_with_current_none_screen_fails_closed() {
+    let mut wd = LogicalReconnectWatchdog::new(0);
+    wd.on_successful_spawn(1, 0);
+    let now = Instant::now();
+    for poll in 0..2 {
+        let evaluation = evaluate_recent_progress_at_screen(
+            &mut wd,
+            ReconnectState::Loading,
+            Some(HealthScreen::None),
+            Duration::from_secs(185 + poll * 2),
+            now + Duration::from_secs(poll * 2),
+        );
+        assert_eq!(evaluation, LogicalWatchdogEvaluation::NoAction);
+        assert_eq!(wd.loading_confirmation_count(), 0);
+        assert_eq!(wd.world_settle_confirmation_count(), 0);
+    }
+}
+
+#[test]
+fn ar4_f01_red_02_world_settle_with_current_none_screen_fails_closed() {
+    let mut wd = LogicalReconnectWatchdog::new(0);
+    wd.on_successful_spawn(1, 0);
+    let now = Instant::now();
+    for poll in 0..2 {
+        let evaluation = evaluate_recent_progress_at_screen(
+            &mut wd,
+            ReconnectState::WorldSettle,
+            Some(HealthScreen::None),
+            Duration::from_secs(125 + poll * 2),
+            now + Duration::from_secs(poll * 2),
+        );
+        assert_eq!(evaluation, LogicalWatchdogEvaluation::NoAction);
+        assert_eq!(wd.loading_confirmation_count(), 0);
+        assert_eq!(wd.world_settle_confirmation_count(), 0);
+    }
+}
+
+#[test]
+fn ar4_f01_red_03_world_settle_incompatible_screens_discard_confirmation() {
+    let mut wd = LogicalReconnectWatchdog::new(0);
+    wd.on_successful_spawn(1, 0);
+    let now = Instant::now();
+    let threshold = Duration::from_millis(LOGICAL_WORLD_SETTLE_STALL_MS);
+    for screen in [
+        HealthScreen::Other,
+        HealthScreen::Login,
+        HealthScreen::Character,
+        HealthScreen::Server,
+        HealthScreen::None,
+    ] {
+        assert_eq!(
+            evaluate_recent_progress_at_screen(
+                &mut wd,
+                ReconnectState::WorldSettle,
+                Some(HealthScreen::World),
+                threshold,
+                now,
+            ),
+            LogicalWatchdogEvaluation::ArmingWorldSettleConfirmation { count: 1 },
+        );
+        assert_eq!(
+            evaluate_recent_progress_at_screen(
+                &mut wd,
+                ReconnectState::WorldSettle,
+                Some(screen),
+                threshold + Duration::from_secs(2),
+                now + Duration::from_secs(2),
+            ),
+            LogicalWatchdogEvaluation::NoAction,
+            "Contradictory health screen {screen:?} must cancel authorization",
+        );
+        assert_eq!(wd.world_settle_confirmation_count(), 0);
+        assert_eq!(wd.loading_confirmation_count(), 0);
+    }
+}
+
+#[test]
+fn ar4_f01_red_04_screen_recovers_with_fresh_two_poll_confirmation() {
+    let mut wd = LogicalReconnectWatchdog::new(0);
+    wd.on_successful_spawn(1, 0);
+    let now = Instant::now();
+    let threshold = Duration::from_millis(LOGICAL_LOADING_STALL_MS);
+    assert_eq!(
+        evaluate_recent_progress_at_screen(
+            &mut wd, ReconnectState::Loading, Some(HealthScreen::Other), threshold, now,
+        ),
+        LogicalWatchdogEvaluation::ArmingLoadingConfirmation { count: 1 },
+    );
+    assert_eq!(
+        evaluate_recent_progress_at_screen(
+            &mut wd,
+            ReconnectState::Loading,
+            Some(HealthScreen::None),
+            threshold + Duration::from_secs(2),
+            now + Duration::from_secs(2),
+        ),
+        LogicalWatchdogEvaluation::NoAction,
+    );
+    assert_eq!(wd.loading_confirmation_count(), 0);
+    assert_eq!(
+        evaluate_recent_progress_at_screen(
+            &mut wd,
+            ReconnectState::Loading,
+            Some(HealthScreen::Other),
+            threshold + Duration::from_secs(4),
+            now + Duration::from_secs(4),
+        ),
+        LogicalWatchdogEvaluation::ArmingLoadingConfirmation { count: 1 },
+    );
+    assert_eq!(
+        evaluate_recent_progress_at_screen(
+            &mut wd,
+            ReconnectState::Loading,
+            Some(HealthScreen::Other),
+            threshold + Duration::from_secs(6),
+            now + Duration::from_secs(6),
+        ),
+        LogicalWatchdogEvaluation::RecoveryRequested {
+            reason: LogicalStallRecoveryReason::ReconnectLoadingStall,
+        },
+    );
+}
+
+#[test]
+fn ar4_f01_missing_health_snapshot_and_loading_mismatch_fail_closed() {
+    let mut wd = LogicalReconnectWatchdog::new(0);
+    wd.on_successful_spawn(1, 0);
+    let now = Instant::now();
+    for screen in [
+        None,
+        Some(HealthScreen::None),
+        Some(HealthScreen::Login),
+        Some(HealthScreen::Server),
+        Some(HealthScreen::Character),
+        Some(HealthScreen::World),
+    ] {
+        assert_eq!(
+            evaluate_recent_progress_at_screen(
+                &mut wd, ReconnectState::Loading, screen, Duration::from_secs(185), now,
+            ),
+            LogicalWatchdogEvaluation::NoAction,
+            "Missing/incompatible Loading screen {screen:?} must be rejected",
+        );
+        assert_eq!(wd.loading_confirmation_count(), 0);
+        assert_eq!(wd.world_settle_confirmation_count(), 0);
+    }
+}
+
+#[test]
+fn ar4_f01_eligible_world_settle_still_recovers_after_two_polls() {
+    let mut wd = LogicalReconnectWatchdog::new(0);
+    wd.on_successful_spawn(1, 0);
+    let now = Instant::now();
+    assert_eq!(
+        evaluate_recent_progress_at_screen(
+            &mut wd,
+            ReconnectState::WorldSettle,
+            Some(HealthScreen::World),
+            Duration::from_secs(120),
+            now,
+        ),
+        LogicalWatchdogEvaluation::ArmingWorldSettleConfirmation { count: 1 },
+    );
+    assert_eq!(
+        evaluate_recent_progress_at_screen(
+            &mut wd,
+            ReconnectState::WorldSettle,
+            Some(HealthScreen::World),
+            Duration::from_secs(122),
+            now + Duration::from_secs(2),
+        ),
+        LogicalWatchdogEvaluation::RecoveryRequested {
+            reason: LogicalStallRecoveryReason::ReconnectWorldSettleStall,
+        },
+    );
+}
+
 #[test]
 fn test_loading_sub_threshold_never_authorizes() {
     let mut wd = LogicalReconnectWatchdog::new(0);
@@ -84,6 +315,7 @@ fn test_loading_sub_threshold_never_authorizes() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)), // health fresh <= 10s
         &health_event,
+        Some(HealthScreen::Other),
         true, // has_reconnect_baseline
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)), // reconnect fresh <= 10s
@@ -126,6 +358,7 @@ fn test_loading_at_threshold_arms_poll_1_then_poll_2_recovers() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -158,6 +391,7 @@ fn test_loading_at_threshold_arms_poll_1_then_poll_2_recovers() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -203,6 +437,7 @@ fn test_world_settle_threshold_arms_then_confirms() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::World),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -231,6 +466,7 @@ fn test_world_settle_threshold_arms_then_confirms() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::World),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -262,6 +498,7 @@ fn test_world_settle_threshold_arms_then_confirms() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::World),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -306,6 +543,7 @@ fn test_world_before_false_blocks_recovery() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -346,6 +584,7 @@ fn test_inactive_episode_blocks_recovery() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -385,6 +624,7 @@ fn test_state_change_resets_confirmation() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -416,6 +656,7 @@ fn test_state_change_resets_confirmation() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::World),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -456,6 +697,7 @@ fn test_episode_change_resets_confirmation() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -487,6 +729,7 @@ fn test_episode_change_resets_confirmation() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -528,6 +771,7 @@ fn test_transport_safety_stale_health_blocks_recovery() {
         HealthReadCondition::Healthy,
         Some(stale_health_age),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -569,6 +813,7 @@ fn test_transport_safety_stale_reconnect_blocks_recovery() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(stale_reconnect_age),
@@ -611,6 +856,7 @@ fn test_transport_safety_error_reads_block_recovery() {
         HealthReadCondition::MissingFile,
         Some(Duration::from_millis(1000)),
         &missing_health,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -642,6 +888,7 @@ fn test_transport_safety_error_reads_block_recovery() {
         HealthReadCondition::InvalidOrIo,
         Some(Duration::from_millis(1000)),
         &invalid_health,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -672,6 +919,7 @@ fn test_transport_safety_error_reads_block_recovery() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::MissingFile,
         Some(Duration::from_millis(1000)),
@@ -704,6 +952,7 @@ fn test_transport_safety_error_reads_block_recovery() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::SequenceRegression,
         Some(Duration::from_millis(1000)),
@@ -751,6 +1000,7 @@ fn test_unauthorized_states_never_recover() {
             HealthReadCondition::Healthy,
             Some(Duration::from_millis(1000)),
             &health_event,
+            Some(HealthScreen::Other),
             true,
             ReconnectReadCondition::Healthy,
             Some(Duration::from_millis(1000)),
@@ -795,6 +1045,7 @@ fn test_shared_backoff_epoch_change_resets_confirmation() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -827,6 +1078,7 @@ fn test_shared_backoff_epoch_change_resets_confirmation() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -860,6 +1112,7 @@ fn test_shared_backoff_epoch_change_resets_confirmation() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -910,6 +1163,7 @@ fn test_health_frozen_jvm_cannot_pass_r3c_fresh_health_authorization() {
         HealthReadCondition::Healthy,
         Some(frozen_health_age),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
@@ -953,6 +1207,7 @@ fn test_stale_snapshot_with_missing_read_cannot_authorize() {
         HealthReadCondition::Healthy,
         Some(Duration::from_millis(1000)),
         &health_event,
+        Some(HealthScreen::Other),
         true,
         ReconnectReadCondition::MissingFile,
         Some(Duration::from_millis(1000)),

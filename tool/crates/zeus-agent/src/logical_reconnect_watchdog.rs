@@ -11,7 +11,7 @@
 use crate::health_observer::{HealthObservationEvent, HealthReadCondition};
 use crate::reconnect_observer::{ReconnectObservationEvent, ReconnectReadCondition};
 use std::time::{Duration, Instant};
-use zeus_core::wire::{ReconnectState, ReconnectStatusSnapshot};
+use zeus_core::wire::{HealthScreen, ReconnectState, ReconnectStatusSnapshot};
 
 /// Supervisor policy thresholds for logical reconnect-stall detection and transport safety.
 pub const RECONNECT_TRANSPORT_FRESH_MS: u64 = 10000;
@@ -160,6 +160,7 @@ impl LogicalReconnectWatchdog {
         health_read_condition: HealthReadCondition,
         health_duration_since_progress: Option<Duration>,
         last_health_event: &HealthObservationEvent,
+        current_health_screen: Option<HealthScreen>,
         has_reconnect_baseline: bool,
         reconnect_read_condition: ReconnectReadCondition,
         reconnect_duration_since_progress: Option<Duration>,
@@ -254,6 +255,22 @@ impl LogicalReconnectWatchdog {
             && duration_in_current_state.is_some();
 
         if !episode_ok {
+            self.reset_confirmations();
+            return LogicalWatchdogEvaluation::NoAction;
+        }
+
+        // A fresh publisher sequence is not sufficient evidence of the current
+        // native screen. Java can keep publishing when its reconnect supervisor
+        // is paused (notably currentScreen == null). Corroborate the present
+        // health screen before allowing either logical stall to accumulate.
+        // HealthObserver belongs to the exact process generation already checked
+        // above; missing/invalid reads are rejected by the health transport gate.
+        let screen_matches_reconnect_state = matches!(
+            (snap.state, current_health_screen),
+            (ReconnectState::Loading, Some(HealthScreen::Other))
+                | (ReconnectState::WorldSettle, Some(HealthScreen::World))
+        );
+        if !screen_matches_reconnect_state {
             self.reset_confirmations();
             return LogicalWatchdogEvaluation::NoAction;
         }

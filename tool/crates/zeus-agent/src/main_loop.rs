@@ -536,6 +536,13 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
                         let rec_progress_duration = rec_obs.duration_since_last_progress(now);
                         let rec_duration = rec_obs.duration_in_current_state(now);
                         let last_rec_snap = rec_obs.last_valid_snapshot();
+                        // HealthObserver was reset for this exact JVM generation.
+                        // Its screen is only authoritative together with current
+                        // healthy read condition, freshness, and generation gates.
+                        let current_health_screen = acc
+                            .health_observer
+                            .last_valid_snapshot()
+                            .map(|snapshot| snapshot.screen);
                         let current_rec_ep = rec_obs.current_episode_id();
                         let shared_epoch = acc.game_loop_watchdog.long_backoff_epoch();
 
@@ -553,6 +560,7 @@ pub fn run(cfg: AgentConfig, access_token: String, secret_key_bytes: [u8; 32]) -
                             read_cond,
                             duration_since_progress,
                             &health_event,
+                            current_health_screen,
                             has_reconnect_baseline,
                             rec_read_cond,
                             rec_progress_duration,
