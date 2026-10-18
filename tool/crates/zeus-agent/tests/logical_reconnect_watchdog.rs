@@ -57,7 +57,6 @@ fn make_healthy_health_event(seq: u64) -> HealthObservationEvent {
     }
 }
 
-
 fn evaluate_recent_progress_at_screen(
     wd: &mut LogicalReconnectWatchdog,
     state: ReconnectState,
@@ -195,7 +194,11 @@ fn ar4_f01_red_04_screen_recovers_with_fresh_two_poll_confirmation() {
     let threshold = Duration::from_millis(LOGICAL_LOADING_STALL_MS);
     assert_eq!(
         evaluate_recent_progress_at_screen(
-            &mut wd, ReconnectState::Loading, Some(HealthScreen::Other), threshold, now,
+            &mut wd,
+            ReconnectState::Loading,
+            Some(HealthScreen::Other),
+            threshold,
+            now,
         ),
         LogicalWatchdogEvaluation::ArmingLoadingConfirmation { count: 1 },
     );
@@ -249,7 +252,11 @@ fn ar4_f01_missing_health_snapshot_and_loading_mismatch_fail_closed() {
     ] {
         assert_eq!(
             evaluate_recent_progress_at_screen(
-                &mut wd, ReconnectState::Loading, screen, Duration::from_secs(185), now,
+                &mut wd,
+                ReconnectState::Loading,
+                screen,
+                Duration::from_secs(185),
+                now,
             ),
             LogicalWatchdogEvaluation::NoAction,
             "Missing/incompatible Loading screen {screen:?} must be rejected",
